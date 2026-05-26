@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>SOKOLENOK · LUDIK — единый кабинет игрока CS2</title>
+  <meta name="description" content="Личный кабинет CS2: профиль, инвентарь с реальными ценами, статистика и новости — официальные данные Steam.">
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+</head>
+<body data-page="index">
+  <div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <main class="main">
+      <div class="eyebrow"><span class="dot"></span>Официальные данные Steam</div>
+
+      <div class="hero">
+        <!-- LEFT: title + cta + lookup -->
+        <div>
+          <h1>Единый кабинет<br>игрока <span class="green">CS2</span></h1>
+          <p class="hero-sub">
+            Профиль, инвентарь, цены, статистика и новости —<br>
+            вся важная информация в одном месте.<br>
+            <span class="accent">Честные данные.</span> Без лишнего.
+          </p>
+
+          <a href="/auth/steam" class="steam-btn">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Zm-4.46 18.06-1.47-.6a2.56 2.56 0 0 0 1.34 1.34 2.58 2.58 0 0 0 3.36-1.38 2.55 2.55 0 0 0 0-1.95 2.55 2.55 0 0 0-1.38-1.4 2.6 2.6 0 0 0-1.94-.04L7 14.62a1.93 1.93 0 0 1 2.51 1.05 1.94 1.94 0 0 1-1.97 2.39Zm12-5.7a3.03 3.03 0 1 1 0-6.07 3.03 3.03 0 0 1 0 6.07Zm0-.75a2.28 2.28 0 1 0 0-4.56 2.28 2.28 0 0 0 0 4.56Z"/>
+            </svg>
+            <span class="label">Войти через Steam</span>
+            <svg class="arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </a>
+
+          <div class="or-divider">или</div>
+
+          <form id="lookupForm" autocomplete="off">
+            <div class="lookup-row">
+              <input id="lookupInput" class="input" placeholder="Введите ссылку на профиль Steam или Steam ID" required>
+              <button type="submit" class="btn btn-primary">Открыть профиль</button>
+            </div>
+            <div class="lookup-hint">Пример: https://steamcommunity.com/id/vanity или 76561199000000000</div>
+          </form>
+        </div>
+
+        <!-- RIGHT: 2x2 grid of demo widget cards -->
+        <div class="hero-side">
+
+          <!-- 1. Profile preview -->
+          <div class="card prof-card">
+            <div class="card-eyebrow">Профиль игрока</div>
+            <div class="pc-top">
+              <div class="pc-avatar" aria-hidden="true"><img src="/assets/avatar-sokolenok.png" alt="SOKOLENOK"></div>
+              <div style="min-width:0;flex:1;">
+                <div class="pc-name">SOKOLENOK
+                  <span class="verified" title="Verified">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  </span>
+                </div>
+                <div class="pc-sub">
+                  Steam ID: 76561198000000777
+                  <button type="button" title="Скопировать">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="pc-badges">
+              <span class="pill green">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                Steam User Since 2014
+              </span>
+              <span class="pill purple">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+                Премьер-режим
+              </span>
+            </div>
+            <div class="pc-stats">
+              <div class="pc-stat">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>K/D</div>
+                <div class="val">1,13</div>
+                <div class="desc">Хорошо</div>
+              </div>
+              <div class="pc-stat">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>Винрейт</div>
+                <div class="val">45.7%</div>
+                <div class="desc dim">Средний</div>
+              </div>
+              <div class="pc-stat">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Матчей</div>
+                <div class="val">1 234</div>
+                <div class="desc dim">всего</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2. Inventory preview -->
+          <div class="card inv-prev">
+            <div class="ip-top">
+              <div class="card-eyebrow" style="margin-bottom:0;">Инвентарь</div>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="ip-total-label">Общая стоимость</div>
+            <div class="ip-total">122 633 ₽</div>
+            <div class="ip-count">45 предметов</div>
+            <div class="ip-grid">
+              <div class="ip-item"><img src="/assets/weapons/weapon_ak47.png" alt=""><span class="rb r"></span></div>
+              <div class="ip-item"><img src="/assets/weapons/weapon_knife_karambit.png" alt=""><span class="rb p"></span></div>
+              <div class="ip-item"><img src="/assets/weapons/weapon_awp.png" alt=""><span class="rb y"></span></div>
+              <div class="ip-item"><img src="/assets/weapons/weapon_deagle.png" alt=""><span class="rb g"></span></div>
+            </div>
+            <a class="ip-foot" href="/inventory">
+              Перейти к инвентарю
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </a>
+          </div>
+
+          <!-- 3. Stats preview -->
+          <div class="card stats-prev">
+            <div class="card-eyebrow">Статистика</div>
+            <div class="st-tabs">
+              <div class="tab active">Общая</div>
+              <div class="tab">Соревнов.</div>
+              <div class="tab">Премьер</div>
+            </div>
+            <div class="st-grid">
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>K/D</div>
+                <div class="val">1,13</div>
+              </div>
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>Винрейт</div>
+                <div class="val">45.7%</div>
+              </div>
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>ADR</div>
+                <div class="val">84,7</div>
+              </div>
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Матчей</div>
+                <div class="val">1 234</div>
+              </div>
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/></svg>HS%</div>
+                <div class="val">32,1%</div>
+              </div>
+              <div class="st-item">
+                <div class="lbl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>MVP</div>
+                <div class="val">312</div>
+              </div>
+            </div>
+            <div class="st-chart">
+              <svg viewBox="0 0 200 60" preserveAspectRatio="none" aria-hidden="true">
+                <defs>
+                  <linearGradient id="stch" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#4ade80" stop-opacity="0.35"/>
+                    <stop offset="100%" stop-color="#4ade80" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <path d="M0 45 L20 40 L40 42 L60 32 L80 36 L100 26 L120 28 L140 18 L160 22 L180 12 L200 14 L200 60 L0 60 Z" fill="url(#stch)"/>
+                <path d="M0 45 L20 40 L40 42 L60 32 L80 36 L100 26 L120 28 L140 18 L160 22 L180 12 L200 14" fill="none" stroke="#4ade80" stroke-width="1.6" stroke-linejoin="round"/>
+                <g fill="#4ade80"><circle cx="20" cy="40" r="1.5"/><circle cx="60" cy="32" r="1.5"/><circle cx="100" cy="26" r="1.5"/><circle cx="140" cy="18" r="1.5"/><circle cx="180" cy="12" r="1.5"/></g>
+              </svg>
+            </div>
+          </div>
+
+          <!-- 4. News preview -->
+          <div class="card news-prev">
+            <div class="card-eyebrow">Последние новости</div>
+            <div class="np-item">
+              <div class="np-thumb">📰</div>
+              <div style="min-width:0;flex:1;">
+                <div class="np-date">05 мая</div>
+                <div class="np-title">Обновление Counter-Strike 2</div>
+                <div class="np-desc">Улучшения производительности, корректировки карт и многое другое.</div>
+              </div>
+            </div>
+            <div class="np-item">
+              <div class="np-thumb">🏺</div>
+              <div style="min-width:0;flex:1;">
+                <div class="np-date">28 апр</div>
+                <div class="np-title">Новая коллекция Anubis</div>
+                <div class="np-desc">В игру добавлены новые скины из коллекции Anubis.</div>
+              </div>
+            </div>
+            <a class="np-foot" href="#">
+              Читать все новости
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </a>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="feat-row">
+        <div class="feat">
+          <div class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+          <div>
+            <div class="feat-title">Честные данные</div>
+            <div class="feat-desc">Только официальные данные Steam и матчмейкинга.</div>
+          </div>
+        </div>
+        <div class="feat">
+          <div class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></div>
+          <div>
+            <div class="feat-title">Актуальные цены</div>
+            <div class="feat-desc">Реальные цены на скины и предметы в CS2.</div>
+          </div>
+        </div>
+        <div class="feat">
+          <div class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
+          <div>
+            <div class="feat-title">Глубокая статистика</div>
+            <div class="feat-desc">Матчи, K/D, винрейт, графики и динамика.</div>
+          </div>
+        </div>
+        <div class="feat">
+          <div class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>
+          <div>
+            <div class="feat-title">Новости CS2</div>
+            <div class="feat-desc">Обновления, патчи и важные события.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== Landing content sections (anchor targets for sidebar nav) ===== -->
+      <section id="about" class="lp-section">
+        <div class="eyebrow"><span class="dot"></span>О продукте</div>
+        <h2 class="lp-h2">Один кабинет для всей твоей CS2-жизни</h2>
+        <p class="lp-lead">SOKOLENOK собирает воедино то, что обычно разбросано по десятку сайтов: профиль и статистику Steam, аналитику матчей Faceit, стоимость инвентаря и проверку любого игрока на честность — всё в одном тёмном, быстром интерфейсе на русском.</p>
+        <div class="lp-cards">
+          <div class="lp-card">
+            <div class="lp-card-num">01</div>
+            <div class="lp-card-title">Вошёл через Steam</div>
+            <div class="lp-card-desc">Безопасный OpenID-вход. Мы не просим пароль и ничего не меняем в аккаунте — только читаем публичные данные.</div>
+          </div>
+          <div class="lp-card">
+            <div class="lp-card-num">02</div>
+            <div class="lp-card-title">Получил полную картину</div>
+            <div class="lp-card-desc">Статистика, инвентарь с реальными ценами, Faceit-аналитика и история матчей — сразу на дашборде.</div>
+          </div>
+          <div class="lp-card">
+            <div class="lp-card-num">03</div>
+            <div class="lp-card-title">Проверил любого</div>
+            <div class="lp-card-desc">Вставь SteamID или ссылку — и увидишь профиль соперника с автоматическими флагами подозрительности.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="lp-section">
+        <div class="eyebrow"><span class="dot"></span>Возможности</div>
+        <h2 class="lp-h2">Что внутри</h2>
+        <div class="lp-feature-grid">
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
+            <div class="lp-feature-title">Статистика Steam + Faceit</div>
+            <div class="lp-feature-desc">K/D, винрейт, HS%, ADR, любимые карты и оружие. Faceit-уровень, ELO и история матчей с детальными показателями.</div>
+          </div>
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></div>
+            <div class="lp-feature-title">Инвентарь и цены</div>
+            <div class="lp-feature-desc">Полная оценка инвентаря в рублях, долларах или евро. Категории, топ-предметы, аналитика портфеля.</div>
+          </div>
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+            <div class="lp-feature-title">Проверка на читера</div>
+            <div class="lp-feature-desc">VAC и game-баны, возраст аккаунта, аномалии статистики, скрытые данные — система сама подсветит красные флаги.</div>
+          </div>
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+            <div class="lp-feature-title">С кем играл</div>
+            <div class="lp-feature-desc">Постоянные тиммейты, винрейт с ними и быстрый переход к проверке каждого.</div>
+          </div>
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>
+            <div class="lp-feature-title">Новости CS2</div>
+            <div class="lp-feature-desc">Свежие обновления и патчи Counter-Strike 2 прямо на дашборде.</div>
+          </div>
+          <div class="lp-feature">
+            <div class="lp-feature-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></div>
+            <div class="lp-feature-title">Связь с внешними сервисами</div>
+            <div class="lp-feature-desc">Быстрые ссылки на CSStats, Leetify и Faceit прямо со страницы проверки игрока.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="security" class="lp-section">
+        <div class="eyebrow"><span class="dot"></span>Безопасность</div>
+        <h2 class="lp-h2">Только чтение. Никакого риска</h2>
+        <div class="lp-sec-grid">
+          <div class="lp-sec-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+            <div>
+              <div class="lp-sec-title">Вход через Steam OpenID</div>
+              <div class="lp-sec-desc">Мы никогда не видим твой пароль. Авторизация происходит на стороне Steam — мы получаем только публичный SteamID.</div>
+            </div>
+          </div>
+          <div class="lp-sec-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/></svg>
+            <div>
+              <div class="lp-sec-title">Доступ только на чтение</div>
+              <div class="lp-sec-desc">Сервис не совершает никаких действий с аккаунтом: не торгует, не отправляет заявки, ничего не меняет.</div>
+            </div>
+          </div>
+          <div class="lp-sec-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <div>
+              <div class="lp-sec-title">Публичные данные</div>
+              <div class="lp-sec-desc">Используются только официальные открытые API Steam и Faceit. Если профиль закрыт — мы честно об этом скажем.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="who" class="lp-section">
+        <div class="eyebrow"><span class="dot"></span>Для кого</div>
+        <h2 class="lp-h2">Кому это пригодится</h2>
+        <div class="lp-cards">
+          <div class="lp-card">
+            <div class="lp-card-title">Тем, кто гриндит ранг</div>
+            <div class="lp-card-desc">Следи за прогрессом, находи слабые карты и подтягивай показатели от матча к матчу.</div>
+          </div>
+          <div class="lp-card">
+            <div class="lp-card-title">Тем, кто ловит читеров</div>
+            <div class="lp-card-desc">Проверяй подозрительных соперников и тиммейтов за пару секунд прямо во время игры.</div>
+          </div>
+          <div class="lp-card">
+            <div class="lp-card-title">Тем, кто копит скины</div>
+            <div class="lp-card-desc">Держи руку на пульсе стоимости инвентаря и следи за динамикой цен.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="faq" class="lp-section">
+        <div class="eyebrow"><span class="dot"></span>FAQ</div>
+        <h2 class="lp-h2">Частые вопросы</h2>
+        <div class="lp-faq">
+          <details class="lp-faq-item">
+            <summary>Это безопасно? Вы не угоните аккаунт?</summary>
+            <p>Вход идёт через официальный Steam OpenID — мы не получаем твой пароль и не можем совершать действия с аккаунтом. Доступ только на чтение публичных данных.</p>
+          </details>
+          <details class="lp-faq-item">
+            <summary>Нужен ли Faceit, чтобы пользоваться?</summary>
+            <p>Нет. Базовая статистика и инвентарь работают только на данных Steam. Faceit добавляет детальную аналитику матчей, если у тебя есть привязанный аккаунт.</p>
+          </details>
+          <details class="lp-faq-item">
+            <summary>Почему статистика Steam «за всё время»?</summary>
+            <p>Steam отдаёт только суммарные показатели за всю историю CS (CS:GO + CS2). Детальная статистика по конкретным матчам берётся из Faceit.</p>
+          </details>
+          <details class="lp-faq-item">
+            <summary>Можно проверить чужой аккаунт?</summary>
+            <p>Да. Вставь SteamID или ссылку на профиль на странице проверки — увидишь публичную статистику, инвентарь, баны и автоматические флаги подозрительности.</p>
+          </details>
+          <details class="lp-faq-item">
+            <summary>Сколько это стоит?</summary>
+            <p>На текущем этапе — бесплатно. Это проект для CS2-комьюнити.</p>
+          </details>
+        </div>
+      </section>
+
+      <div class="scroll-down" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <footer class="site-footer">
+        <div class="site-footer-links">
+          <a href="/privacy">Политика конфиденциальности</a>
+          <a href="/terms">Пользовательское соглашение</a>
+          <a href="/rules">Правила сообщества</a>
+          <a href="mailto:sokolenokpro@list.ru">Связаться</a>
+        </div>
+        <div class="site-footer-legal">
+          SOKOLENOK / LUDIK — независимый проект. Не аффилирован с Valve Corporation и FACEIT Ltd.
+          Counter-Strike, CS2, Steam и Valve — товарные знаки Valve Corporation. FACEIT — товарный знак FACEIT Ltd.
+          Все товарные знаки и игровые материалы принадлежат их владельцам.
+          © 2026 Соколов К. Д.
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <div id="toast-host" class="toast-host"></div>
+  <script src="/app.js?v=1779803314"></script>
+</body>
+</html>

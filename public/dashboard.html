@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Матчи и аналитика · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+</head>
+<body data-page="dashboard">
+<div class="layout">
+
+  <aside id="sidebar" class="sidebar"></aside>
+
+  <main class="main">
+    <div class="main-top"></div>
+
+    <div class="eyebrow"><span class="dot"></span>Официальные данные Steam</div>
+
+    <h1 class="page-title" id="dash-title">Матчи и аналитика</h1>
+    <p class="page-sub" id="dash-sub" style="margin-bottom:28px">Детальная статистика всех ваших матчей, анализ игры<br>и общая статистика из Steam.</p>
+
+    <!-- Two-column layout: main analytics + right rail (tracking + news) -->
+    <div class="dash-layout">
+
+      <div class="dash-main">
+        <!-- KPI row — JS replaces -->
+        <div class="kpis" id="dash-kpis">
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+          <div class="kpi"><div class="kpi-top"><span class="kpi-name">Загрузка…</span></div><div class="kpi-val">—</div></div>
+        </div>
+
+        <!-- Faceit section — JS replaces -->
+        <div id="dash-faceit">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Проверяем Faceit…</div></div>
+        </div>
+
+        <!-- Row 1: matches | maps | weapons -->
+        <div class="three-col" id="dash-row1">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем матчи…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем карты…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем оружие…</div></div>
+        </div>
+
+        <!-- Row 2: players | insights | extras -->
+        <div class="three-col" id="dash-row2">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем игроков…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Считаем инсайты…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем доп. статистику…</div></div>
+        </div>
+      </div>
+
+      <aside class="dash-rail">
+        <!-- Tracking CTA -->
+        <div class="tracking-cta" id="dash-tracking-cta">
+          <div class="tc-top">
+            <span class="tc-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
+            </span>
+            <div>
+              <div class="tc-title">Трекинг матчей</div>
+              <div class="tc-desc">Сейчас показаны суммарные данные из Steam. История матчей — в разработке.</div>
+            </div>
+          </div>
+          <a class="btn btn-sm" href="/settings">Настройки</a>
+        </div>
+
+        <!-- Lookup other player + recent history -->
+        <div class="rail-lookup" id="dash-lookup">
+          <div class="rail-h">
+            <h3>Проверить аккаунт</h3>
+          </div>
+          <form class="rail-lookup-form" id="dashLookupForm" autocomplete="off">
+            <input id="dashLookupInput" class="input rail-input" placeholder="SteamID или ссылка" required>
+            <button class="btn btn-primary btn-sm" type="submit">Открыть</button>
+          </form>
+          <div class="rail-lookup-hint" id="dash-lookup-hint">
+            Можно вставить vanity-ссылку или 17-значный SteamID
+          </div>
+          <div class="rail-recent" id="dash-recent"></div>
+        </div>
+
+        <!-- Latest news (3 items) — JS replaces -->
+        <div id="dash-news">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем новости…</div></div>
+        </div>
+      </aside>
+
+    </div>
+
+  </main>
+</div>
+
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1779803314"></script>
+</body>
+</html>

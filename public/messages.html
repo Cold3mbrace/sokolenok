@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Сообщения · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+</head>
+<body data-page="messages">
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="main main-messages">
+    <div class="main-top"></div>
+
+    <div class="msgr" id="msgr">
+      <!-- Left: conversations + friends -->
+      <div class="msgr-left">
+        <div class="msgr-left-h">
+          <div class="msgr-tabs" id="msgr-tabs">
+            <button class="msgr-tab active" data-tab="chats" type="button">Чаты</button>
+            <button class="msgr-tab" data-tab="friends" type="button">Друзья</button>
+          </div>
+        </div>
+        <div class="msgr-list" id="msgr-list">
+          <div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загрузка…</div>
+        </div>
+      </div>
+
+      <!-- Right: active conversation -->
+      <div class="msgr-right" id="msgr-right">
+        <div class="msgr-empty" id="msgr-empty">
+          <div class="msgr-empty-ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <div class="msgr-empty-title">Выберите диалог</div>
+          <div class="msgr-empty-sub">Откройте чат слева или начните новый со страницы профиля игрока.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1779803314"></script>
+</body>
+</html>

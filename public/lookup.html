@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Профиль игрока · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+  <style>
+    .lk-grid {
+      display: grid;
+      grid-template-columns: 360px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 1100px) { .lk-grid { grid-template-columns: 1fr; } }
+    .lk-right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .lk-three { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 880px) { .lk-three { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body data-page="lookup">
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+
+  <main class="main">
+    <div class="main-top"></div>
+
+    <a href="/" class="back-link" id="lk-back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Назад на главную
+    </a>
+
+    <div class="eyebrow"><span class="dot"></span>Просмотр публичного профиля</div>
+
+    <h1 class="page-title" id="lk-title">Профиль игрока</h1>
+    <p class="page-sub">Публичные данные Steam + Faceit. Что нужно для быстрой проверки в катке.</p>
+
+    <!-- Trust banner — JS fills with red/yellow/green summary -->
+    <div id="lk-trust"></div>
+
+    <div class="lk-grid">
+      <!-- LEFT: profile card + reputation -->
+      <div class="lk-left">
+        <div id="lk-profile">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем профиль…</div></div>
+        </div>
+        <!-- Social actions (friend / message / block) -->
+        <div id="lk-social" style="margin-top:16px"></div>
+        <!-- Reputation block (under profile) -->
+        <div id="lk-reputation" style="margin-top:16px"></div>
+      </div>
+
+      <!-- RIGHT: stats + inventory KPIs + tables -->
+      <div class="lk-right">
+        <div id="lk-stats-kpis">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем статистику Steam…</div></div>
+        </div>
+        <div id="lk-inv-kpis">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем инвентарь…</div></div>
+        </div>
+        <div class="lk-three" id="lk-tables">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Карты…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Оружие…</div></div>
+        </div>
+        <div id="lk-top">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Топ-предметы…</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Full-width Faceit section below the grid -->
+    <div id="lk-faceit" style="margin-top:16px"></div>
+
+    <!-- Full-width Leetify section (only renders if data available) -->
+    <div id="lk-leetify" style="margin-top:16px"></div>
+
+  </main>
+</div>
+
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1779803314"></script>
+</body>
+</html>

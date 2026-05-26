@@ -1,0 +1,20 @@
+<svg width="220" height="110" viewBox="0 0 220 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="30" y1="8" x2="110" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6BFF8A"/>
+      <stop offset="1" stop-color="#22D15B"/>
+    </linearGradient>
+    <filter id="glow" x="0" y="0" width="160" height="80" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g transform="translate(12 6)">
+    <g filter="url(#glow)">
+      <path d="M54 35C42 28 31 22 17 18C10 16 6 16 0 17C6 11 12 8 18 6C28 3 40 6 54 18C68 6 80 3 90 6C96 8 102 11 108 17C102 16 98 16 91 18C77 22 66 28 54 35Z" fill="url(#g)"/>
+      <path d="M54 38L66 63H57L54 55L51 63H42L54 38Z" fill="url(#g)"/>
+    </g>
+    <text x="0" y="92" fill="#F5FFF7" font-family="Inter,Arial,sans-serif" font-size="28" font-weight="900" letter-spacing="-0.5">SOKOLENOK</text>
+    <text x="73" y="108" fill="#37E768" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="800">by LUDIK</text>
+  </g>
+</svg>

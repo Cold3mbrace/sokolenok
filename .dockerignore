@@ -1,0 +1,10 @@
+.git
+.gitignore
+node_modules
+.data
+*.log
+.DS_Store
+Dockerfile
+docker-compose.yml
+deploy
+*.zip

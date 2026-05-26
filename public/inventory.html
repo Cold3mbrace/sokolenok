@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Инвентарь и цены · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+  <style>
+    .inv-grid-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 16px;
+    }
+    .inv-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .inv-lists-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 1280px) {
+      .inv-grid-layout { grid-template-columns: 1fr; }
+      .inv-lists-row { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 760px) {
+      .inv-lists-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body data-page="inventory">
+<div class="layout">
+
+  <aside id="sidebar" class="sidebar"></aside>
+
+  <main class="main">
+    <div class="main-top"></div>
+
+    <a href="/dashboard" class="back-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Назад в дашборд
+    </a>
+
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:6px">
+      <div>
+        <h1 class="page-title" style="margin-bottom:6px">Инвентарь и цены</h1>
+        <p class="page-sub" style="margin-bottom:0">Полная информация о ваших предметах CS2, их стоимости и динамике цен.</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="inv-freshness" class="inv-freshness"></span>
+        <button class="btn btn-ghost btn-sm" id="inv-refresh" type="button" style="white-space:nowrap">
+          <span style="margin-right:6px;display:inline-flex"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span>
+          Обновить
+        </button>
+      </div>
+    </div>
+
+    <!-- KPI row — JS replaces -->
+    <div class="kpis k4" id="inv-kpis">
+      <div class="kpi"><div class="card-eyebrow">Общая стоимость</div><div class="loading-inline"><div class="spinner sm"></div>Загружаем…</div></div>
+      <div class="kpi"><div class="card-eyebrow">Предметов с ценой</div><div class="kpi-val">—</div></div>
+      <div class="kpi"><div class="card-eyebrow">Валюта</div><div class="kpi-val">—</div></div>
+      <div class="kpi"><div class="card-eyebrow">Источники цен</div><div class="kpi-val">—</div></div>
+    </div>
+
+    <!-- Category tabs — JS replaces -->
+    <div class="cat-tabs" id="inv-cats">
+      <button class="cat-tab active">Все предметы <span class="cnt">—</span></button>
+    </div>
+
+    <div class="inv-grid-layout">
+      <div class="inv-main">
+
+        <!-- Lists row: chart + top + risers + fallers — JS replaces -->
+        <div class="inv-lists-row" id="inv-lists">
+          <div class="card chart-card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем динамику…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Топ предметов…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Лидеры роста…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Лидеры падения…</div></div>
+        </div>
+
+        <!-- Items table — JS replaces -->
+        <div id="inv-items-wrap">
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем предметы из Steam…</div></div>
+        </div>
+      </div>
+
+      <!-- Analytics sidebar — JS replaces -->
+      <div class="card analytics" id="inv-analytics">
+        <div class="card-eyebrow">Аналитика инвентаря</div>
+        <div class="loading-inline"><div class="spinner sm"></div>Считаем аналитику…</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1779803314"></script>
+</body>
+</html>

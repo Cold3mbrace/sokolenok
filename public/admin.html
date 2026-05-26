@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Админ-панель · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1779803314">
+</head>
+<body data-page="admin">
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="main" style="max-width:1100px">
+    <div class="main-top"></div>
+
+    <div class="eyebrow"><span class="dot"></span>Администрирование</div>
+    <h1 class="page-title">Админ-панель</h1>
+
+    <div id="admin-gate">
+      <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Проверка доступа…</div></div>
+    </div>
+
+    <div id="admin-body" style="display:none">
+      <!-- Stats -->
+      <div class="kpis k4" id="admin-stats"></div>
+
+      <!-- Tabs -->
+      <div class="feed-tabs" id="admin-tabs" style="margin-top:20px">
+        <button class="tab active" data-tab="reports" type="button">Жалобы</button>
+        <button class="tab" data-tab="bans" type="button">Баны</button>
+        <button class="tab" data-tab="publics" type="button">Паблики</button>
+        <button class="tab" data-tab="posts" type="button">Посты</button>
+        <button class="tab" data-tab="tools" type="button">Инструменты</button>
+      </div>
+
+      <div id="admin-panel" style="margin-top:16px"></div>
+    </div>
+  </main>
+</div>
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1779803314"></script>
+</body>
+</html>

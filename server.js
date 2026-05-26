@@ -1,0 +1,2119 @@
+// server.js
+// SOKOLENOK / LUDIK v4.4 — clean rewrite.
+// Только Node.js stdlib. Никаких npm зависимостей.
+//
+// Endpoints:
+//   GET  /                       → public/index.html (landing)
+//   GET  /dashboard              → public/dashboard.html
+//   GET  /inventory              → public/inventory.html
+//   GET  /lookup                 → public/lookup.html
+//   GET  /settings               → public/settings.html
+//
+//   GET  /auth/steam             → Steam OpenID redirect
+//   GET  /auth/steam/callback    → OpenID verify, set session cookie, redirect to /dashboard
+//   POST /auth/logout            → clear session, redirect /
+//
+//   GET  /api/me                 → текущая сессия + профиль
+//   GET  /api/health             → версия + backend storage
+//   GET  /api/resolve?target=... → Steam URL/ID → SteamID64
+//   GET  /api/profile/:steamid   → публичный профиль (XML или PlayerSummaries)
+//   GET  /api/inventory/:steamid → инвентарь + цены + сохранение snapshot
+//   GET  /api/inventory/history?steamid=... → история snapshots
+//   GET  /api/news               → официальные новости CS2 (Steam News API)
+//   GET  /api/stats/:steamid     → GetUserStatsForGame (требует STEAM_API_KEY)
+//   GET  /api/faceit/:steamid    → Faceit профиль + lifetime + last matches (требует FACEIT_API_KEY)
+//   GET  /api/prices?names=...   → текущие цены для items (cached)
+//   GET  /api/price-history?name=...&currency=...&days=... → история цен
+//   GET  /api/watchlist          → мой watchlist (требует session)
+//   POST /api/watchlist          → добавить в watchlist
+//   DELETE /api/watchlist        → удалить из watchlist
+//   GET  /api/settings           → мои настройки
+//   POST /api/settings           → обновить настройки
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const db = require('./storage/db');
+
+// ---------- config ----------
+const APP_VERSION = 'v44.0.0';
+const PORT = Number(process.env.PORT || 4173);
+const ROOT = __dirname;
+const PUBLIC_DIR = path.join(ROOT, 'public');
+const DATA_DIR = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(ROOT, '.data');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
+const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
+// Mark session cookie Secure over HTTPS. Explicit COOKIE_SECURE=1/0 wins; otherwise
+// inferred from an https:// BASE_URL.
+const COOKIE_SECURE = process.env.COOKIE_SECURE != null
+  ? (process.env.COOKIE_SECURE === '1' || process.env.COOKIE_SECURE === 'true')
+  : /^https:\/\//i.test(process.env.BASE_URL || '');
+
+// Admin access is granted by SteamID (NOT a password). Set ADMIN_STEAMIDS to a
+// comma-separated list of 64-bit SteamIDs. These accounts see the admin panel.
+const ADMIN_STEAMIDS = new Set(
+  (process.env.ADMIN_STEAMIDS || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+function isAdminSteamId(steamid) {
+  return !!steamid && ADMIN_STEAMIDS.has(steamid);
+}
+
+// ---------- message encryption at rest ----------
+// DMs are stored encrypted with AES-256-GCM. The key is derived from MESSAGE_SECRET
+// (or, if unset, from a file in the data dir so it's stable across restarts).
+// This protects messages if the DB is read directly; it is NOT end-to-end.
+let _msgKey = null;
+function messageKey() {
+  if (_msgKey) return _msgKey;
+  let secret = process.env.MESSAGE_SECRET || '';
+  if (!secret) {
+    // Derive/persist a random secret in the data dir so restarts keep the same key.
+    try {
+      const p = path.join(process.env.SOKOLENOK_DATA_DIR || './.data', '.msgsecret');
+      if (fs.existsSync(p)) {
+        secret = fs.readFileSync(p, 'utf8').trim();
+      } else {
+        secret = crypto.randomBytes(48).toString('hex');
+        try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch (_) {}
+        fs.writeFileSync(p, secret, { mode: 0o600 });
+      }
+    } catch (_) {
+      secret = 'sokolenok-insecure-fallback-key-change-me';
+    }
+  }
+  _msgKey = crypto.createHash('sha256').update(secret).digest(); // 32 bytes
+  return _msgKey;
+}
+
+function encryptMessage(plaintext) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', messageKey(), iv);
+  const enc = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // store as iv.tag.ciphertext, base64
+  return [iv.toString('base64'), tag.toString('base64'), enc.toString('base64')].join('.');
+}
+
+function decryptMessage(blob) {
+  try {
+    const [ivB, tagB, dataB] = String(blob).split('.');
+    const iv = Buffer.from(ivB, 'base64');
+    const tag = Buffer.from(tagB, 'base64');
+    const data = Buffer.from(dataB, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', messageKey(), iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  } catch (_) {
+    return '[не удалось расшифровать]';
+  }
+}
+const SESSION_COOKIE = 'sok_session';
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const PRICE_CACHE_TTL_MS = Number(process.env.PRICE_CACHE_TTL_MS || 1000 * 60 * 60 * 6);
+const PRICE_FETCH_LIMIT = Number(process.env.PRICE_FETCH_LIMIT || 80);
+const INVENTORY_CONCURRENCY = 3;
+const FETCH_TIMEOUT_MS = 8000;
+
+const CURRENCIES = {
+  RUB: { steam: '5', symbol: '₽', code: 'RUB', frac: 0 },
+  USD: { steam: '1', symbol: '$', code: 'USD', frac: 2 },
+  EUR: { steam: '3', symbol: '€', code: 'EUR', frac: 2 }
+};
+
+// ---------- mime ----------
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8'
+};
+
+// ---------- helpers ----------
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store'
+  });
+  res.end(body);
+}
+
+function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
+  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+  res.end(text);
+}
+
+function redirect(res, location, status = 302) {
+  res.writeHead(status, { Location: location });
+  res.end();
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const out = {};
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = decodeURIComponent(part.slice(i + 1).trim());
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+function setSessionCookie(res, token) {
+  const attrs = [
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`
+  ];
+  // Mark cookie Secure when serving over HTTPS (behind a TLS-terminating proxy).
+  // Controlled by COOKIE_SECURE=1 or inferred from an https BASE_URL.
+  if (COOKIE_SECURE) attrs.push('Secure');
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function clearSessionCookie(res) {
+  const attrs = [`${SESSION_COOKIE}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'];
+  if (COOKIE_SECURE) attrs.push('Secure');
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function getBaseUrl(req) {
+  if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/, '');
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  const proto = req.headers['x-forwarded-proto']
+    || (host.startsWith('localhost') || host.startsWith('127.') ? 'http' : 'https');
+  return `${proto}://${host}`;
+}
+
+function readBody(req, maxBytes = 256 * 1024) {
+  return new Promise((resolve, reject) => {
+    let len = 0; const chunks = [];
+    req.on('data', c => {
+      len += c.length;
+      if (len > maxBytes) { req.destroy(); reject(new Error('body too large')); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function readJsonBody(req) {
+  try { const t = await readBody(req); return t ? JSON.parse(t) : {}; }
+  catch (_) { return {}; }
+}
+
+// Read the full request body as a Buffer (for file uploads), with a hard size cap.
+function readBodyBuffer(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    let len = 0; const chunks = [];
+    req.on('data', c => {
+      len += c.length;
+      if (len > maxBytes) { req.destroy(); reject(new Error('too-large')); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// Minimal multipart/form-data parser — extracts the first file part.
+// Returns { filename, contentType, data: Buffer } or null.
+function parseMultipartFile(buffer, contentTypeHeader) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentTypeHeader || '');
+  const boundary = m && (m[1] || m[2]);
+  if (!boundary) return null;
+  const delim = Buffer.from('--' + boundary);
+  // Split on boundary
+  const parts = [];
+  let start = buffer.indexOf(delim);
+  if (start < 0) return null;
+  start += delim.length;
+  while (start < buffer.length) {
+    // skip CRLF after boundary
+    if (buffer[start] === 0x2d && buffer[start + 1] === 0x2d) break; // closing --
+    if (buffer[start] === 0x0d) start += 2;
+    const next = buffer.indexOf(delim, start);
+    if (next < 0) break;
+    parts.push(buffer.slice(start, next - 2)); // strip trailing CRLF
+    start = next + delim.length;
+  }
+  for (const part of parts) {
+    const headerEnd = part.indexOf('\r\n\r\n');
+    if (headerEnd < 0) continue;
+    const header = part.slice(0, headerEnd).toString('utf8');
+    if (!/filename="/i.test(header)) continue; // not a file part
+    const fnMatch = /filename="([^"]*)"/i.exec(header);
+    const ctMatch = /content-type:\s*([^\r\n]+)/i.exec(header);
+    const data = part.slice(headerEnd + 4);
+    return {
+      filename: fnMatch ? fnMatch[1] : 'upload',
+      contentType: ctMatch ? ctMatch[1].trim() : 'application/octet-stream',
+      data
+    };
+  }
+  return null;
+}
+
+// Allowed image types -> extension
+const IMAGE_TYPES = {
+  'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+  'image/gif': '.gif', 'image/webp': '.webp'
+};
+// Verify magic bytes match an image (defence beyond the declared content-type)
+function sniffImage(buf) {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return '.gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return '.webp';
+  return null;
+}
+
+function htmlDecode(s = '') {
+  return String(s)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+function stripTags(s = '') {
+  return htmlDecode(String(s).replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim();
+}
+
+function xmlTag(xml, tag) {
+  const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+  if (!m) return '';
+  // Trim CDATA wrappers
+  return m[1].replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '').trim();
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally { clearTimeout(t); }
+}
+
+function normalizeCurrency(input) {
+  const code = String(input || '').toUpperCase();
+  return CURRENCIES[code] || CURRENCIES.RUB;
+}
+
+function formatPrice(value, currency) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const c = normalizeCurrency(currency);
+  const n = Number(value);
+  const formatted = new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: c.frac,
+    maximumFractionDigits: c.frac
+  }).format(n);
+  return c.code === 'RUB' ? `${formatted} ${c.symbol}` : `${c.symbol}${formatted}`;
+}
+
+// Parse text like "157,50 руб." / "$0.47" / "1 234,00 ₽"
+function parsePriceText(text = '') {
+  if (!text) return null;
+  const m = String(text).match(/[\d.,\s]+/);
+  if (!m) return null;
+  let n = m[0].replace(/\s/g, '');
+  // Detect decimal separator: prefer last separator as decimal if both present
+  const hasComma = n.includes(',');
+  const hasDot = n.includes('.');
+  if (hasComma && hasDot) {
+    if (n.lastIndexOf(',') > n.lastIndexOf('.')) n = n.replace(/\./g, '').replace(',', '.');
+    else n = n.replace(/,/g, '');
+  } else if (hasComma) {
+    n = n.replace(',', '.');
+  }
+  const v = Number(n);
+  return Number.isFinite(v) ? v : null;
+}
+
+// Resolve any kind of Steam input to a 17-digit SteamID64
+function extractSteamTarget(input = '') {
+  const raw = String(input || '').trim();
+  if (!raw) return null;
+  const sid = raw.match(/\b(7656119\d{10})\b/);
+  if (sid) return { type: 'steamid', value: sid[1] };
+  const profile = raw.match(/steamcommunity\.com\/profiles\/(\d{17})/);
+  if (profile) return { type: 'steamid', value: profile[1] };
+  const vanity = raw.match(/steamcommunity\.com\/id\/([^\/?#]+)/);
+  if (vanity) return { type: 'vanity', value: vanity[1] };
+  if (/^[a-zA-Z0-9_-]{2,32}$/.test(raw)) return { type: 'vanity', value: raw };
+  return null;
+}
+
+async function resolveVanityToSteamId(vanity) {
+  if (!STEAM_API_KEY) return null;
+  try {
+    const url = `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key=${STEAM_API_KEY}&vanityurl=${encodeURIComponent(vanity)}`;
+    const r = await fetchWithTimeout(url);
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j?.response?.success === 1) return j.response.steamid;
+  } catch (_) {}
+  return null;
+}
+
+async function resolveSteamId(target) {
+  if (!target) return null;
+  if (target.type === 'steamid') return target.value;
+  if (target.type === 'vanity') {
+    const fromApi = await resolveVanityToSteamId(target.value);
+    if (fromApi) return fromApi;
+    // Fallback: fetch /id/<vanity>?xml=1 and read <steamID64>
+    try {
+      const r = await fetchWithTimeout(`https://steamcommunity.com/id/${encodeURIComponent(target.value)}/?xml=1`);
+      if (r.ok) {
+        const xml = await r.text();
+        const sid = xmlTag(xml, 'steamID64');
+        if (sid) return sid;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ---------- profile fetch ----------
+function profileSkeleton(steamid, source) {
+  return {
+    steamid,
+    personaname: '',
+    avatar: '',
+    avatarfull: '',
+    profileurl: `https://steamcommunity.com/profiles/${steamid}/`,
+    communityvisibilitystate: 0,
+    profilestate: 0,
+    realname: '',
+    country: '',
+    state: 'unknown',
+    source,
+    fetched_at: db.nowIso()
+  };
+}
+
+async function fetchProfile(steamid) {
+  // Try Steam API first (richer data)
+  if (STEAM_API_KEY) {
+    try {
+      const url = `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${steamid}`;
+      const r = await fetchWithTimeout(url);
+      if (r.ok) {
+        const j = await r.json();
+        const p = j?.response?.players?.[0];
+        if (p) {
+          return {
+            steamid: p.steamid,
+            personaname: p.personaname,
+            avatar: p.avatar,
+            avatarfull: p.avatarfull || p.avatarmedium || p.avatar,
+            profileurl: p.profileurl,
+            communityvisibilitystate: p.communityvisibilitystate,
+            profilestate: p.profilestate,
+            realname: p.realname || '',
+            country: p.loccountrycode || '',
+            timecreated: p.timecreated || null,
+            state: 'ok',
+            source: 'steam-api',
+            fetched_at: db.nowIso()
+          };
+        }
+      }
+    } catch (_) {}
+  }
+  // Public XML fallback (no key needed)
+  try {
+    const r = await fetchWithTimeout(`https://steamcommunity.com/profiles/${steamid}/?xml=1`);
+    if (r.ok) {
+      const xml = await r.text();
+      const visibility = xmlTag(xml, 'privacyState') === 'public' ? 3 : 1;
+      return {
+        steamid,
+        personaname: stripTags(xmlTag(xml, 'steamID')) || '',
+        avatar: stripTags(xmlTag(xml, 'avatarIcon')) || '',
+        avatarfull: stripTags(xmlTag(xml, 'avatarFull')) || stripTags(xmlTag(xml, 'avatarMedium')) || '',
+        profileurl: stripTags(xmlTag(xml, 'customURL'))
+          ? `https://steamcommunity.com/id/${stripTags(xmlTag(xml, 'customURL'))}/`
+          : `https://steamcommunity.com/profiles/${steamid}/`,
+        communityvisibilitystate: visibility,
+        profilestate: 1,
+        realname: stripTags(xmlTag(xml, 'realname')),
+        country: stripTags(xmlTag(xml, 'location')),
+        state: 'ok',
+        source: 'steam-xml',
+        fetched_at: db.nowIso()
+      };
+    }
+  } catch (_) {}
+  return { ...profileSkeleton(steamid, 'fallback'), state: 'unreachable' };
+}
+
+// ---------- inventory fetch ----------
+function classifyInventoryError(status, body = '') {
+  if (status === 403) return 'private';
+  if (status === 429) return 'rate-limited';
+  if (status >= 500) return 'steam-error';
+  if (status === 404) return 'not-found';
+  return body ? 'unknown-error' : 'empty';
+}
+
+function normalizeInventory(j) {
+  const descs = new Map();
+  for (const d of (j.descriptions || [])) {
+    descs.set(`${d.classid}_${d.instanceid}`, d);
+  }
+  const items = [];
+  for (const a of (j.assets || [])) {
+    const d = descs.get(`${a.classid}_${a.instanceid}`);
+    if (!d) continue;
+    const name = d.market_hash_name || d.name || '';
+    if (!name) continue;
+    items.push({
+      assetid: a.assetid,
+      classid: a.classid,
+      instanceid: a.instanceid,
+      market_hash_name: name,
+      market_name: d.market_name || name,
+      name: d.name || name,
+      type: d.type || '',
+      tradable: !!d.tradable,
+      marketable: !!d.marketable,
+      icon_url: d.icon_url ? `https://community.akamai.steamstatic.com/economy/image/${d.icon_url}/256fx256f` : '',
+      tags: (d.tags || []).map(t => ({ category: t.category, name: t.localized_tag_name || t.name, internal_name: t.internal_name })),
+      color: d.name_color || ''
+    });
+  }
+  return items;
+}
+
+async function fetchInventoryItems(steamid) {
+  // Try newer steamcommunity inventory endpoint
+  const url = `https://steamcommunity.com/inventory/${steamid}/730/2?l=russian&count=2000`;
+  try {
+    const r = await fetchWithTimeout(url);
+    const text = await r.text();
+    if (!r.ok) {
+      const reason = classifyInventoryError(r.status, text);
+      return { items: [], status: reason, http_status: r.status };
+    }
+    let j;
+    try { j = JSON.parse(text); } catch (_) { return { items: [], status: 'parse-error' }; }
+    if (!j || j.success === false) return { items: [], status: 'private' };
+    if (!Array.isArray(j.assets) || !Array.isArray(j.descriptions)) {
+      return { items: [], status: 'empty' };
+    }
+    return { items: normalizeInventory(j), status: 'ok' };
+  } catch (e) {
+    return { items: [], status: 'network-error', error: String(e?.message || e) };
+  }
+}
+
+// ---------- pricing ----------
+async function fetchSteamMarketPrice(marketHashName, currency) {
+  const c = normalizeCurrency(currency);
+  const url = `https://steamcommunity.com/market/priceoverview/?currency=${c.steam}&appid=730&market_hash_name=${encodeURIComponent(marketHashName)}`;
+  try {
+    const r = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, 6000);
+    if (r.status === 429) return { ok: false, reason: 'rate-limited' };
+    if (!r.ok) return { ok: false, reason: `http-${r.status}` };
+    const j = await r.json();
+    if (!j || j.success !== true) return { ok: false, reason: 'no-data' };
+    const text = j.lowest_price || j.median_price || '';
+    const value = parsePriceText(text);
+    if (value == null) return { ok: false, reason: 'unparseable' };
+    return { ok: true, value, text };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e) };
+  }
+}
+
+async function getPriceWithCache(marketHashName, currency) {
+  const c = normalizeCurrency(currency);
+  const cached = db.getPrice(marketHashName, c.code, 'steam');
+  if (cached && (Date.now() - new Date(cached.fetched_at).getTime() < PRICE_CACHE_TTL_MS)) {
+    return { ...cached, cached: true };
+  }
+  const fresh = await fetchSteamMarketPrice(marketHashName, c.code);
+  if (fresh.ok) {
+    db.setPrice({
+      market_name: marketHashName,
+      currency: c.code,
+      source: 'steam',
+      price_value: fresh.value,
+      price_text: fresh.text
+    });
+    return {
+      market_name: marketHashName, currency: c.code, source: 'steam',
+      price_value: fresh.value, price_text: fresh.text,
+      fetched_at: db.nowIso(), cached: false
+    };
+  }
+  // If fresh failed but we have any cached, return stale
+  if (cached) return { ...cached, cached: true, stale: true, reason: fresh.reason };
+  return { market_name: marketHashName, currency: c.code, source: 'steam',
+    price_value: null, price_text: null, fetched_at: null, cached: false, reason: fresh.reason };
+}
+
+async function pricedInventory(items, currency) {
+  const c = normalizeCurrency(currency);
+  // Unique market_hash_names, but keep the items list intact (multiple of same item = stack)
+  const uniqueNames = Array.from(new Set(items.map(i => i.market_hash_name))).slice(0, PRICE_FETCH_LIMIT);
+  const skippedDueToLimit = Math.max(0, new Set(items.map(i => i.market_hash_name)).size - uniqueNames.length);
+  const priceMap = new Map();
+  let unpricedCount = 0;
+  // Limited concurrency
+  const queue = uniqueNames.slice();
+  async function worker() {
+    while (queue.length) {
+      const name = queue.shift();
+      const p = await getPriceWithCache(name, c.code);
+      priceMap.set(name, p);
+      if (p.price_value == null) unpricedCount++;
+    }
+  }
+  await Promise.all(Array.from({ length: INVENTORY_CONCURRENCY }, worker));
+
+  // For names beyond fetch limit, try cache only
+  const overflowNames = Array.from(new Set(items.map(i => i.market_hash_name))).slice(PRICE_FETCH_LIMIT);
+  for (const name of overflowNames) {
+    const cached = db.getPrice(name, c.code, 'steam');
+    if (cached) priceMap.set(name, { ...cached, cached: true });
+  }
+
+  // Attach prices to items
+  let totalValue = 0; let pricedItems = 0;
+  const enriched = items.map(it => {
+    const p = priceMap.get(it.market_hash_name) || null;
+    const priceValue = p && p.price_value != null ? Number(p.price_value) : null;
+    if (priceValue != null) { totalValue += priceValue; pricedItems++; }
+    return {
+      ...it,
+      price_value: priceValue,
+      price_text: p?.price_text || (priceValue != null ? formatPrice(priceValue, c.code) : null),
+      price_source: p?.source || null,
+      price_currency: c.code,
+      price_cached: p?.cached || false,
+      price_stale: !!p?.stale,
+      price_reason: p && p.price_value == null ? (p.reason || 'no-data') : null
+    };
+  });
+
+  return {
+    items: enriched,
+    currency: c.code,
+    total_value: pricedItems > 0 ? Number(totalValue.toFixed(c.frac)) : null,
+    total_value_text: pricedItems > 0 ? formatPrice(totalValue, c.code) : null,
+    priced_items: pricedItems,
+    unpriced_items: enriched.length - pricedItems,
+    unique_names: new Set(items.map(i => i.market_hash_name)).size,
+    fetched_unique_names: uniqueNames.length,
+    skipped_due_to_limit: skippedDueToLimit,
+    fetch_limit: PRICE_FETCH_LIMIT
+  };
+}
+
+// ---------- news ----------
+function extractFirstImage(html = '') {
+  if (!html) return null;
+  // Steam mixes raw HTML and BBCode in contents.
+  // 1) <img src="...">
+  const imgTag = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  if (imgTag) return imgTag[1];
+  // 2) [img]...[/img] BBCode
+  const bb = html.match(/\[img\]([^\[]+)\[\/img\]/i);
+  if (bb) return bb[1];
+  // 3) bare URL ending in image extension
+  const bareUrl = html.match(/https?:\/\/[^\s"'<>\]\)]+\.(?:jpg|jpeg|png|gif|webp)/i);
+  if (bareUrl) return bareUrl[0];
+  return null;
+}
+
+function stripBBCode(s = '') {
+  return String(s)
+    .replace(/\[img\][^\[]*\[\/img\]/gi, '')          // remove images
+    .replace(/\[url=[^\]]*\]([\s\S]*?)\[\/url\]/gi, '$1') // keep link text
+    .replace(/\[\/?(b|i|u|h\d|list|\*|previewyoutube)[^\]]*\]/gi, '') // strip formatting
+    .replace(/\[[^\]]*\]/g, '');                       // catch-all leftover tags
+}
+
+async function fetchSteamNews(count = 8) {
+  // GetNewsForApp doesn't need API key.
+  // tags=patchnotes filters to actual patch notes; feeds=steam_community_announcements
+  // gives the official announcements. We ask for a few extra and trim client-side.
+  const url = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=${Math.max(count * 2, 12)}&maxlength=600&format=json`;
+  try {
+    const r = await fetchWithTimeout(url);
+    if (!r.ok) return { ok: false, status: `http-${r.status}`, items: [] };
+    const j = await r.json();
+    const raw = j?.appnews?.newsitems || [];
+    const items = raw
+      // Prefer official Steam Community announcements; fall back to any.
+      .map(n => {
+        const image = extractFirstImage(n.contents || '');
+        const cleanText = stripTags(stripBBCode(n.contents || '')).slice(0, 280);
+        const feedScore =
+          n.feedname === 'steam_community_announcements' ? 3 :
+          n.feedlabel === 'Community Announcements' ? 3 :
+          n.feedname === 'cs2_blog' ? 2 :
+          n.feedlabel === 'Counter-Strike 2' ? 2 :
+          1;
+        return {
+          gid: n.gid,
+          title: stripTags(n.title || ''),
+          url: n.url,
+          author: n.author || '',
+          contents: cleanText,
+          image,
+          feedlabel: n.feedlabel || n.feedname || '',
+          date: n.date ? new Date(n.date * 1000).toISOString() : null,
+          _score: feedScore + (image ? 1 : 0)
+        };
+      })
+      .sort((a, b) => {
+        // Newer + officialer first
+        const ta = a.date ? Date.parse(a.date) : 0;
+        const tb = b.date ? Date.parse(b.date) : 0;
+        if (b._score !== a._score) return b._score - a._score;
+        return tb - ta;
+      })
+      .slice(0, count)
+      .map(({ _score, ...rest }) => rest);
+    return { ok: true, items };
+  } catch (e) {
+    return { ok: false, status: 'network', items: [], error: String(e?.message || e) };
+  }
+}
+
+// 15-minute in-memory cache for news (avoids hammering Steam on every refresh)
+const NEWS_CACHE_TTL_MS = 15 * 60 * 1000;
+let _newsCache = null; // { fetchedAt, count, data }
+
+async function getCachedNews(count) {
+  const now = Date.now();
+  if (_newsCache && _newsCache.count >= count && (now - _newsCache.fetchedAt) < NEWS_CACHE_TTL_MS) {
+    return { ...(_newsCache.data), items: _newsCache.data.items.slice(0, count), cached: true };
+  }
+  const data = await fetchSteamNews(Math.max(count, 8));
+  if (data.ok) {
+    _newsCache = { fetchedAt: now, count: data.items.length, data };
+  } else if (_newsCache) {
+    // Fetch failed but we have something — return stale rather than 0 items
+    return { ...(_newsCache.data), items: _newsCache.data.items.slice(0, count), cached: true, stale: true };
+  }
+  return { ...data, items: (data.items || []).slice(0, count), cached: false };
+}
+
+// ---------- Faceit (Data API v4) ----------
+// Docs: https://developers.faceit.com/docs/tools/data-api
+// All endpoints require Bearer token in Authorization header.
+const FACEIT_API_BASE = 'https://open.faceit.com/data/v4';
+
+// In-memory cache: { key: { fetchedAt, data } } — different TTLs per data kind
+const _faceitCache = new Map();
+const FACEIT_PROFILE_TTL_MS = 15 * 60 * 1000; // profile changes rarely
+const FACEIT_HISTORY_TTL_MS = 3 * 60 * 1000;  // history might have new matches
+const FACEIT_STATS_TTL_MS   = 10 * 60 * 1000; // aggregate stats
+
+async function faceitFetch(pathAndQuery, ttlMs) {
+  if (!FACEIT_API_KEY) return { ok: false, reason: 'no-api-key' };
+  const cacheKey = pathAndQuery;
+  const cached = _faceitCache.get(cacheKey);
+  if (cached && (Date.now() - cached.fetchedAt) < ttlMs) {
+    return { ok: true, data: cached.data, cached: true };
+  }
+  try {
+    const r = await fetchWithTimeout(FACEIT_API_BASE + pathAndQuery, {
+      headers: { 'Authorization': `Bearer ${FACEIT_API_KEY}`, 'Accept': 'application/json' }
+    });
+    if (r.status === 404) return { ok: false, reason: 'not-found' };
+    if (r.status === 401 || r.status === 403) return { ok: false, reason: 'auth-error', status: r.status };
+    if (r.status === 429) return { ok: false, reason: 'rate-limited' };
+    if (!r.ok) return { ok: false, reason: `http-${r.status}` };
+    const data = await r.json();
+    _faceitCache.set(cacheKey, { fetchedAt: Date.now(), data });
+    return { ok: true, data, cached: false };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e) };
+  }
+}
+
+// Find Faceit player by SteamID64 (preferred) or nickname.
+async function faceitFindPlayer({ steamid, nickname }) {
+  if (steamid && /^\d{17}$/.test(steamid)) {
+    return faceitFetch(`/players?game=cs2&game_player_id=${encodeURIComponent(steamid)}`, FACEIT_PROFILE_TTL_MS);
+  }
+  if (nickname) {
+    return faceitFetch(`/players?nickname=${encodeURIComponent(nickname)}`, FACEIT_PROFILE_TTL_MS);
+  }
+  return { ok: false, reason: 'no-identifier' };
+}
+
+async function faceitMatchHistory(playerId, limit = 20) {
+  const lim = Math.min(50, Math.max(1, Number(limit) || 20));
+  return faceitFetch(`/players/${encodeURIComponent(playerId)}/history?game=cs2&limit=${lim}&offset=0`, FACEIT_HISTORY_TTL_MS);
+}
+
+async function faceitLifetimeStats(playerId) {
+  return faceitFetch(`/players/${encodeURIComponent(playerId)}/stats/cs2`, FACEIT_STATS_TTL_MS);
+}
+
+async function faceitMatchStats(matchId) {
+  return faceitFetch(`/matches/${encodeURIComponent(matchId)}/stats`, FACEIT_STATS_TTL_MS);
+}
+
+// Pull per-match Faceit stats for each item in the history, in parallel with a small concurrency window.
+// Returns the merged list ready for the frontend.
+async function enrichMatchesWithStats(rawMatches, playerId) {
+  // Build base entries (synchronous data from history endpoint)
+  const base = rawMatches.map(m => {
+    const teams = m.teams || {};
+    const ourTeamKey = Object.keys(teams).find(k => (teams[k].players || []).some(pl => pl.player_id === playerId));
+    const ourTeam = ourTeamKey ? teams[ourTeamKey] : null;
+    const otherTeamKey = Object.keys(teams).find(k => k !== ourTeamKey);
+    const otherTeam = otherTeamKey ? teams[otherTeamKey] : null;
+    const winner = m.results?.winner;
+    const isWin = winner && winner === ourTeamKey;
+    const score = m.results?.score;
+    return {
+      match_id: m.match_id,
+      started_at: m.started_at ? new Date(m.started_at * 1000).toISOString() : null,
+      finished_at: m.finished_at ? new Date(m.finished_at * 1000).toISOString() : null,
+      map: (m.voting?.map?.pick && m.voting.map.pick[0]) || (m.i1 || ''),
+      game_mode: m.game_mode || '5v5',
+      competition_name: m.competition_name || 'Matchmaking',
+      our_team_name: ourTeam?.nickname || '',
+      our_score: ourTeamKey && score ? score[ourTeamKey] : null,
+      opp_team_name: otherTeam?.nickname || '',
+      opp_score: otherTeamKey && score ? score[otherTeamKey] : null,
+      is_win: isWin,
+      faceit_url: m.faceit_url ? m.faceit_url.replace('{lang}', 'ru') : null,
+      // Stats placeholders — filled by enrichment below
+      kills: null, deaths: null, assists: null, kd: null, kr: null,
+      hs: null, hs_pct: null, adr: null, mvps: null, rounds: null,
+      stats_ok: false
+    };
+  });
+
+  // Concurrency: 3 parallel match-stats requests at a time
+  const CONCURRENCY = 3;
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= base.length) return;
+      const item = base[idx];
+      if (!item.match_id) continue;
+      const r = await faceitMatchStats(item.match_id);
+      if (!r.ok) continue;
+      // Faceit returns rounds[0].teams[].players[] with per-player stat objects
+      try {
+        const round = r.data?.rounds?.[0];
+        if (!round) continue;
+        item.rounds = Number(round.round_stats?.Rounds || null) || null;
+        // Try to fill the map from round_stats — voting.map.pick in history is often empty
+        if (!item.map) {
+          const m1 = round.round_stats?.Map || round.round_stats?.['Map'];
+          if (m1) item.map = String(m1);
+        }
+        // Find the player in either team
+        let stats = null;
+        for (const t of (round.teams || [])) {
+          const pl = (t.players || []).find(p => p.player_id === playerId);
+          if (pl) { stats = pl.player_stats || {}; break; }
+        }
+        if (!stats) continue;
+        const num = v => (v == null || v === '' ? null : Number(v));
+        item.kills    = num(stats['Kills']);
+        item.deaths   = num(stats['Deaths']);
+        item.assists  = num(stats['Assists']);
+        item.kd       = num(stats['K/D Ratio']);
+        item.kr       = num(stats['K/R Ratio']);
+        item.hs       = num(stats['Headshots']);
+        item.hs_pct   = num(stats['Headshots %']);
+        item.adr      = num(stats['ADR']) || num(stats['Average Damage per Round']);
+        item.mvps     = num(stats['MVPs']);
+        item.triple   = num(stats['Triple Kills']);
+        item.quad     = num(stats['Quadro Kills']);
+        item.ace      = num(stats['Penta Kills']);
+        item.stats_ok = true;
+      } catch (_) { /* ignore individual failures */ }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, base.length) }, worker));
+  return base;
+}
+
+// Build a unified summary that the frontend can render directly.
+// Combines: profile, lifetime stats, last N matches (with per-match metrics).
+async function buildFaceitSummary({ steamid, nickname, matchCount = 10 }) {
+  const playerRes = await faceitFindPlayer({ steamid, nickname });
+  if (!playerRes.ok) return { ok: false, reason: playerRes.reason || 'lookup-failed' };
+  const p = playerRes.data;
+  const cs2 = p?.games?.cs2 || {};
+  const playerId = p?.player_id;
+  if (!playerId) return { ok: false, reason: 'no-cs2-data' };
+
+  // Parallel pulls for stats + history
+  const [statsRes, histRes] = await Promise.all([
+    faceitLifetimeStats(playerId),
+    faceitMatchHistory(playerId, matchCount)
+  ]);
+
+  const lifetime = statsRes.ok ? (statsRes.data?.lifetime || {}) : {};
+  const segments = statsRes.ok ? (statsRes.data?.segments || []) : [];
+
+  // Faceit lifetime keys come as strings — coerce common ones to numbers
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+  const headline = {
+    matches:        num(lifetime['Matches']),
+    wins:           num(lifetime['Wins']),
+    winrate:        num(lifetime['Win Rate %']),
+    kdRatio:        num(lifetime['Average K/D Ratio']),
+    headshotsPct:   num(lifetime['Average Headshots %']),
+    longestWinStreak: num(lifetime['Longest Win Streak']),
+    currentWinStreak: num(lifetime['Current Win Streak']),
+    recentResults:    lifetime['Recent Results'] || [],
+    totalMatches:   num(lifetime['Total Matches']) || num(lifetime['Matches'])
+  };
+
+  // Per-map breakdown
+  const maps = segments
+    .filter(s => s.type === 'Map')
+    .map(s => ({
+      map: s.label || s.mode || '',
+      matches: num(s.stats['Matches']),
+      wins:    num(s.stats['Wins']),
+      winrate: num(s.stats['Win Rate %']),
+      kd:      num(s.stats['Average K/D Ratio']),
+      hsPct:   num(s.stats['Average Headshots %']),
+      kills:   num(s.stats['Kills']),
+      deaths:  num(s.stats['Deaths'])
+    }))
+    .filter(m => m.matches && m.matches > 0)
+    .sort((a, b) => (b.matches || 0) - (a.matches || 0));
+
+  // Last matches list — enrich each with per-match stats (K/D, HS%, ADR, etc.)
+  // We cap concurrency to avoid hitting Faceit rate limits.
+  const rawMatches = histRes.ok ? (histRes.data?.items || []).slice(0, matchCount) : [];
+  const recentMatches = await enrichMatchesWithStats(rawMatches, playerId);
+
+  // Aggregate teammates across the full history window: who you played with most,
+  // how many games together and win rate in those games.
+  const teammates = aggregateTeammates(histRes.ok ? (histRes.data?.items || []) : [], playerId);
+
+  return {
+    ok: true,
+    profile: {
+      player_id: playerId,
+      nickname: p.nickname,
+      country: p.country || null,
+      avatar: p.avatar || null,
+      faceit_url: p.faceit_url ? p.faceit_url.replace('{lang}', 'ru') : null,
+      verified: !!p.verified,
+      memberships: p.memberships || [],
+      cs2: {
+        skill_level: cs2.skill_level || null,
+        faceit_elo:  cs2.faceit_elo  || null,
+        game_player_name: cs2.game_player_name || null,
+        region: cs2.region || null
+      }
+    },
+    headline,
+    maps,
+    recentMatches,
+    teammates,
+    notes: { source: 'Faceit Data API v4', scope: 'cs2' }
+  };
+}
+
+// Build a "played with" list from match history. For each other player on the user's team,
+// count games together and wins together.
+function aggregateTeammates(items, playerId) {
+  const acc = {}; // player_id -> { nickname, avatar, games, wins }
+  for (const m of items) {
+    const teams = m.teams || {};
+    const ourKey = Object.keys(teams).find(k => (teams[k].players || []).some(pl => pl.player_id === playerId));
+    if (!ourKey) continue;
+    const won = m.results?.winner === ourKey;
+    for (const pl of (teams[ourKey].players || [])) {
+      if (pl.player_id === playerId) continue; // skip self
+      const id = pl.player_id;
+      if (!acc[id]) acc[id] = { player_id: id, nickname: pl.nickname || '—', avatar: pl.avatar || null, games: 0, wins: 0 };
+      acc[id].games += 1;
+      if (won) acc[id].wins += 1;
+    }
+  }
+  return Object.values(acc)
+    .map(t => ({ ...t, winrate: t.games ? Math.round((t.wins / t.games) * 100) : null }))
+    .filter(t => t.games >= 2) // only people you played with more than once
+    .sort((a, b) => b.games - a.games)
+    .slice(0, 8);
+}
+
+// ---------- stats (CS2 UserStats) ----------
+function pickStat(map, names) {
+  for (const n of names) {
+    if (n in map) return Number(map[n]);
+  }
+  return null;
+}
+
+function buildStatsSummary(stats = []) {
+  const map = {};
+  for (const s of stats) map[s.name] = s.value;
+  const kills = pickStat(map, ['total_kills']);
+  const deaths = pickStat(map, ['total_deaths']);
+  const time = pickStat(map, ['total_time_played']);
+  // Steam tracks competitive wins per map and total played count.
+  // GetUserStatsForGame DOES NOT return a clean "matches played" — total_matches_played
+  // is actually competitive-only and includes pre-CS2 data. The 'wins' counter is per-map
+  // wins (so wins/matches can exceed 100%). We expose the caveat in `notes`.
+  const winsByMap = pickStat(map, ['total_wins']);
+  const matchesPlayed = pickStat(map, ['total_matches_played']);
+  const matchesWon = pickStat(map, ['total_matches_won']);
+  const mvps = pickStat(map, ['total_mvps']);
+  const planted = pickStat(map, ['total_planted_bombs']);
+  const defused = pickStat(map, ['total_defused_bombs']);
+  const headshots = pickStat(map, ['total_kills_headshot']);
+  const shotsFired = pickStat(map, ['total_shots_fired']);
+  const shotsHit = pickStat(map, ['total_shots_hit']);
+  const kd = (kills && deaths) ? Number((kills / deaths).toFixed(2)) : null;
+  const hsRate = (kills && headshots) ? Number(((headshots / kills) * 100).toFixed(1)) : null;
+  const accuracy = (shotsFired && shotsHit) ? Number(((shotsHit / shotsFired) * 100).toFixed(1)) : null;
+  // Use the proper matches_won / matches_played pair for winrate — clamp to 100 just in case.
+  let winrate = null;
+  if (matchesPlayed && matchesWon) {
+    winrate = Number(((matchesWon / matchesPlayed) * 100).toFixed(1));
+    if (winrate > 100) winrate = 100;
+  }
+  const hours = time != null ? Number((time / 3600).toFixed(1)) : null;
+  return {
+    headline: {
+      kills, deaths, kd, hsRate, accuracy, winrate,
+      matches: matchesPlayed, wins: matchesWon, winsByMap,
+      hours, mvps, planted, defused
+    },
+    weapons: extractWeapons(map),
+    maps: extractMaps(map),
+    raw: map,
+    // Caveats — frontend can show these so users understand what these numbers represent
+    notes: {
+      source: 'Steam GetUserStatsForGame',
+      scope: 'cs:go + cs2 lifetime',
+      explanation: 'Steam отдаёт суммарные значения за всю историю CS (CS:GO + CS2). ' +
+                   'Детальная статистика «только CS2» доступна через парсинг матчей через Game Coordinator — в этом MVP не подключено.',
+      winrate_basis: 'competitive matches only'
+    }
+  };
+}
+
+function extractWeapons(map) {
+  const re = /^total_kills_(\w+)$/;
+  const out = [];
+  for (const [k, v] of Object.entries(map)) {
+    const m = k.match(re);
+    if (!m) continue;
+    const weapon = m[1];
+    if (weapon === 'headshot' || weapon === 'enemy_weapon' || weapon === 'against_zoomed_sniper'
+        || weapon === 'knife_fight' || weapon === 'enemy_blinded' || weapon === 'while_blinded') continue;
+    const hits = map[`total_hits_${weapon}`] || 0;
+    const shots = map[`total_shots_${weapon}`] || 0;
+    out.push({
+      weapon,
+      kills: Number(v) || 0,
+      hits: Number(hits) || 0,
+      shots: Number(shots) || 0,
+      accuracy: shots ? Number(((hits / shots) * 100).toFixed(1)) : null
+    });
+  }
+  return out.sort((a, b) => b.kills - a.kills).slice(0, 20);
+}
+
+function extractMaps(map) {
+  const re = /^total_wins_map_(\w+)$/;
+  const out = [];
+  for (const [k, v] of Object.entries(map)) {
+    const m = k.match(re); if (!m) continue;
+    const name = m[1];
+    const rounds = map[`total_rounds_map_${name}`] || 0;
+    out.push({
+      map: name,
+      wins: Number(v) || 0,
+      rounds: Number(rounds) || 0,
+      winrate: rounds ? Number(((Number(v) / Number(rounds)) * 100).toFixed(1)) : null
+    });
+  }
+  return out.sort((a, b) => b.rounds - a.rounds).slice(0, 12);
+}
+
+async function fetchCs2Stats(steamid) {
+  if (!STEAM_API_KEY) {
+    return { ok: false, reason: 'no-api-key', items: [], summary: null };
+  }
+  try {
+    const url = `https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?appid=730&key=${STEAM_API_KEY}&steamid=${steamid}`;
+    const r = await fetchWithTimeout(url);
+    if (!r.ok) return { ok: false, reason: `http-${r.status}`, items: [], summary: null };
+    const j = await r.json();
+    const stats = j?.playerstats?.stats || [];
+    if (!stats.length) return { ok: false, reason: 'private-or-empty', items: [], summary: null };
+    return { ok: true, items: stats, summary: buildStatsSummary(stats), persona_name: j?.playerstats?.playerName || null };
+  } catch (e) {
+    return { ok: false, reason: 'network', items: [], summary: null, error: String(e?.message || e) };
+  }
+}
+
+// ---------- Leetify (public profile API) ----------
+// No API key required. Returns 200+data if the player has a public Leetify profile
+// linked to this SteamID. Returns 404 / empty if not.
+const _leetifyCache = new Map();
+const LEETIFY_CACHE_TTL_MS = 15 * 60 * 1000;
+
+async function fetchLeetifyProfile(steamid) {
+  const cached = _leetifyCache.get(steamid);
+  if (cached && (Date.now() - cached.fetchedAt) < LEETIFY_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data, cached: true };
+  }
+  try {
+    const r = await fetchWithTimeout(`https://api.leetify.com/api/profile/id/${encodeURIComponent(steamid)}`);
+    if (r.status === 404) return { ok: false, reason: 'not-found' };
+    if (!r.ok) return { ok: false, reason: `http-${r.status}` };
+    const j = await r.json();
+    // Their schema varies; we normalize what's useful for our UI
+    const out = {
+      steam64Id: j.steam64Id || j.steam_id || steamid,
+      meta: {
+        name: j.meta?.name || j.name || null,
+        steamProfileUrl: j.meta?.steamProfileUrl || null,
+        platformBans: j.meta?.platformBans || null,
+        faceitNickname: j.meta?.faceitNickname || null
+      },
+      ranks: j.ranks || j.recentGameRatings || null,
+      stats: j.stats || j.recentTeammates || null,
+      total_matches: j.total_matches || j.totalMatchesPlayed || null,
+      // Recent matches (CS2 + Premier + Faceit etc — they merge sources)
+      games: Array.isArray(j.games) ? j.games.slice(0, 25) : (Array.isArray(j.matches) ? j.matches.slice(0, 25) : []),
+      raw_keys: Object.keys(j) // for debugging during dev
+    };
+    _leetifyCache.set(steamid, { fetchedAt: Date.now(), data: out });
+    return { ok: true, data: out, cached: false };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e) };
+  }
+}
+
+// ---------- bans (Steam GetPlayerBans) ----------
+// Cached in memory for 10 minutes — bans don't change often
+const _bansCache = new Map();
+const BANS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+async function fetchPlayerBans(steamid) {
+  if (!STEAM_API_KEY) return { ok: false, reason: 'no-api-key' };
+  const cached = _bansCache.get(steamid);
+  if (cached && (Date.now() - cached.fetchedAt) < BANS_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data, cached: true };
+  }
+  try {
+    const url = `https://api.steampowered.com/ISteamUser/GetPlayerBans/v1/?key=${STEAM_API_KEY}&steamids=${steamid}`;
+    const r = await fetchWithTimeout(url);
+    if (!r.ok) return { ok: false, reason: `http-${r.status}` };
+    const j = await r.json();
+    const entry = (j?.players || [])[0];
+    if (!entry) return { ok: false, reason: 'not-found' };
+    const data = {
+      community_banned:    !!entry.CommunityBanned,
+      vac_banned:          !!entry.VACBanned,
+      number_of_vac_bans:  Number(entry.NumberOfVACBans || 0),
+      days_since_last_ban: Number(entry.DaysSinceLastBan || 0),
+      number_of_game_bans: Number(entry.NumberOfGameBans || 0),
+      economy_ban:         String(entry.EconomyBan || 'none')
+    };
+    _bansCache.set(steamid, { fetchedAt: Date.now(), data });
+    return { ok: true, data, cached: false };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e) };
+  }
+}
+
+// ---------- request handler ----------
+function getRequestSteamId(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[SESSION_COOKIE];
+  if (!token) return null;
+  const s = db.getSession(token);
+  return s?.steam_id || null;
+}
+
+async function handleSteamOpenId(req, res, parsedUrl) {
+  const base = getBaseUrl(req);
+  if (parsedUrl.pathname === '/auth/steam') {
+    const returnTo = `${base}/auth/steam/callback`;
+    const params = new URLSearchParams({
+      'openid.ns': 'http://specs.openid.net/auth/2.0',
+      'openid.mode': 'checkid_setup',
+      'openid.return_to': returnTo,
+      'openid.realm': base,
+      'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+      'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select'
+    });
+    return redirect(res, `https://steamcommunity.com/openid/login?${params.toString()}`);
+  }
+  if (parsedUrl.pathname === '/auth/steam/callback') {
+    const q = parsedUrl.searchParams;
+    const claimed = q.get('openid.claimed_id') || '';
+    const match = claimed.match(/https?:\/\/steamcommunity\.com\/openid\/id\/(\d{17})/);
+    if (!match) return redirect(res, '/?auth=failed');
+
+    // Verify with Steam (recommended). If verification fails (e.g. network), still accept the claimed_id
+    // — fail-open here is acceptable because we only use the steamid as a public identifier.
+    const steamid = match[1];
+    try {
+      const verifyParams = new URLSearchParams();
+      for (const [k, v] of q) verifyParams.set(k, v);
+      verifyParams.set('openid.mode', 'check_authentication');
+      const r = await fetchWithTimeout('https://steamcommunity.com/openid/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: verifyParams.toString()
+      }, 6000);
+      const t = r.ok ? await r.text() : '';
+      if (t && !/is_valid\s*:\s*true/.test(t)) {
+        // explicit failure
+        return redirect(res, '/?auth=invalid');
+      }
+    } catch (_) { /* fail open */ }
+
+    const profile = await fetchProfile(steamid);
+    db.upsertUser(profile);
+    const { token } = db.createSession(steamid);
+    setSessionCookie(res, token);
+    db.logEvent('login', steamid, { source: profile.source });
+    return redirect(res, '/dashboard');
+  }
+  if (parsedUrl.pathname === '/auth/logout') {
+    const cookies = parseCookies(req);
+    const token = cookies[SESSION_COOKIE];
+    if (token) { db.deleteSession(token); db.logEvent('logout', null, { token: token.slice(0, 6) + '…' }); }
+    clearSessionCookie(res);
+    return redirect(res, '/');
+  }
+  return false;
+}
+
+async function handleApi(req, res, pathname, query) {
+  if (pathname === '/api/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      version: APP_VERSION,
+      node: process.version,
+      has_steam_api_key: Boolean(STEAM_API_KEY),
+      storage: db.storageHealth()
+    });
+  }
+
+  // ---------- file upload (images) ----------
+  if (pathname === '/api/upload' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+    let buf;
+    try { buf = await readBodyBuffer(req, MAX_UPLOAD_BYTES + 64 * 1024); }
+    catch (e) { return sendJson(res, 413, { ok: false, error: 'too-large' }); }
+    const file = parseMultipartFile(buf, req.headers['content-type']);
+    if (!file || !file.data || !file.data.length) return sendJson(res, 400, { ok: false, error: 'no-file' });
+    if (file.data.length > MAX_UPLOAD_BYTES) return sendJson(res, 413, { ok: false, error: 'too-large' });
+    // Validate it's really an image by magic bytes
+    const ext = sniffImage(file.data);
+    if (!ext) return sendJson(res, 400, { ok: false, error: 'not-an-image' });
+    // Save
+    try {
+      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+      const name = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
+      fs.writeFileSync(path.join(UPLOADS_DIR, name), file.data);
+      db.logEvent('upload', me, { name, bytes: file.data.length });
+      return sendJson(res, 200, { ok: true, url: `/uploads/${name}` });
+    } catch (e) {
+      return sendJson(res, 500, { ok: false, error: 'save-failed' });
+    }
+  }
+
+  if (pathname === '/api/me') {
+    const steamid = getRequestSteamId(req);
+    if (!steamid) return sendJson(res, 200, { logged_in: false, profile: null, settings: null });
+    const user = db.getUser(steamid);
+    let profile = null;
+    try { profile = user ? JSON.parse(user.profile_json) : null; } catch (_) {}
+    if (!profile) profile = await fetchProfile(steamid);
+    const settings = db.getSettings(steamid);
+    return sendJson(res, 200, { logged_in: true, steamid, profile, settings,
+      is_admin: isAdminSteamId(steamid),
+      consented: !!settings.consent_at });
+  }
+
+  if (pathname === '/api/consent' && req.method === 'POST') {
+    const steamid = getRequestSteamId(req);
+    if (!steamid) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    db.setSettings(steamid, { consent_at: db.nowIso() });
+    db.logEvent('consent', steamid, {});
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // ---------- user reports (complaints) ----------
+  if (pathname === '/api/report' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const body = await readJsonBody(req);
+    const types = ['user', 'post', 'public', 'reputation', 'message'];
+    const target_type = String(body.target_type || '');
+    const target_id = String(body.target_id || '');
+    if (!types.includes(target_type) || !target_id) return sendJson(res, 400, { ok: false, error: 'bad-target' });
+    const reason = String(body.reason || '').slice(0, 500);
+    db.createReport({ reporter_steam_id: me, target_type, target_id, reason });
+    db.logEvent('report', me, { target_type, target_id });
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // ---------- admin (gated by SteamID) ----------
+  if (pathname.startsWith('/api/admin/')) {
+    const me = getRequestSteamId(req);
+    if (!isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    const sub = pathname.slice('/api/admin/'.length);
+
+    if (sub === 'stats' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, stats: db.adminStats() });
+    }
+    if (sub === 'reports' && req.method === 'GET') {
+      const status = query.get('status') || 'open';
+      const reports = db.listReports(status);
+      const enriched = [];
+      for (const r of reports) {
+        let rep = null;
+        try { rep = await fetchProfile(r.reporter_steam_id); } catch (_) {}
+        enriched.push({ ...r, reporter_name: rep?.personaname || r.reporter_steam_id });
+      }
+      return sendJson(res, 200, { ok: true, reports: enriched });
+    }
+    if (sub.startsWith('reports/') && req.method === 'POST') {
+      const id = sub.slice('reports/'.length).split('/')[0];
+      const body = await readJsonBody(req);
+      const status = body.status === 'dismissed' ? 'dismissed' : 'resolved';
+      db.resolveReport(id, status, me);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (sub === 'bans' && req.method === 'GET') {
+      const bans = db.listBans();
+      const enriched = [];
+      for (const b of bans) {
+        let p = null; try { p = await fetchProfile(b.steam_id); } catch (_) {}
+        enriched.push({ ...b, name: p?.personaname || b.steam_id });
+      }
+      return sendJson(res, 200, { ok: true, bans: enriched });
+    }
+    if (sub.startsWith('ban/') && req.method === 'POST') {
+      const target = sub.slice('ban/'.length).split('/')[0];
+      if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+      if (isAdminSteamId(target)) return sendJson(res, 400, { ok: false, error: 'cant-ban-admin' });
+      const body = await readJsonBody(req);
+      db.banUser(target, String(body.reason || '').slice(0, 300), me);
+      db.logEvent('admin-ban', me, { target });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (sub.startsWith('unban/') && req.method === 'POST') {
+      const target = sub.slice('unban/'.length).split('/')[0];
+      db.unbanUser(target);
+      db.logEvent('admin-unban', me, { target });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (sub === 'publics' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, publics: db.listPublics() });
+    }
+    if (sub.startsWith('public/') && req.method === 'POST') {
+      const parts = sub.slice('public/'.length).split('/');
+      const pid = decodeURIComponent(parts[0]);
+      const action = parts[1];
+      if (action === 'delete') { db.deletePublic(pid); db.logEvent('admin-del-public', me, { pid }); return sendJson(res, 200, { ok: true }); }
+      if (action === 'verify') { db.setPublicVerified(pid, true); return sendJson(res, 200, { ok: true }); }
+      if (action === 'unverify') { db.setPublicVerified(pid, false); return sendJson(res, 200, { ok: true }); }
+    }
+    if (sub === 'posts' && req.method === 'GET') {
+      const posts = db.listPosts({ limit: 100 });
+      return sendJson(res, 200, { ok: true, posts });
+    }
+    if (sub.startsWith('post/') && req.method === 'POST') {
+      const parts = sub.slice('post/'.length).split('/');
+      const postId = parts[0];
+      if (parts[1] === 'delete') { db.deletePost(postId); db.logEvent('admin-del-post', me, { postId }); return sendJson(res, 200, { ok: true }); }
+    }
+    return sendJson(res, 404, { ok: false, error: 'unknown-admin-endpoint' });
+  }
+
+  if (pathname === '/api/resolve') {
+    const raw = query.get('target') || '';
+    const target = extractSteamTarget(raw);
+    if (!target) return sendJson(res, 400, { ok: false, error: 'invalid-input' });
+    const steamid = await resolveSteamId(target);
+    if (!steamid) return sendJson(res, 404, { ok: false, error: 'not-found', target });
+    return sendJson(res, 200, { ok: true, steamid, target });
+  }
+
+  if (pathname.startsWith('/api/profile/')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const profile = await fetchProfile(steamid);
+    db.upsertUser(profile);
+    return sendJson(res, 200, { ok: true, profile });
+  }
+
+  if (pathname.startsWith('/api/inventory/history')) {
+    const steamid = query.get('steamid') || getRequestSteamId(req);
+    if (!steamid || !/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const snapshots = db.listInventorySnapshots(steamid, 30);
+    return sendJson(res, 200, { ok: true, steamid, snapshots });
+  }
+
+  if (pathname.startsWith('/api/inventory/')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/inventory/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+
+    const sessionSteamId = getRequestSteamId(req);
+    const settings = sessionSteamId ? db.getSettings(sessionSteamId) : null;
+    const currency = normalizeCurrency(query.get('currency') || settings?.currency || 'RUB');
+    const skipPrices = query.get('no_prices') === '1';
+    const cachedOk = query.get('cached_ok') === '1';
+    const force = query.get('force') === '1';
+
+    // Cache layer: serve a recent priced payload instantly when the client allows it.
+    // Skipped when prices are not requested (cheap anyway) or a force refresh is asked.
+    const INV_CACHE_FRESH_MS = 10 * 60 * 1000;  // ≤10 min → fresh
+    const INV_CACHE_STALE_MS = 24 * 60 * 60 * 1000; // ≤24h → stale-but-serveable
+    if (cachedOk && !skipPrices && !force) {
+      try {
+        const c = db.getInventoryCache(steamid, currency.code);
+        if (c) {
+          const age = Date.now() - Date.parse(c.fetched_at);
+          if (age <= INV_CACHE_STALE_MS) {
+            return sendJson(res, 200, {
+              ...c.payload,
+              cached: true,
+              stale: age > INV_CACHE_FRESH_MS,
+              cache_age_ms: age
+            });
+          }
+        }
+      } catch (_) { /* fall through to live fetch */ }
+    }
+
+    const fetched = await fetchInventoryItems(steamid);
+    if (fetched.status !== 'ok') {
+      return sendJson(res, 200, {
+        ok: false,
+        steamid,
+        status: fetched.status,
+        error: fetched.error || null,
+        http_status: fetched.http_status || null,
+        items: [],
+        total_items: 0,
+        pricing: null,
+        currency: currency.code
+      });
+    }
+    let pricing = null;
+    if (skipPrices) {
+      pricing = {
+        items: fetched.items.map(i => ({ ...i, price_value: null, price_text: null, price_currency: currency.code })),
+        currency: currency.code, total_value: null, total_value_text: null,
+        priced_items: 0, unpriced_items: fetched.items.length,
+        unique_names: new Set(fetched.items.map(i => i.market_hash_name)).size,
+        fetched_unique_names: 0, skipped_due_to_limit: 0, fetch_limit: PRICE_FETCH_LIMIT
+      };
+    } else {
+      pricing = await pricedInventory(fetched.items, currency.code);
+    }
+
+    // Save snapshot (only sample items for storage size)
+    try {
+      const top10 = pricing.items
+        .filter(i => i.price_value != null)
+        .sort((a, b) => b.price_value - a.price_value)
+        .slice(0, 10)
+        .map(i => ({ name: i.market_name, value: i.price_value, currency: currency.code }));
+      db.saveInventorySnapshot({
+        steam_id: steamid,
+        currency: currency.code,
+        total_items: pricing.items.length,
+        total_value: pricing.total_value,
+        total_value_text: pricing.total_value_text,
+        status: 'ok',
+        items: top10,
+        pricing: {
+          priced_items: pricing.priced_items,
+          unpriced_items: pricing.unpriced_items,
+          unique_names: pricing.unique_names,
+          fetched_unique_names: pricing.fetched_unique_names,
+          skipped_due_to_limit: pricing.skipped_due_to_limit
+        }
+      });
+    } catch (_) {}
+
+    const payload = {
+      ok: true,
+      steamid,
+      status: 'ok',
+      items: pricing.items,
+      total_items: pricing.items.length,
+      total_value: pricing.total_value,
+      total_value_text: pricing.total_value_text,
+      currency: currency.code,
+      pricing: {
+        priced_items: pricing.priced_items,
+        unpriced_items: pricing.unpriced_items,
+        unique_names: pricing.unique_names,
+        fetched_unique_names: pricing.fetched_unique_names,
+        skipped_due_to_limit: pricing.skipped_due_to_limit,
+        fetch_limit: pricing.fetch_limit
+      }
+    };
+
+    // Save to cache (only full priced payloads — skipPrices payloads aren't worth caching)
+    if (!skipPrices) {
+      try { db.setInventoryCache(steamid, currency.code, payload); } catch (_) {}
+    }
+
+    return sendJson(res, 200, { ...payload, cached: false });
+  }
+
+  if (pathname === '/api/news') {
+    const count = Math.min(20, Math.max(3, Number(query.get('count') || 10)));
+    const news = await getCachedNews(count);
+    return sendJson(res, 200, news);
+  }
+
+  // Unified feed: official CS2 news (virtual public "official") + posts from publics
+  // the user is subscribed to. Anonymous users see official news only.
+  if (pathname === '/api/feed') {
+    const me = getRequestSteamId(req);
+    const scope = query.get('scope') || 'all'; // 'all' | 'subs' | 'official'
+    const items = [];
+
+    // Official news as feed items
+    if (scope === 'all' || scope === 'official') {
+      const news = await getCachedNews(10);
+      for (const n of (news.items || [])) {
+        items.push({
+          kind: 'news',
+          public_id: 'official',
+          public_name: n.feedlabel && /counter-strike/i.test(n.feedlabel) ? 'Counter-Strike 2' : 'Counter-Strike 2',
+          verified: true,
+          title: n.title,
+          body: n.contents || '',
+          link: n.url,
+          image: n.image || null,
+          created_at: n.date || null   // already ISO string from fetchSteamNews
+        });
+      }
+    }
+
+    // User posts from subscribed publics (or all publics if scope=all and not logged in we skip)
+    if (scope !== 'official') {
+      let publicIds = null;
+      if (scope === 'subs') {
+        publicIds = me ? db.listSubscriptions(me) : [];
+      }
+      // scope 'all': include posts from all publics too (discovery)
+      const posts = db.listPosts({ publicIds: scope === 'subs' ? publicIds : null, limit: 50 });
+      for (const p of posts) {
+        const pub = db.getPublic(p.public_id);
+        items.push({
+          kind: 'post',
+          post_id: p.id,
+          public_id: p.public_id,
+          public_name: pub?.name || p.public_id,
+          public_avatar: pub?.avatar || null,
+          verified: !!pub?.verified,
+          title: p.title,
+          body: p.body,
+          link: p.link,
+          image: p.image,
+          created_at: p.created_at
+        });
+      }
+    }
+
+    // Sort by date desc (nulls last)
+    items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    return sendJson(res, 200, { ok: true, scope, items: items.slice(0, 60) });
+  }
+
+  if (pathname === '/api/publics') {
+    const me = getRequestSteamId(req);
+
+    // Create a public (logged-in users; max 5 per user)
+    if (req.method === 'POST') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+      const body = await readJsonBody(req);
+      const name = String(body.name || '').trim().slice(0, 60);
+      const description = String(body.description || '').trim().slice(0, 300);
+      const avatar = String(body.avatar || '').trim().slice(0, 500) || null;
+      const cover = String(body.cover || '').trim().slice(0, 500) || null;
+      if (name.length < 3) return sendJson(res, 400, { ok: false, error: 'name-too-short' });
+      if (db.countPublicsByOwner(me) >= 5) return sendJson(res, 400, { ok: false, error: 'too-many' });
+      const pub = db.createPublic({ owner_steam_id: me, name, description, avatar, cover });
+      db.subscribe(me, pub.id); // owner auto-subscribes
+      db.logEvent('public-create', me, { id: pub.id, name });
+      return sendJson(res, 200, { ok: true, public: pub });
+    }
+
+    const subs = me ? db.listSubscriptions(me) : [];
+    const publics = db.listPublics().map(p => ({
+      id: p.id, name: p.name, description: p.description, avatar: p.avatar,
+      verified: !!p.verified, subscribed: subs.includes(p.id),
+      owner: p.owner_steam_id, is_owner: me === p.owner_steam_id
+    }));
+    return sendJson(res, 200, { ok: true, publics, subscriptions: subs });
+  }
+
+  if (pathname.startsWith('/api/publics/') && pathname.endsWith('/subscribe')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const pid = decodeURIComponent(pathname.slice('/api/publics/'.length).split('/')[0] || '').trim();
+    if (!db.getPublic(pid)) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
+    if (req.method === 'POST') { db.subscribe(me, pid); return sendJson(res, 200, { ok: true, subscribed: true }); }
+    if (req.method === 'DELETE') { db.unsubscribe(me, pid); return sendJson(res, 200, { ok: true, subscribed: false }); }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // Public detail + its posts; DELETE removes own public
+  if (pathname.startsWith('/api/publics/')) {
+    const me = getRequestSteamId(req);
+    const pid = decodeURIComponent(pathname.slice('/api/publics/'.length).split('/')[0] || '').trim();
+    const pub = db.getPublic(pid);
+    if (!pub) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
+
+    if (req.method === 'GET') {
+      const subs = me ? db.listSubscriptions(me) : [];
+      const posts = db.listPosts({ publicIds: [pid], limit: 50 });
+      return sendJson(res, 200, { ok: true,
+        public: { id: pub.id, name: pub.name, description: pub.description, avatar: pub.avatar, cover: pub.cover,
+          verified: !!pub.verified, owner: pub.owner_steam_id,
+          is_owner: me === pub.owner_steam_id, subscribed: subs.includes(pid) },
+        posts
+      });
+    }
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      if (me !== pub.owner_steam_id) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      const body = await readJsonBody(req);
+      const patch = {};
+      if (body.name !== undefined) { const n = String(body.name).trim().slice(0, 60); if (n.length >= 3) patch.name = n; }
+      if (body.description !== undefined) patch.description = String(body.description).trim().slice(0, 300) || null;
+      if (body.avatar !== undefined) patch.avatar = String(body.avatar).trim().slice(0, 500) || null;
+      if (body.cover !== undefined) patch.cover = String(body.cover).trim().slice(0, 500) || null;
+      db.updatePublic(pid, patch);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'DELETE') {
+      if (me !== pub.owner_steam_id && !isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      db.deletePublic(pid);
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // Posts: create (owner only) / delete (author or admin)
+  if (pathname === '/api/posts' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+    const body = await readJsonBody(req);
+    const public_id = String(body.public_id || '').trim();
+    const pub = db.getPublic(public_id);
+    if (!pub) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
+    if (pub.owner_steam_id !== me) return sendJson(res, 403, { ok: false, error: 'not-owner' });
+    const title = String(body.title || '').trim().slice(0, 200) || null;
+    const text = String(body.body || '').trim().slice(0, 5000);
+    const link = String(body.link || '').trim().slice(0, 500) || null;
+    const image = String(body.image || '').trim().slice(0, 500) || null;
+    if (!text && !title) return sendJson(res, 400, { ok: false, error: 'empty' });
+    const post = db.createPost({ public_id, author_steam_id: me, title, body: text, link, image });
+    db.logEvent('post-create', me, { public_id, post_id: post.id });
+    return sendJson(res, 200, { ok: true, post });
+  }
+
+  if (pathname.startsWith('/api/posts/')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const postId = pathname.slice('/api/posts/'.length).split('/')[0];
+    const post = db.getPost(postId);
+    if (!post) return sendJson(res, 404, { ok: false, error: 'no-such-post' });
+    if (req.method === 'DELETE') {
+      if (post.author_steam_id !== me && !isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      db.deletePost(postId);
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  if (pathname.startsWith('/api/stats/')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/stats/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const s = await fetchCs2Stats(steamid);
+    return sendJson(res, 200, { ...s, steamid });
+  }
+
+  if (pathname.startsWith('/api/playerbans/')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/playerbans/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const r = await fetchPlayerBans(steamid);
+    return sendJson(res, 200, r);
+  }
+
+  if (pathname.startsWith('/api/leetify/')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/leetify/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const r = await fetchLeetifyProfile(steamid);
+    return sendJson(res, 200, r);
+  }
+
+  if (pathname.startsWith('/api/faceit/')) {
+    // /api/faceit/{steamid}  — look up by Steam, optionally ?nickname= to override
+    const idPart = decodeURIComponent(pathname.slice('/api/faceit/'.length).split('/')[0] || '').trim();
+    const nickname = (query.get('nickname') || '').trim();
+    const matchCount = Math.min(20, Math.max(1, Number(query.get('matches') || 10)));
+    if (!idPart && !nickname) {
+      return sendJson(res, 400, { ok: false, error: 'no-identifier' });
+    }
+    const steamid = /^\d{17}$/.test(idPart) ? idPart : null;
+    if (!steamid && !nickname) {
+      return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    }
+    const result = await buildFaceitSummary({ steamid, nickname: nickname || undefined, matchCount });
+    return sendJson(res, 200, result);
+  }
+
+  if (pathname === '/api/prices') {
+    const names = (query.get('names') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 100);
+    if (!names.length) return sendJson(res, 400, { ok: false, error: 'no-names' });
+    const currency = normalizeCurrency(query.get('currency') || 'RUB');
+    const out = {};
+    for (const name of names) {
+      out[name] = await getPriceWithCache(name, currency.code);
+    }
+    return sendJson(res, 200, { ok: true, currency: currency.code, prices: out });
+  }
+
+  if (pathname === '/api/price-history') {
+    const name = query.get('name') || '';
+    const currency = normalizeCurrency(query.get('currency') || 'RUB');
+    const days = Math.min(90, Math.max(1, Number(query.get('days') || 30)));
+    if (!name) return sendJson(res, 400, { ok: false, error: 'no-name' });
+    const history = db.getPriceHistory(name, currency.code, 'steam', days);
+    return sendJson(res, 200, { ok: true, name, currency: currency.code, days, history });
+  }
+
+  if (pathname === '/api/watchlist') {
+    const steamid = getRequestSteamId(req);
+    if (!steamid) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (req.method === 'GET') {
+      const items = db.listWatchlist(steamid);
+      // enrich with latest price
+      const settings = db.getSettings(steamid);
+      const currency = normalizeCurrency(settings.currency || 'RUB');
+      const enriched = items.map(it => {
+        const p = db.getPrice(it.market_name, currency.code, 'steam');
+        return { ...it,
+          price_value: p?.price_value ?? null,
+          price_text: p?.price_text ?? null,
+          price_fetched_at: p?.fetched_at ?? null,
+          currency: currency.code };
+      });
+      return sendJson(res, 200, { ok: true, items: enriched });
+    }
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const name = String(body.market_name || '').trim();
+      if (!name) return sendJson(res, 400, { ok: false, error: 'no-market-name' });
+      const row = db.addWatch({
+        steam_id: steamid,
+        market_name: name,
+        threshold_above: body.threshold_above != null ? Number(body.threshold_above) : null,
+        threshold_below: body.threshold_below != null ? Number(body.threshold_below) : null
+      });
+      db.logEvent('watchlist-add', steamid, { market_name: name });
+      return sendJson(res, 200, { ok: true, item: row });
+    }
+    if (req.method === 'DELETE') {
+      const body = await readJsonBody(req);
+      const name = String(body.market_name || query.get('name') || '').trim();
+      if (!name) return sendJson(res, 400, { ok: false, error: 'no-market-name' });
+      db.removeWatch(steamid, name);
+      db.logEvent('watchlist-remove', steamid, { market_name: name });
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  if (pathname.startsWith('/api/reputation/')) {
+    const target = decodeURIComponent(pathname.slice('/api/reputation/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    const voter = getRequestSteamId(req);
+
+    if (req.method === 'GET') {
+      const agg = db.aggregateReputation(target);
+      const myVote = voter ? db.getReputationVote(voter, target) : null;
+      return sendJson(res, 200, {
+        ok: true, target,
+        ...agg,
+        my_vote: myVote ? { categories: myVote.categories, comment: myVote.comment, sentiment: myVote.sentiment } : null,
+        can_vote: !!voter && voter !== target
+      });
+    }
+
+    if (req.method === 'POST') {
+      if (!voter) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      if (db.isUserBanned(voter)) return sendJson(res, 403, { ok: false, error: 'banned' });
+      if (voter === target) return sendJson(res, 400, { ok: false, error: 'self-vote' });
+      const body = await readJsonBody(req);
+      const categories = Array.isArray(body.categories)
+        ? body.categories.filter(c => c in db.REP_CATEGORIES)
+        : (body.category && body.category in db.REP_CATEGORIES ? [body.category] : []);
+      const comment = body.comment != null ? String(body.comment) : null;
+      if (categories.length === 0 && !(comment && comment.trim())) {
+        return sendJson(res, 400, { ok: false, error: 'empty-vote' });
+      }
+
+      // Rate limit: max 30 votes per hour per voter
+      const recent = db.countRecentVotes(voter, 60 * 60 * 1000);
+      if (recent >= 30) return sendJson(res, 429, { ok: false, error: 'rate-limited' });
+
+      // Anti-bot weighting: account younger than 30 days has weight 0 (counted but not shown)
+      let weight = 1;
+      try {
+        const prof = await fetchProfile(voter);
+        const tc = Number(prof?.timecreated || 0);
+        if (tc > 0) {
+          const ageDays = (Date.now() - tc * 1000) / (1000 * 60 * 60 * 24);
+          if (ageDays < 30) weight = 0;
+        }
+      } catch (_) { /* if we can't tell, default weight 1 */ }
+
+      const r = db.castReputation({ voterSteamId: voter, targetSteamId: target, categories, comment, weight });
+      if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
+      db.logEvent('reputation-vote', voter, { target, categories, has_comment: !!r.comment, weight });
+      const agg = db.aggregateReputation(target);
+      return sendJson(res, 200, { ok: true, ...agg,
+        my_vote: { categories: r.categories, comment: r.comment, sentiment: r.sentiment },
+        weight_applied: weight });
+    }
+
+    if (req.method === 'DELETE') {
+      if (!voter) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      db.removeReputation(voter, target);
+      db.logEvent('reputation-remove', voter, { target });
+      const agg = db.aggregateReputation(target);
+      return sendJson(res, 200, { ok: true, ...agg, my_vote: null });
+    }
+
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // ---------- friends ----------
+  async function enrichSteamList(arr) {
+    const out = [];
+    for (const e of arr) {
+      let prof = null;
+      try { prof = await fetchProfile(e.steam_id); } catch (_) {}
+      out.push({ ...e,
+        name: prof?.personaname || e.steam_id,
+        avatar: prof?.avatar || prof?.avatarfull || null });
+    }
+    return out;
+  }
+
+  if (pathname === '/api/friends') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const lists = db.listFriends(me);
+    const [friends, incoming, outgoing] = await Promise.all([
+      enrichSteamList(lists.friends),
+      enrichSteamList(lists.incoming),
+      enrichSteamList(lists.outgoing)
+    ]);
+    return sendJson(res, 200, { ok: true, friends, incoming, outgoing });
+  }
+
+  if (pathname.startsWith('/api/friends/')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const parts = pathname.slice('/api/friends/'.length).split('/');
+    const other = decodeURIComponent(parts[0] || '').trim();
+    const action = parts[1] || '';
+    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+
+    if (req.method === 'POST' && action === 'request') {
+      const r = db.sendFriendRequest(me, other);
+      if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
+      db.logEvent('friend-request', me, { other });
+      return sendJson(res, 200, { ok: true, status: db.friendStatus(me, other) });
+    }
+    if (req.method === 'POST' && action === 'accept') {
+      const r = db.acceptFriendRequest(me, other);
+      if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
+      db.logEvent('friend-accept', me, { other });
+      return sendJson(res, 200, { ok: true, status: 'friends' });
+    }
+    if (req.method === 'DELETE') {
+      db.removeFriend(me, other);
+      return sendJson(res, 200, { ok: true, status: db.friendStatus(me, other) });
+    }
+    if (req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, status: db.friendStatus(me, other) });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // ---------- blocks ----------
+  if (pathname === '/api/blocks') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const ids = db.listBlocks(me).map(id => ({ steam_id: id }));
+    const blocked = await enrichSteamList(ids);
+    return sendJson(res, 200, { ok: true, blocked });
+  }
+
+  if (pathname.startsWith('/api/blocks/')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const other = decodeURIComponent(pathname.slice('/api/blocks/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (req.method === 'POST') {
+      const r = db.blockUser(me, other);
+      if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
+      db.logEvent('block', me, { other });
+      return sendJson(res, 200, { ok: true, blocked: true });
+    }
+    if (req.method === 'DELETE') {
+      db.unblockUser(me, other);
+      return sendJson(res, 200, { ok: true, blocked: false });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // ---------- messages ----------
+  if (pathname === '/api/conversations') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const convos = db.listConversations(me);
+    const enriched = [];
+    for (const c of convos) {
+      let prof = null;
+      try { prof = await fetchProfile(c.steam_id); } catch (_) {}
+      enriched.push({
+        steam_id: c.steam_id,
+        name: prof?.personaname || c.steam_id,
+        avatar: prof?.avatar || prof?.avatarfull || null,
+        unread: c.unread,
+        last_text: c.last ? decryptMessage(c.last.body_enc).slice(0, 80) : '',
+        last_at: c.last?.created_at || null,
+        last_from_me: c.last ? c.last.sender_steam_id === me : false
+      });
+    }
+    return sendJson(res, 200, { ok: true, conversations: enriched, unread_total: db.countUnread(me) });
+  }
+
+  if (pathname.startsWith('/api/messages/')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const other = decodeURIComponent(pathname.slice('/api/messages/'.length).split('/')[0] || '').trim();
+    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+
+    if (req.method === 'GET') {
+      db.markRead(me, other);
+      const rows = db.listMessages(me, other, 200);
+      const messages = rows.map(m => ({
+        id: m.id,
+        from_me: m.sender_steam_id === me,
+        text: decryptMessage(m.body_enc),
+        created_at: m.created_at,
+        read: !!m.read_at
+      }));
+      let prof = null;
+      try { prof = await fetchProfile(other); } catch (_) {}
+      return sendJson(res, 200, { ok: true, other: {
+        steam_id: other, name: prof?.personaname || other,
+        avatar: prof?.avatar || prof?.avatarfull || null
+      }, messages, friend: db.areFriends(me, other) });
+    }
+
+    if (req.method === 'POST') {
+      if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+      if (db.eitherBlocked(me, other)) return sendJson(res, 403, { ok: false, error: 'blocked' });
+      if (!db.areFriends(me, other)) return sendJson(res, 403, { ok: false, error: 'not-friends' });
+      const body = await readJsonBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
+      if (text.length > 2000) return sendJson(res, 400, { ok: false, error: 'too-long' });
+      const enc = encryptMessage(text);
+      const saved = db.insertMessage(me, other, enc);
+      db.logEvent('message-send', me, { to: other });
+      return sendJson(res, 200, { ok: true, message: {
+        id: saved.id, from_me: true, text, created_at: saved.created_at, read: false
+      } });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  if (pathname === '/api/settings') {
+    const steamid = getRequestSteamId(req);
+    if (!steamid) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, settings: db.getSettings(steamid) });
+    }
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const allowed = {};
+      if (body.currency && CURRENCIES[String(body.currency).toUpperCase()]) {
+        allowed.currency = String(body.currency).toUpperCase();
+      }
+      if (body.language && ['ru', 'en'].includes(String(body.language))) {
+        allowed.language = String(body.language);
+      }
+      if (body.telegram_id !== undefined) {
+        allowed.telegram_id = body.telegram_id ? String(body.telegram_id).slice(0, 32) : null;
+      }
+      if (body.faceit_nickname !== undefined) {
+        // Faceit nicknames are 3–25 chars, allow letters/digits/underscore/dash
+        const raw = body.faceit_nickname ? String(body.faceit_nickname).trim().slice(0, 32) : '';
+        allowed.faceit_nickname = raw && /^[A-Za-z0-9_.\-]+$/.test(raw) ? raw : null;
+      }
+      const next = db.setSettings(steamid, allowed);
+      db.logEvent('settings-update', steamid, allowed);
+      return sendJson(res, 200, { ok: true, settings: next });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  return sendJson(res, 404, { ok: false, error: 'not-found', path: pathname });
+}
+
+// ---------- static ----------
+function safeJoin(base, target) {
+  const r = path.resolve(base, '.' + target);
+  if (!r.startsWith(base)) return null;
+  return r;
+}
+
+function serveStatic(req, res, pathname) {
+  // Uploaded user files live in the data dir (persistent), served read-only.
+  if (pathname.startsWith('/uploads/')) {
+    const rel = pathname.slice('/uploads/'.length);
+    // only allow a flat safe filename
+    if (!/^[a-z0-9._-]+$/i.test(rel)) { sendText(res, 403, 'Forbidden'); return; }
+    const file = path.join(UPLOADS_DIR, rel);
+    fs.stat(file, (err, stat) => {
+      if (err || !stat.isFile()) { sendText(res, 404, 'Not found'); return; }
+      const ext = path.extname(file).toLowerCase();
+      const ctype = MIME[ext] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400' });
+      fs.createReadStream(file).pipe(res);
+    });
+    return;
+  }
+
+  // Pretty routes
+  const routeMap = {
+    '/': 'index.html',
+    '/dashboard': 'dashboard.html',
+    '/inventory': 'inventory.html',
+    '/lookup': 'lookup.html',
+    '/settings': 'settings.html',
+    '/feed': 'feed.html',
+    '/messages': 'messages.html',
+    '/privacy': 'privacy.html',
+    '/terms': 'terms.html',
+    '/rules': 'rules.html',
+    '/admin': 'admin.html'
+  };
+  const rel = routeMap[pathname] ? `/${routeMap[pathname]}` : pathname;
+  const file = safeJoin(PUBLIC_DIR, rel);
+  if (!file) { sendText(res, 403, 'Forbidden'); return; }
+  fs.stat(file, (err, stat) => {
+    if (err || !stat.isFile()) {
+      // SPA fallback to index.html for unknown HTML routes
+      if (req.headers.accept && req.headers.accept.includes('text/html')) {
+        return fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e, d) => {
+          if (e) return sendText(res, 404, 'Not found');
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(d);
+        });
+      }
+      return sendText(res, 404, 'Not found');
+    }
+    const ext = path.extname(file).toLowerCase();
+    const ctype = MIME[ext] || 'application/octet-stream';
+    const cache = (ext === '.html') ? 'no-store' : 'public, max-age=3600';
+    res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': cache });
+    fs.createReadStream(file).pipe(res);
+  });
+}
+
+// ---------- main ----------
+const server = http.createServer(async (req, res) => {
+  let parsedUrl;
+  try { parsedUrl = new URL(req.url, getBaseUrl(req)); }
+  catch (_) { return sendText(res, 400, 'Bad request'); }
+
+  const pathname = parsedUrl.pathname;
+
+  // CORS for /api (basic)
+  if (pathname.startsWith('/api/')) {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+  }
+
+  try {
+    if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
+    if (pathname.startsWith('/auth/')) {
+      const handled = await handleSteamOpenId(req, res, parsedUrl);
+      if (handled !== false) return;
+      return sendText(res, 404, 'Not found');
+    }
+    return serveStatic(req, res, pathname);
+  } catch (e) {
+    console.error('[error]', e);
+    if (!res.headersSent) sendJson(res, 500, { ok: false, error: 'internal', message: String(e?.message || e) });
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`SOKOLENOK / LUDIK ${APP_VERSION} → http://localhost:${PORT}`);
+  console.log(`Storage backend: ${db.storageHealth().backend}`);
+  console.log(`Steam API key:   ${STEAM_API_KEY ? 'configured' : 'NOT SET (XML fallback only, public endpoints will still work)'}`);
+  console.log(`Faceit API key:  ${FACEIT_API_KEY ? 'configured' : 'NOT SET (Faceit endpoints will return ok:false)'}`);
+});

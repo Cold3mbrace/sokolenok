@@ -1,0 +1,15 @@
+{
+  "name": "sokolenok-ludik",
+  "version": "4.4.0",
+  "description": "SOKOLENOK / LUDIK — личный кабинет игрока CS2",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check storage/db.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

@@ -1,0 +1,60 @@
+services:
+  app:
+    build: .
+    container_name: sokolenok-app
+    restart: unless-stopped
+    environment:
+      # ---- REQUIRED on prod ----
+      # Full public URL of your site. Steam OpenID redirects here.
+      BASE_URL: ${BASE_URL:?set BASE_URL in .env}
+      # ---- API keys ----
+      STEAM_API_KEY: ${STEAM_API_KEY:-}
+      FACEIT_API_KEY: ${FACEIT_API_KEY:-}
+      # ---- internals ----
+      PORT: 4173
+      SOKOLENOK_DATA_DIR: /data
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      MESSAGE_SECRET: ${MESSAGE_SECRET:-}
+      ADMIN_STEAMIDS: ${ADMIN_STEAMIDS:-}
+    volumes:
+      - sokolenok-data:/data
+    # No public port mapping — only nginx talks to the app over the internal network.
+    expose:
+      - "4173"
+    networks:
+      - web
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sokolenok-nginx
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certbot/conf:/etc/letsencrypt:ro
+      - ./deploy/certbot/www:/var/www/certbot:ro
+    networks:
+      - web
+
+  # One-shot helper container for obtaining / renewing Let's Encrypt certificates.
+  # Usage is described in deploy/DEPLOY.md.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: sokolenok-certbot
+    volumes:
+      - ./deploy/certbot/conf:/etc/letsencrypt
+      - ./deploy/certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done;'"
+    networks:
+      - web
+
+volumes:
+  sokolenok-data:
+
+networks:
+  web:
+    driver: bridge
