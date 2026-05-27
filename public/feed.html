@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0a0d0c">
   <title>Лента · SOKOLENOK</title>
   <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
-  <link rel="stylesheet" href="/styles.css?v=1779803314">
+  <link rel="stylesheet" href="/styles.css?v=1779882160">
   <style>
     .feed-grid { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
     @media (max-width: 1000px) { .feed-grid { grid-template-columns: 1fr; } }
@@ -18,15 +18,13 @@
   <main class="main">
     <div class="main-top"></div>
 
-    <div class="eyebrow"><span class="dot"></span>Лента</div>
-    <h1 class="page-title" id="feed-title">Лента</h1>
-    <p class="page-sub">Официальные новости CS2 и обновления пабликов, на которые вы подписаны.</p>
-
-    <!-- Scope tabs -->
-    <div class="feed-tabs" id="feed-tabs">
-      <button class="tab active" data-scope="all" type="button">Все</button>
-      <button class="tab" data-scope="subs" type="button">Подписки</button>
-      <button class="tab" data-scope="official" type="button">Официальные</button>
+    <div class="feed-head">
+      <h1 class="feed-h1" id="feed-title">Лента</h1>
+      <div class="feed-tabs" id="feed-tabs">
+        <button class="feed-tab active" data-scope="all" type="button">Все</button>
+        <button class="feed-tab" data-scope="subs" type="button">Подписки</button>
+        <button class="feed-tab" data-scope="official" type="button">Официальные</button>
+      </div>
     </div>
 
     <div class="feed-grid">
@@ -40,6 +38,6 @@
   </main>
 </div>
 <div id="toast-host" class="toast-host"></div>
-<script src="/app.js?v=1779803314"></script>
+<script src="/app.js?v=1779882160"></script>
 </body>
 </html>

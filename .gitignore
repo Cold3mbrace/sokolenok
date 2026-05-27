@@ -1,21 +1,25 @@
-﻿node_modules/
+# Secrets — NEVER commit
 .env
 .env.*
 !.env.example
 
-dist/
-build/
-.vite/
+# Runtime data (sqlite, json fallback, uploads, message key)
+.data/
+*.sqlite
+*.sqlite-journal
+*.db
+.msgsecret
 
+# Node
+node_modules/
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
+# Build artifacts / archives
+*.zip
+
+# OS
 .DS_Store
 Thumbs.db
 
-*.log
-*.sqlite
-*.sqlite3
-*.db
+# Certbot (deploy)
+deploy/certbot/

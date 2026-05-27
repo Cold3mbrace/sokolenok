@@ -913,6 +913,7 @@ async function buildFaceitSummary({ steamid, nickname, matchCount = 10 }) {
       deaths:  num(s.stats['Deaths'])
     }))
     .filter(m => m.matches && m.matches > 0)
+    .filter(m => isCs2Map(m.map))   // drop legacy CS:GO-only maps (Office, ar_monastery, etc.)
     .sort((a, b) => (b.matches || 0) - (a.matches || 0));
 
   // Last matches list — enrich each with per-match stats (K/D, HS%, ADR, etc.)
@@ -971,6 +972,24 @@ function aggregateTeammates(items, playerId) {
     .filter(t => t.games >= 2) // only people you played with more than once
     .sort((a, b) => b.games - a.games)
     .slice(0, 8);
+}
+
+// CS2 map pool (active duty + commonly played). Legacy CS:GO maps like Office,
+// ar_monastery, Cobblestone, etc. are filtered out of stats.
+const CS2_MAPS = new Set([
+  'de_mirage', 'de_inferno', 'de_nuke', 'de_overpass', 'de_vertigo', 'de_ancient',
+  'de_anubis', 'de_dust2', 'de_train', 'de_cache', 'de_cbble', 'de_tuscan',
+  'mirage', 'inferno', 'nuke', 'overpass', 'vertigo', 'ancient', 'anubis',
+  'dust2', 'dust ii', 'dust 2', 'train', 'cache'
+]);
+function isCs2Map(name) {
+  if (!name) return false;
+  const k = String(name).toLowerCase().trim();
+  if (CS2_MAPS.has(k)) return true;
+  // Be lenient: accept any de_ map we don't explicitly know, but block known legacy/AR/CS maps
+  const legacy = ['office', 'monastery', 'ar_', 'cs_', 'baggage', 'shoots', 'lake', 'house', 'assault', 'militia', 'agency', 'italy', 'cbble', 'cobblestone', 'canals', 'zoo', 'abbey'];
+  if (legacy.some(l => k.includes(l))) return false;
+  return k.startsWith('de_') || CS2_MAPS.has(k);
 }
 
 // ---------- stats (CS2 UserStats) ----------
@@ -2054,7 +2073,8 @@ function serveStatic(req, res, pathname) {
     '/privacy': 'privacy.html',
     '/terms': 'terms.html',
     '/rules': 'rules.html',
-    '/admin': 'admin.html'
+    '/admin': 'admin.html',
+    '/me': 'me.html'
   };
   const rel = routeMap[pathname] ? `/${routeMap[pathname]}` : pathname;
   const file = safeJoin(PUBLIC_DIR, rel);

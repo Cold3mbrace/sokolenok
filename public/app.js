@@ -206,6 +206,7 @@ const toast = {
 // Returns the `me` object so callers can use logged_in state immediately.
 async function renderTopbar(active = '') {
   const me = await api.me().catch(() => ({ logged_in: false }));
+  window.__me = me;
   if (active !== 'messages') document.body.classList.remove('msgr-thread-open');
   renderSidebar(active, me);
   renderMainToolbar(me);
@@ -256,30 +257,75 @@ function showConsentGate() {
 }
 
 // Mobile burger button + overlay to toggle the sidebar on small screens.
+// Instagram-style fixed bottom navigation for mobile.
 function ensureMobileNav() {
-  if (document.getElementById('mobile-burger')) return;
-  const sidebar = document.getElementById('sidebar');
-  if (!sidebar) return;
+  // Build once; rebuild active state each call.
+  let bar = document.getElementById('bottom-nav');
+  const buildItems = (me) => ([
+    { href: '/dashboard', label: 'Главная',   key: 'dashboard', icon: 'home' },
+    { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
+    { href: '/messages',  label: 'Чаты',       key: 'messages',  icon: 'mail', badge: true },
+    { href: '/inventory', label: 'Инвентарь',  key: 'inventory', icon: 'inventory' },
+    { href: '/me',        label: 'Вы',         key: 'me',        icon: 'user' }
+  ]);
 
-  const burger = el('button', {
-    id: 'mobile-burger', class: 'mobile-burger', type: 'button', 'aria-label': 'Меню',
-    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>'
-  });
-  const overlay = el('div', { id: 'mobile-overlay', class: 'mobile-overlay' });
+  // Only for logged-in users
+  const meCached = window.__me;
+  if (!meCached || !meCached.logged_in) {
+    if (bar) bar.remove();
+    return;
+  }
 
-  const open = () => { sidebar.classList.add('open'); overlay.classList.add('show'); document.body.style.overflow = 'hidden'; };
-  const close = () => { sidebar.classList.remove('open'); overlay.classList.remove('show'); document.body.style.overflow = ''; };
+  const active = document.body.dataset.page;
+  if (!bar) {
+    bar = el('nav', { id: 'bottom-nav', class: 'bottom-nav' });
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = '';
+  for (const item of buildItems(meCached)) {
+    const isActive = active === item.key || (item.key === 'me' && active === 'settings');
+    const link = el('a', { class: 'bn-item' + (isActive ? ' active' : ''), href: item.href },
+      el('span', { class: 'bn-icon', html: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${navIconPath(item.icon)}</svg>` }),
+      el('span', { class: 'bn-label' }, item.label)
+    );
+    if (item.badge) {
+      const b = el('span', { class: 'bn-badge', id: 'bn-unread', style: { display: 'none' } }, '');
+      link.querySelector('.bn-icon').appendChild(b);
+    }
+    bar.appendChild(link);
+  }
+  // mark body so we can add bottom padding
+  document.body.classList.add('has-bottom-nav');
+  refreshUnreadBadge();
+}
 
-  burger.addEventListener('click', () => sidebar.classList.contains('open') ? close() : open());
-  overlay.addEventListener('click', close);
-  // Close when a nav link inside the sidebar is tapped
-  sidebar.addEventListener('click', (e) => { if (e.target.closest('a')) close(); });
-
-  document.body.appendChild(burger);
-  document.body.appendChild(overlay);
+function navIconPath(key) {
+  const icons = navIconMap();
+  return icons[key] || '';
 }
 
 function navIcon(key) {
+  return el('span', { class: 'nav-ico', html:
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${navIconPath(key)}</svg>` });
+}
+
+function navIconMap() {
+  return {
+    home:      '<path d="M3 12 12 3l9 9"/><path d="M5 10v10h14V10"/>',
+    info:      '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12" y2="16"/>',
+    grid:      '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+    shield:    '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    users:     '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    help:      '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17"/>',
+    inventory: '<rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>',
+    feed:      '<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>',
+    mail:      '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/>',
+    user:      '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    settings:  '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'
+  };
+}
+
+function _oldNavIcon_unused(key) {
   const icons = {
     home:      '<path d="M3 12 12 3l9 9"/><path d="M5 10v10h14V10"/>',
     info:      '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12" y2="16"/>',
@@ -301,8 +347,9 @@ async function refreshUnreadBadge() {
   try {
     const r = await api.conversations();
     const n = r?.unread_total || 0;
-    const badge = $('#nav-unread-badge');
-    if (badge) {
+    for (const id of ['nav-unread-badge', 'bn-unread']) {
+      const badge = document.getElementById(id);
+      if (!badge) continue;
       if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = ''; }
       else { badge.style.display = 'none'; }
     }
@@ -3777,9 +3824,9 @@ async function pageFeed() {
   // Scope tabs
   const tabs = $('#feed-tabs');
   if (tabs) {
-    for (const btn of tabs.querySelectorAll('.tab')) {
+    for (const btn of tabs.querySelectorAll('.feed-tab')) {
       btn.addEventListener('click', () => {
-        for (const b of tabs.querySelectorAll('.tab')) b.classList.remove('active');
+        for (const b of tabs.querySelectorAll('.feed-tab')) b.classList.remove('active');
         btn.classList.add('active');
         state.scope = btn.dataset.scope;
         loadFeed();
@@ -3810,9 +3857,7 @@ async function pageFeed() {
 
 // Single public page: header + posts, with owner controls
 async function renderPublicPage(publicId, me) {
-  const tabs = $('#feed-tabs'); if (tabs) tabs.style.display = 'none';
-  const title = $('#feed-title'); if (title) title.textContent = 'Паблик';
-  const sub = document.querySelector('.page-sub'); if (sub) sub.remove();
+  const head = document.querySelector('.feed-head'); if (head) head.style.display = 'none';
   const list = $('#feed-list');
   list.innerHTML = '<div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загрузка…</div></div>';
 
@@ -4624,6 +4669,77 @@ function paintAdminTools(panel) {
   panel.appendChild(card);
 }
 
+// ============ page: me (mobile hub: profile + menu) ============
+async function pageMe() {
+  const me = await renderTopbar('me');
+  const root = $('#me-root');
+  if (!me.logged_in) {
+    root.innerHTML = '';
+    root.appendChild(el('div', { class: 'card', style: { textAlign: 'center', padding: '40px 20px' } },
+      el('div', { style: { marginBottom: '16px', color: 'var(--dim)' } }, 'Войдите, чтобы открыть профиль'),
+      el('a', { class: 'btn', href: '/auth/steam' }, 'Войти через Steam')));
+    return;
+  }
+  root.innerHTML = '';
+
+  const p = me.profile || {};
+  const avatar = p.avatarfull || p.avatar;
+
+  // Profile card
+  const profCard = el('div', { class: 'card me-prof anim-rise' },
+    el('div', { class: 'me-prof-top' },
+      (function () {
+        const a = el('div', { class: 'me-avatar' });
+        if (avatar) { const img = el('img', { src: avatar, alt: '' }); img.onerror = function(){ this.remove(); a.textContent = (p.personaname||'?').slice(0,1); }; a.appendChild(img); }
+        else a.textContent = (p.personaname || '?').slice(0, 1).toUpperCase();
+        return a;
+      })(),
+      el('div', { class: 'me-prof-info' },
+        el('div', { class: 'me-prof-name' }, p.personaname || 'Игрок'),
+        el('div', { class: 'me-prof-id' }, 'ID: ' + (me.steamid || '').slice(-12))
+      )
+    ),
+    el('a', { class: 'btn btn-full', href: `/lookup?steamid=${me.steamid}`, style: { marginTop: '14px' } }, 'Открыть мой профиль')
+  );
+  root.appendChild(profCard);
+
+  // Menu items
+  const items = [
+    { href: '/lookup', label: 'Проверить игрока', icon: 'users', desc: 'Анализ любого по SteamID' },
+    { href: '/settings', label: 'Настройки', icon: 'settings', desc: 'Валюта, Faceit, аккаунт' }
+  ];
+  if (me.is_admin) items.push({ href: '/admin', label: 'Админка', icon: 'shield', desc: 'Модерация и статистика', accent: true });
+
+  const menu = el('div', { class: 'card me-menu anim-rise', style: { animationDelay: '0.05s' } });
+  for (const it of items) {
+    menu.appendChild(el('a', { class: 'me-menu-item' + (it.accent ? ' accent' : ''), href: it.href },
+      el('span', { class: 'me-menu-ico' }, navIcon(it.icon)),
+      el('span', { class: 'me-menu-text' },
+        el('span', { class: 'me-menu-label' }, it.label),
+        el('span', { class: 'me-menu-desc' }, it.desc)),
+      el('span', { class: 'me-menu-arrow', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' })
+    ));
+  }
+  root.appendChild(menu);
+
+  // Legal + logout
+  const foot = el('div', { class: 'card me-menu anim-rise', style: { animationDelay: '0.1s' } });
+  for (const it of [
+    { href: '/privacy', label: 'Конфиденциальность' },
+    { href: '/terms', label: 'Соглашение' },
+    { href: '/rules', label: 'Правила сообщества' }
+  ]) {
+    foot.appendChild(el('a', { class: 'me-menu-item small', href: it.href },
+      el('span', { class: 'me-menu-text' }, el('span', { class: 'me-menu-label' }, it.label)),
+      el('span', { class: 'me-menu-arrow', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' })
+    ));
+  }
+  root.appendChild(foot);
+
+  root.appendChild(el('a', { class: 'btn btn-ghost btn-full anim-rise', href: '/auth/logout',
+    style: { marginTop: '14px', color: 'var(--red)', animationDelay: '0.15s' } }, 'Выйти'));
+}
+
 // ============ page: settings ============
 async function pageSettings() {
   const me = await renderTopbar('settings');
@@ -4788,7 +4904,7 @@ async function pageSettings() {
 document.addEventListener('DOMContentLoaded', () => {
   initCookieBanner();
   const page = document.body.dataset.page;
-  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin };
+  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe };
   const fn = router[page];
   if (fn) fn().catch(e => { console.error(e); toast.err('Ошибка: ' + (e.message || e)); });
 });

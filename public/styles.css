@@ -2085,50 +2085,64 @@ button { cursor: pointer; }
 .rep-btn-hint { box-shadow: 0 0 0 2px var(--line-acc); }
 
 /* ============ FEED ============ */
-.feed-tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
-.feed-tabs .tab {
-  padding: 8px 16px; border-radius: var(--r-pill);
+/* Compact header — small title + inline tabs (VK-style density) */
+.feed-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.feed-h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; margin: 0; }
+.feed-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.feed-tab {
+  padding: 6px 13px; border-radius: var(--r-pill);
   background: var(--card); border: 1px solid var(--line);
-  color: var(--dim); font-size: 13px; font-weight: 600; cursor: pointer;
+  color: var(--dim); font-size: 12.5px; font-weight: 600; cursor: pointer;
   transition: all 0.15s ease;
 }
-.feed-tabs .tab:hover { color: var(--text); border-color: var(--line-2); }
+.feed-tab:hover { color: var(--text); border-color: var(--line-2); }
+.feed-tab.active { color: var(--g); background: var(--g-soft); border-color: var(--g); }
+/* legacy .tab inside feed-tabs (admin reuse safety) */
+.feed-tabs .tab {
+  padding: 6px 13px; border-radius: var(--r-pill);
+  background: var(--card); border: 1px solid var(--line);
+  color: var(--dim); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
 .feed-tabs .tab.active { color: var(--g); background: var(--g-soft); border-color: var(--g); }
 
-#feed-list { display: flex; flex-direction: column; gap: 14px; }
-.feed-item { padding: 16px 18px; }
-.feed-item-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.feed-pub { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#feed-list { display: flex; flex-direction: column; gap: 10px; }
+.feed-item { padding: 13px 15px; }
+.feed-item-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.feed-pub { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .feed-pub-avatar {
-  width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+  width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
   background: var(--card-2); border: 1px solid var(--line);
   display: flex; align-items: center; justify-content: center;
-  font-weight: 800; color: var(--g); overflow: hidden;
+  font-weight: 800; color: var(--g); overflow: hidden; font-size: 13px;
 }
-.feed-pub-avatar.sm { width: 34px; height: 34px; border-radius: 8px; font-size: 13px; }
+.feed-pub-avatar.sm { width: 30px; height: 30px; border-radius: 8px; font-size: 12px; }
 .feed-pub-avatar.official { background: var(--g-soft); border-color: var(--line-acc); color: var(--g); }
 .feed-pub-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.feed-pub-avatar svg { width: 20px; height: 20px; }
-.feed-pub-name { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 5px;
+.feed-pub-avatar svg { width: 18px; height: 18px; }
+.feed-pub-name { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 5px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .feed-verified {
   display: inline-flex; align-items: center; justify-content: center;
   width: 15px; height: 15px; border-radius: 50%; background: var(--g); color: #061008; flex-shrink: 0;
 }
 .feed-verified svg { width: 9px; height: 9px; }
-.feed-date { font-size: 11.5px; color: var(--mute); margin-top: 1px; }
+.feed-date { font-size: 11px; color: var(--mute); margin-top: 1px; }
 .feed-tag {
-  font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em;
-  padding: 3px 8px; border-radius: var(--r-pill); flex-shrink: 0;
+  font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
+  padding: 2px 7px; border-radius: var(--r-pill); flex-shrink: 0;
 }
 .feed-tag.news { background: var(--g-soft); color: var(--g); border: 1px solid var(--line-acc); }
 .feed-tag.post { background: var(--card-2); color: var(--dim); border: 1px solid var(--line); }
-.feed-item-title { font-size: 16px; font-weight: 800; letter-spacing: -0.01em; margin-bottom: 6px; }
-.feed-item-body { font-size: 13.5px; color: var(--dim); line-height: 1.6; }
-.feed-item-img { width: 100%; border-radius: var(--r-sm); margin-top: 12px; border: 1px solid var(--line); display: block; }
+.feed-item-title { font-size: 15px; font-weight: 800; letter-spacing: -0.01em; margin-bottom: 5px; }
+.feed-item-body { font-size: 13px; color: var(--dim); line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+.feed-item-img { width: 100%; border-radius: var(--r-sm); margin-top: 10px; border: 1px solid var(--line); display: block; max-height: 420px; object-fit: cover; }
 .feed-item-link {
-  display: inline-flex; align-items: center; gap: 5px; margin-top: 12px;
-  font-size: 12.5px; font-weight: 700; color: var(--g);
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
+  font-size: 12px; font-weight: 700; color: var(--g);
 }
 .feed-item-link svg { width: 13px; height: 13px; }
 .feed-item-link:hover { color: #5beb91; }
@@ -2277,54 +2291,49 @@ button { cursor: pointer; }
 .lk-social-block:hover { border-color: var(--red); }
 
 /* ============================================================
-   MOBILE ADAPTATION
-   Burger + slide-in sidebar; single-column content; etc.
+   MOBILE ADAPTATION — Instagram-style bottom nav
    ============================================================ */
 
-/* Burger button + overlay are hidden on desktop */
-.mobile-burger { display: none; }
-.mobile-overlay { display: none; }
+/* Bottom nav hidden on desktop */
+.bottom-nav { display: none; }
 
 @media (max-width: 860px) {
-  /* Layout: drop the sidebar column, main takes full width */
+  /* Hide the desktop sidebar entirely; nav lives at the bottom */
+  .sidebar { display: none; }
   .layout { grid-template-columns: 1fr; }
 
-  /* Sidebar becomes an off-canvas drawer */
-  .sidebar {
-    position: fixed; top: 0; left: 0; z-index: 80;
-    width: 260px; max-width: 84vw; height: 100vh;
-    transform: translateX(-100%);
-    transition: transform 0.25s ease;
-    box-shadow: 0 0 40px rgba(0,0,0,0.5);
+  /* Bottom tab bar — frosted glass */
+  .bottom-nav {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 80;
+    height: calc(58px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(18px) saturate(160%);
+    border-top: 1px solid var(--glass-line, rgba(255,255,255,0.08));
   }
-  .sidebar.open { transform: translateX(0); }
-
-  /* Burger button — fixed top-left */
-  .mobile-burger {
-    display: inline-flex; align-items: center; justify-content: center;
-    position: fixed; top: 12px; left: 12px; z-index: 70;
-    width: 42px; height: 42px; border-radius: 10px;
-    background: var(--card); border: 1px solid var(--line); color: var(--text);
-    cursor: pointer;
+  .bn-item {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; text-decoration: none; color: var(--mute); position: relative;
+    transition: color 0.2s ease, transform 0.15s ease;
   }
-  .mobile-burger svg { width: 20px; height: 20px; }
-  .mobile-burger:active { background: var(--card-2); }
-
-  /* Dim overlay behind the open drawer */
-  .mobile-overlay {
-    display: block; position: fixed; inset: 0; z-index: 75;
-    background: rgba(0,0,0,0.5); opacity: 0; pointer-events: none;
-    transition: opacity 0.25s ease;
+  .bn-item:active { transform: scale(0.92); }
+  .bn-item.active { color: var(--g); }
+  .bn-icon { position: relative; display: inline-flex; }
+  .bn-icon svg { width: 23px; height: 23px; }
+  .bn-label { font-size: 10px; font-weight: 600; }
+  .bn-badge {
+    position: absolute; top: -5px; right: -8px; min-width: 16px; height: 16px;
+    padding: 0 4px; border-radius: 8px; background: var(--red); color: #fff;
+    font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center;
   }
-  .mobile-overlay.show { opacity: 1; pointer-events: auto; }
+  body.has-bottom-nav .main { padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)) !important; }
 
-  /* Main content: tighter padding, leave room for the burger */
-  .main { padding: 60px 16px 48px; }
-  .main-top { justify-content: flex-end; }
+  /* Main content padding */
+  .main { padding: 18px 14px 48px; }
+  .page-title { font-size: 23px; }
 
-  .page-title { font-size: 24px; }
-
-  /* Collapse all multi-column grids to a single column */
+  /* Collapse multi-column grids */
   .kpis, .kpis.k4, .three-col,
   .dash-row, .dash-layout,
   .inv-grid-layout, .feed-grid,
@@ -2332,39 +2341,58 @@ button { cursor: pointer; }
     grid-template-columns: 1fr !important;
   }
   .dash-rail { position: static !important; }
-
-  /* Faceit mini-stats: 2 per row instead of 4 */
   .fc-mini { grid-template-columns: repeat(2, 1fr) !important; }
 
-  /* Tables: let wide ones scroll horizontally instead of squishing */
+  /* Tables scroll horizontally rather than squishing */
   .tbl { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .tbl-head, .tbl-row { min-width: 0; }
 
-  /* Landing demo cards stack */
   .ip-grid { grid-template-columns: repeat(4, 1fr); }
   .lp-section { padding: 40px 0 8px; }
   .lp-h2 { font-size: 24px; }
-
-  /* Category tabs (inventory) wrap nicely */
   .cat-tabs { gap: 5px; }
   .cat-tab { padding: 8px 11px; font-size: 12px; }
+
+  /* Feed: stack, and put the "create public" / publics box ABOVE the post list */
+  .feed-grid { display: flex !important; flex-direction: column; gap: 12px; }
+  #feed-side { order: -1; }
+  .feed-head { gap: 8px; }
+  .feed-h1 { font-size: 18px; }
+  .feed-tab { padding: 5px 11px; font-size: 12px; }
 }
 
-/* Messenger: switch to single-pane on mobile (list OR thread) */
+/* ---- Inventory list: compact card layout on mobile (fixes overflow) ---- */
+@media (max-width: 720px) {
+  /* Inventory item rows become tidy stacked cards */
+  .inv-row, .inv-item, .inv-table-row {
+    flex-wrap: wrap; gap: 8px;
+  }
+  /* Long skin names: clamp instead of pushing layout */
+  .inv-name, .inv-item-name, .item-name {
+    white-space: normal; overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    font-size: 13px; line-height: 1.3;
+  }
+  .inv-price, .item-price { font-size: 14px; white-space: nowrap; }
+  /* Inventory KPI tiles 2-per-row */
+  #inv-kpis .kpis, #inv-kpis.kpis { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+/* Messenger: single-pane on mobile */
 @media (max-width: 760px) {
   .msgr { grid-template-columns: 1fr; }
-  /* When a thread is active we hide the list; toggled via body class */
   body.msgr-thread-open .msgr-left { display: none; }
   body:not(.msgr-thread-open) .msgr-right { display: none; }
   .main-messages { padding: 0; }
+  /* messenger has its own full-height layout; lift bottom nav above its composer */
+  body.has-bottom-nav .main-messages { padding-bottom: 0 !important; }
 }
 
 /* Very small phones */
 @media (max-width: 420px) {
-  .main { padding: 58px 12px 40px; }
-  .page-title { font-size: 21px; }
+  .main { padding: 14px 10px 40px; }
+  .page-title { font-size: 20px; }
   .kpi-card .kpi-val { font-size: 22px; }
-  .msgr-bubble { max-width: 82%; }
+  .msgr-bubble { max-width: 84%; }
   .rep-vote-btns { gap: 5px; }
   .rep-btn { padding: 6px 9px; font-size: 11.5px; }
 }
@@ -2561,3 +2589,90 @@ a.feed-pub-name:hover { color: var(--g); }
 }
 .pub-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pub-header.has-cover { border-top-left-radius: var(--r); border-top-right-radius: var(--r); }
+
+/* ============================================================
+   LIQUID GLASS + ANIMATIONS
+   ============================================================ */
+:root { --glass-line: rgba(255,255,255,0.08); }
+
+/* Frosted glass on key surfaces */
+.card, .modal-dialog, .msgr-thread-h, .msgr-composer, .cookie-banner {
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+  backdrop-filter: blur(8px) saturate(120%);
+}
+.modal-host {
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+/* subtle top sheen on cards */
+.card { position: relative; }
+
+/* ---- entrance animations ---- */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn {
+  0% { opacity: 0; transform: scale(0.96); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.anim-rise { animation: riseIn 0.4s cubic-bezier(0.22,1,0.36,1) both; }
+.anim-fade { animation: fadeIn 0.4s ease both; }
+.anim-pop  { animation: popIn 0.3s cubic-bezier(0.22,1,0.36,1) both; }
+
+/* Cards on content pages rise in with a gentle stagger */
+.main .card { animation: riseIn 0.45s cubic-bezier(0.22,1,0.36,1) both; }
+.main .card:nth-child(2) { animation-delay: 0.04s; }
+.main .card:nth-child(3) { animation-delay: 0.08s; }
+.main .card:nth-child(4) { animation-delay: 0.12s; }
+.main .card:nth-child(5) { animation-delay: 0.16s; }
+
+/* Buttons: springy press + smooth hover */
+.btn { transition: transform 0.12s ease, background 0.18s ease, border-color 0.18s ease, color 0.18s ease; }
+.btn:active { transform: scale(0.96); }
+
+/* Generic interactive hover lift */
+.feed-item, .tbl-row, .me-menu-item { transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
+.feed-item:hover { transform: translateY(-2px); }
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .anim-rise, .anim-fade, .anim-pop, .main .card { animation: none !important; }
+  * { transition: none !important; }
+}
+
+/* ============================================================
+   /me HUB PAGE
+   ============================================================ */
+.me-prof { padding: 20px; }
+.me-prof-top { display: flex; align-items: center; gap: 16px; }
+.me-avatar {
+  width: 64px; height: 64px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  background: var(--card-2); border: 1px solid var(--line-acc);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 800; color: var(--g);
+}
+.me-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.me-prof-info { min-width: 0; }
+.me-prof-name { font-size: 19px; font-weight: 800; }
+.me-prof-id { font-size: 12px; color: var(--mute); margin-top: 2px; }
+
+.me-menu { padding: 6px; margin-top: 14px; }
+.me-menu-item {
+  display: flex; align-items: center; gap: 14px; padding: 14px 14px;
+  text-decoration: none; color: var(--text); border-radius: var(--r-sm);
+}
+.me-menu-item:hover { background: var(--card-2); }
+.me-menu-item + .me-menu-item { border-top: 1px solid var(--line); }
+.me-menu-item.accent .me-menu-label { color: var(--yellow); }
+.me-menu-ico { width: 34px; height: 34px; border-radius: 9px; background: var(--card-2);
+  display: flex; align-items: center; justify-content: center; color: var(--g); flex-shrink: 0; }
+.me-menu-ico .nav-ico svg, .me-menu-ico svg { width: 18px; height: 18px; }
+.me-menu-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.me-menu-label { font-size: 14px; font-weight: 700; }
+.me-menu-desc { font-size: 12px; color: var(--mute); }
+.me-menu-arrow { color: var(--mute); display: flex; }
+.me-menu-arrow svg { width: 18px; height: 18px; }
+.me-menu-item.small { padding: 12px 14px; }
+.me-menu-item.small .me-menu-label { font-weight: 600; font-size: 13px; color: var(--dim); }
