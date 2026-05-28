@@ -211,9 +211,69 @@ async function renderTopbar(active = '') {
   renderSidebar(active, me);
   renderMainToolbar(me);
   ensureMobileNav();
+  ensureSupportButton(me);
   // First-login consent gate (152-ФЗ explicit consent)
   if (me.logged_in && me.consented === false) showConsentGate();
   return me;
+}
+
+// Floating "Support" button (bottom-right) for logged-in users.
+function ensureSupportButton(me) {
+  const existing = document.getElementById('support-fab');
+  if (!me || !me.logged_in) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const fab = el('button', {
+    id: 'support-fab', class: 'support-fab', type: 'button', title: 'Связь с поддержкой',
+    onclick: openSupportModal,
+    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>'
+  });
+  document.body.appendChild(fab);
+}
+
+// Anti-scam explainer before redirecting to Steam OpenID.
+function steamLogin(ev) {
+  if (ev) ev.preventDefault();
+  const host = el('div', { id: 'modal-host', class: 'modal-host' });
+  const close = () => host.remove();
+  const go = () => { location.href = '/auth/steam'; };
+  const dialog = el('div', { class: 'modal-dialog', style: { maxWidth: '420px' } },
+    el('div', { class: 'modal-body', style: { textAlign: 'center', paddingTop: '24px' } },
+      el('div', { class: 'steam-explain-ico', html:
+        '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Z"/></svg>' }),
+      el('div', { class: 'steam-explain-title' }, 'Вход через Steam'),
+      el('div', { class: 'steam-explain-text' },
+        'Сейчас откроется ', el('b', null, 'официальная страница Steam'), '. Это безопасно:'),
+      el('ul', { class: 'steam-explain-list' },
+        el('li', null, '🔒 Мы ', el('b', null, 'не видим и не получаем ваш пароль'), ' — его вводите только на сайте Steam.'),
+        el('li', null, '✅ Это стандартный вход Steam, как на маркетах и Faceit.'),
+        el('li', null, '👤 Нужен только чтобы подтвердить, что аккаунт ваш.')
+      )
+    ),
+    el('div', { class: 'modal-foot' },
+      el('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Отмена'),
+      el('button', { class: 'btn steam-explain-go', type: 'button', onclick: go }, 'Продолжить в Steam')
+    )
+  );
+  host.appendChild(dialog);
+  host.addEventListener('click', (e) => { if (e.target === host) close(); });
+  document.body.appendChild(host);
+  return false;
+}
+
+function openSupportModal() {
+  const msg = el('textarea', { class: 'modal-input', rows: '5', maxlength: '1000',
+    placeholder: 'Опишите проблему или вопрос. Чем подробнее — тем быстрее поможем.' });
+  openModal('Связь с поддержкой', [
+    el('div', { class: 'modal-hint', style: { marginBottom: '4px' } },
+      'Сообщение придёт администратору. Ответ — на ваш профиль или в сообщения.'),
+    msg
+  ], async () => {
+    const text = msg.value.trim();
+    if (!text) { toast.warn('Напишите сообщение'); return false; }
+    const r = await api.report('support', 'support', text).catch(() => ({ ok: false }));
+    if (r.ok) { toast.ok('Сообщение отправлено в поддержку'); return true; }
+    toast.err('Не удалось отправить'); return false;
+  }, 'Отправить');
 }
 
 // Explicit consent modal shown once after first login. Cannot be dismissed without accepting.
@@ -503,7 +563,7 @@ function renderMainToolbar(me) {
 
   // Login / logout
   if (!me.logged_in) {
-    bar.appendChild(el('a', { href: '/auth/steam', class: 'btn btn-primary btn-sm' }, 'Войти через Steam'));
+    bar.appendChild(el('a', { href: '/auth/steam', class: 'btn btn-primary btn-sm', onclick: steamLogin }, 'Войти через Steam'));
   } else {
     bar.appendChild(el('form', { action: '/auth/logout', method: 'POST', style: { margin: 0 } },
       el('button', { type: 'submit', class: 'btn btn-ghost btn-sm' }, 'Выйти')
@@ -4541,18 +4601,22 @@ async function paintAdminReports(panel) {
     panel.appendChild(card); return;
   }
   for (const rep of r.reports) {
+    const isSupport = rep.target_type === 'support';
     card.appendChild(el('div', { class: 'admin-row' },
       el('div', { class: 'admin-row-main' },
         el('div', { class: 'admin-row-title' },
-          el('span', { class: 'admin-tag' }, rep.target_type),
-          ' ', rep.target_id),
+          isSupport
+            ? el('span', { class: 'admin-tag', style: { background: 'var(--g-soft)', color: 'var(--g)', borderColor: 'var(--line-acc)' } }, 'поддержка')
+            : el('span', { class: 'admin-tag' }, rep.target_type),
+          isSupport ? '' : (' ' + rep.target_id)),
         el('div', { class: 'admin-row-sub' },
           'От: ', el('a', { href: `/lookup?steamid=${rep.reporter_steam_id}` }, rep.reporter_name || rep.reporter_steam_id),
           rep.reason ? ` · «${rep.reason}»` : '',
           ' · ', relDate(rep.created_at))
       ),
       el('div', { class: 'admin-row-actions' },
-        rep.target_type === 'user' ? el('button', { class: 'btn btn-sm', type: 'button',
+        isSupport ? el('a', { class: 'btn btn-sm', href: `/messages?to=${rep.reporter_steam_id}` }, 'Ответить') : null,
+        (!isSupport && rep.target_type === 'user') ? el('button', { class: 'btn btn-sm', type: 'button',
           onclick: async () => { const reason = prompt('Причина бана:') || ''; await api.admin.ban(rep.target_id, reason); await api.admin.resolveReport(rep.id, 'resolved'); toast.ok('Забанен'); paintAdminReports(panel); } }, 'Забанить') : null,
         el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
           onclick: async () => { await api.admin.resolveReport(rep.id, 'resolved'); toast.ok('Решено'); paintAdminReports(panel); } }, 'Решено'),
@@ -4677,7 +4741,7 @@ async function pageMe() {
     root.innerHTML = '';
     root.appendChild(el('div', { class: 'card', style: { textAlign: 'center', padding: '40px 20px' } },
       el('div', { style: { marginBottom: '16px', color: 'var(--dim)' } }, 'Войдите, чтобы открыть профиль'),
-      el('a', { class: 'btn', href: '/auth/steam' }, 'Войти через Steam')));
+      el('a', { class: 'btn', href: '/auth/steam', onclick: steamLogin }, 'Войти через Steam')));
     return;
   }
   root.innerHTML = '';
@@ -4706,19 +4770,23 @@ async function pageMe() {
   // Menu items
   const items = [
     { href: '/lookup', label: 'Проверить игрока', icon: 'users', desc: 'Анализ любого по SteamID' },
+    { action: openSupportModal, label: 'Связь с поддержкой', icon: 'help', desc: 'Написать администратору' },
     { href: '/settings', label: 'Настройки', icon: 'settings', desc: 'Валюта, Faceit, аккаунт' }
   ];
   if (me.is_admin) items.push({ href: '/admin', label: 'Админка', icon: 'shield', desc: 'Модерация и статистика', accent: true });
 
   const menu = el('div', { class: 'card me-menu anim-rise', style: { animationDelay: '0.05s' } });
   for (const it of items) {
-    menu.appendChild(el('a', { class: 'me-menu-item' + (it.accent ? ' accent' : ''), href: it.href },
+    const node = el(it.action ? 'button' : 'a',
+      Object.assign({ class: 'me-menu-item' + (it.accent ? ' accent' : '') },
+        it.action ? { type: 'button', onclick: it.action } : { href: it.href }),
       el('span', { class: 'me-menu-ico' }, navIcon(it.icon)),
       el('span', { class: 'me-menu-text' },
         el('span', { class: 'me-menu-label' }, it.label),
         el('span', { class: 'me-menu-desc' }, it.desc)),
       el('span', { class: 'me-menu-arrow', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' })
-    ));
+    );
+    menu.appendChild(node);
   }
   root.appendChild(menu);
 
@@ -4925,5 +4993,5 @@ function initCookieBanner() {
 }
 
 // Expose for debugging
-window.SOK = { api, toast, $, $$, el };
+window.SOK = { api, toast, $, $$, el, steamLogin };
 })();

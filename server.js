@@ -1305,11 +1305,17 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const body = await readJsonBody(req);
-    const types = ['user', 'post', 'public', 'reputation', 'message'];
+    const types = ['user', 'post', 'public', 'reputation', 'message', 'support'];
     const target_type = String(body.target_type || '');
-    const target_id = String(body.target_id || '');
-    if (!types.includes(target_type) || !target_id) return sendJson(res, 400, { ok: false, error: 'bad-target' });
-    const reason = String(body.reason || '').slice(0, 500);
+    let target_id = String(body.target_id || '');
+    const reason = String(body.reason || '').slice(0, 1000);
+    if (!types.includes(target_type)) return sendJson(res, 400, { ok: false, error: 'bad-target' });
+    if (target_type === 'support') {
+      if (!reason.trim()) return sendJson(res, 400, { ok: false, error: 'empty-message' });
+      target_id = 'support'; // no object, it's a support request
+    } else if (!target_id) {
+      return sendJson(res, 400, { ok: false, error: 'bad-target' });
+    }
     db.createReport({ reporter_steam_id: me, target_type, target_id, reason });
     db.logEvent('report', me, { target_type, target_id });
     return sendJson(res, 200, { ok: true });

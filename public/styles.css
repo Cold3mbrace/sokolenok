@@ -2676,3 +2676,48 @@ a.feed-pub-name:hover { color: var(--g); }
 .me-menu-arrow svg { width: 18px; height: 18px; }
 .me-menu-item.small { padding: 12px 14px; }
 .me-menu-item.small .me-menu-label { font-weight: 600; font-size: 13px; color: var(--dim); }
+
+/* ============ SUPPORT FAB ============ */
+.support-fab {
+  position: fixed; right: 18px; bottom: 18px; z-index: 70;
+  width: 52px; height: 52px; border-radius: 50%; cursor: pointer;
+  background: var(--g); color: #061008; border: none;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4), 0 0 0 4px var(--g-soft);
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.support-fab svg { width: 23px; height: 23px; }
+.support-fab:hover { transform: translateY(-2px) scale(1.04); }
+.support-fab:active { transform: scale(0.94); }
+/* lift above bottom nav on mobile */
+@media (max-width: 860px) {
+  body.has-bottom-nav .support-fab { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* me-menu button variant (Support) matches link rows */
+button.me-menu-item {
+  width: 100%; background: none; border: none; cursor: pointer;
+  font-family: inherit; text-align: left;
+}
+button.me-menu-item + .me-menu-item,
+.me-menu-item + button.me-menu-item { border-top: 1px solid var(--line); }
+
+/* ============ STEAM LOGIN EXPLAINER ============ */
+.steam-explain-ico {
+  width: 56px; height: 56px; margin: 0 auto 14px; color: var(--g);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--g-soft); border-radius: 16px;
+}
+.steam-explain-ico svg { width: 32px; height: 32px; }
+.steam-explain-title { font-size: 19px; font-weight: 800; margin-bottom: 8px; }
+.steam-explain-text { font-size: 13.5px; color: var(--dim); margin-bottom: 14px; line-height: 1.5; }
+.steam-explain-list { text-align: left; list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 10px; }
+.steam-explain-list li {
+  font-size: 13px; color: var(--text); line-height: 1.45;
+  background: var(--card-2); border: 1px solid var(--line);
+  padding: 10px 12px; border-radius: var(--r-sm);
+}
+.steam-explain-list b { font-weight: 700; }
+.steam-explain-go { background: var(--g); color: #061008; border: none; font-weight: 700; }
+.steam-explain-go:hover { background: #5beb91; }
