@@ -227,6 +227,24 @@ CREATE TABLE IF NOT EXISTS public_editors (
 );
 CREATE INDEX IF NOT EXISTS idx_pubed_steam ON public_editors(steam_id);
 
+-- Likes on posts (unique per user per post)
+CREATE TABLE IF NOT EXISTS post_likes (
+  post_id    INTEGER NOT NULL,
+  steam_id   TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (post_id, steam_id)
+);
+CREATE INDEX IF NOT EXISTS idx_likes_post ON post_likes(post_id);
+
+-- Unique views (one per user per post)
+CREATE TABLE IF NOT EXISTS post_views (
+  post_id    INTEGER NOT NULL,
+  steam_id   TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (post_id, steam_id)
+);
+CREATE INDEX IF NOT EXISTS idx_views_post ON post_views(post_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -302,6 +320,8 @@ function emptyFallback() {
     user_bans: {},
     moderators: {},
     public_editors: {},
+    post_likes: {},
+    post_views: {},
     events: []
   };
 }
@@ -366,6 +386,25 @@ function getUser(steamId) {
     return openSqlite().prepare('SELECT * FROM users WHERE steam_id = ?').get(steamId) || null;
   }
   return readFallback().users[steamId] || null;
+}
+
+// Case-insensitive search by persona_name among users who logged in at least once.
+function searchUsers(query, limit = 20) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q || q.length < 2) return [];
+  const like = `%${q}%`;
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT steam_id, persona_name, avatar FROM users
+       WHERE LOWER(persona_name) LIKE ? ORDER BY updated_at DESC LIMIT ?`
+    ).all(like, limit);
+  }
+  const rows = Object.values(readFallback().users || {});
+  return rows
+    .filter(u => (u.persona_name || '').toLowerCase().includes(q))
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+    .slice(0, limit)
+    .map(u => ({ steam_id: u.steam_id, persona_name: u.persona_name, avatar: u.avatar }));
 }
 
 // ----- sessions -----
@@ -900,6 +939,121 @@ function listPosts({ publicIds = null, limit = 50 } = {}) {
   return rows.slice(0, limit);
 }
 
+// ----- post likes -----
+function likePost(postId, steamId) {
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(`INSERT INTO post_likes (post_id, steam_id, created_at) VALUES (?,?,?)
+      ON CONFLICT(post_id, steam_id) DO NOTHING`).run(Number(postId), steamId, created_at);
+  } else {
+    const state = readFallback();
+    if (!state.post_likes) state.post_likes = {};
+    state.post_likes[`${postId}:${steamId}`] = { post_id: Number(postId), steam_id: steamId, created_at };
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function unlikePost(postId, steamId) {
+  if (useSqlite()) {
+    openSqlite().prepare(`DELETE FROM post_likes WHERE post_id=? AND steam_id=?`).run(Number(postId), steamId);
+  } else {
+    const state = readFallback();
+    delete (state.post_likes || {})[`${postId}:${steamId}`];
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function hasLiked(postId, steamId) {
+  if (!steamId) return false;
+  if (useSqlite()) {
+    return !!openSqlite().prepare(`SELECT 1 FROM post_likes WHERE post_id=? AND steam_id=?`).get(Number(postId), steamId);
+  }
+  return !!(readFallback().post_likes || {})[`${postId}:${steamId}`];
+}
+function countLikes(postId) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT COUNT(*) AS c FROM post_likes WHERE post_id=?`).get(Number(postId)).c;
+  }
+  return Object.values(readFallback().post_likes || {}).filter(l => l.post_id === Number(postId)).length;
+}
+
+// ----- post views (one per user per post) -----
+function viewPost(postId, steamId) {
+  if (!steamId) return { ok: false };
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(`INSERT INTO post_views (post_id, steam_id, created_at) VALUES (?,?,?)
+      ON CONFLICT(post_id, steam_id) DO NOTHING`).run(Number(postId), steamId, created_at);
+  } else {
+    const state = readFallback();
+    if (!state.post_views) state.post_views = {};
+    state.post_views[`${postId}:${steamId}`] = { post_id: Number(postId), steam_id: steamId, created_at };
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function countViews(postId) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT COUNT(*) AS c FROM post_views WHERE post_id=?`).get(Number(postId)).c;
+  }
+  return Object.values(readFallback().post_views || {}).filter(v => v.post_id === Number(postId)).length;
+}
+
+// Attach like/view counts to an array of posts; mark which I liked.
+function attachPostStats(posts, mySteamId) {
+  if (!posts?.length) return posts;
+  const ids = posts.map(p => Number(p.id));
+  let likeMap = {}, viewMap = {}, mineSet = new Set();
+  if (useSqlite()) {
+    const d = openSqlite();
+    const ph = ids.map(() => '?').join(',');
+    for (const r of d.prepare(`SELECT post_id, COUNT(*) AS c FROM post_likes WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids)) likeMap[r.post_id] = r.c;
+    for (const r of d.prepare(`SELECT post_id, COUNT(*) AS c FROM post_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids)) viewMap[r.post_id] = r.c;
+    if (mySteamId) for (const r of d.prepare(`SELECT post_id FROM post_likes WHERE post_id IN (${ph}) AND steam_id=?`).all(...ids, mySteamId)) mineSet.add(r.post_id);
+  } else {
+    const state = readFallback();
+    for (const l of Object.values(state.post_likes || {})) { if (ids.includes(l.post_id)) { likeMap[l.post_id] = (likeMap[l.post_id] || 0) + 1; if (l.steam_id === mySteamId) mineSet.add(l.post_id); } }
+    for (const v of Object.values(state.post_views || {})) { if (ids.includes(v.post_id)) viewMap[v.post_id] = (viewMap[v.post_id] || 0) + 1; }
+  }
+  for (const p of posts) {
+    p.likes = likeMap[p.id] || 0;
+    p.views = viewMap[p.id] || 0;
+    p.liked = mineSet.has(p.id);
+  }
+  return posts;
+}
+
+// ----- friend recommendations: friends-of-my-friends, excluding existing relations -----
+function recommendFriends(steamId, limit = 20) {
+  if (!steamId) return [];
+  const my = listFriends(steamId);
+  const myFriendIds = new Set(my.friends.map(f => f.steam_id));
+  // Also exclude those with whom we have any pending request
+  const excluded = new Set([
+    steamId,
+    ...myFriendIds,
+    ...my.incoming.map(f => f.steam_id),
+    ...my.outgoing.map(f => f.steam_id)
+  ]);
+  const myBlocked = new Set(listBlocks(steamId));
+  for (const b of myBlocked) excluded.add(b);
+
+  // Tally friends-of-friends
+  const tally = {}; // steam_id -> count of mutual paths
+  for (const fId of myFriendIds) {
+    const sub = listFriends(fId);
+    for (const ff of sub.friends) {
+      if (excluded.has(ff.steam_id)) continue;
+      if (isBlocked(ff.steam_id, steamId)) continue; // they blocked me
+      tally[ff.steam_id] = (tally[ff.steam_id] || 0) + 1;
+    }
+  }
+  return Object.entries(tally)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([steam_id, mutuals]) => ({ steam_id, mutuals }));
+}
+
 function listSubscriptions(steamId) {
   if (useSqlite()) {
     return openSqlite().prepare(`SELECT public_id FROM subscriptions WHERE steam_id = ?`).all(steamId).map(r => r.public_id);
@@ -1321,10 +1475,15 @@ function isPublicEditor(publicId, steamId) {
 // Content deletion (admin)
 function deletePost(id) {
   if (useSqlite()) {
-    openSqlite().prepare(`DELETE FROM posts WHERE id=?`).run(id);
+    const d = openSqlite();
+    d.prepare(`DELETE FROM posts WHERE id=?`).run(id);
+    d.prepare(`DELETE FROM post_likes WHERE post_id=?`).run(Number(id));
+    d.prepare(`DELETE FROM post_views WHERE post_id=?`).run(Number(id));
   } else {
     const state = readFallback();
     state.posts = (state.posts || []).filter(p => p.id !== Number(id));
+    for (const k of Object.keys(state.post_likes || {})) if (k.startsWith(id + ':')) delete state.post_likes[k];
+    for (const k of Object.keys(state.post_views || {})) if (k.startsWith(id + ':')) delete state.post_views[k];
     writeFallback(state);
   }
   return { ok: true };
@@ -1425,7 +1584,7 @@ module.exports = {
   // common
   nowIso, uuid,
   // users
-  upsertUser, getUser,
+  upsertUser, getUser, searchUsers,
   // sessions
   createSession, getSession, deleteSession,
   // inventory
@@ -1443,6 +1602,9 @@ module.exports = {
   // feed
   listPublics, getPublic, createPublic, updatePublic, countPublicsByOwner,
   createPost, getPost, listPosts,
+  likePost, unlikePost, hasLiked, countLikes,
+  viewPost, countViews, attachPostStats,
+  recommendFriends,
   listSubscriptions, subscribe, unsubscribe,
   // friends / blocks
   friendStatus, sendFriendRequest, acceptFriendRequest, removeFriend,

@@ -77,6 +77,14 @@ const api = {
   me() { return this.request('/api/me'); },
   health() { return this.request('/api/health'); },
   resolve(target) { return this.request(`/api/resolve?target=${encodeURIComponent(target)}`); },
+  // Accept SteamID64, vanity, full profile URL, or short URL. Returns steamid or null.
+  async resolveAny(input) {
+    const s = String(input || '').trim();
+    if (!s) return null;
+    if (/^\d{17}$/.test(s)) return s;
+    const r = await this.resolve(s).catch(() => null);
+    return r?.ok && r.steamid ? r.steamid : null;
+  },
   profile(steamid) { return this.request(`/api/profile/${steamid}`); },
   inventory(steamid, opts = {}) {
     const q = new URLSearchParams();
@@ -116,6 +124,10 @@ const api = {
   deletePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
   createPost(data) { return this.request('/api/posts', { method: 'POST', body: JSON.stringify(data) }); },
   deletePost(id) { return this.request(`/api/posts/${id}`, { method: 'DELETE' }); },
+  likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
+  unlikePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'DELETE' }); },
+  viewPost(id) { return this.request(`/api/posts/${id}/view`, { method: 'POST' }); },
+  recommendFriends() { return this.request('/api/friends/recommend'); },
   async upload(file) {
     const fd = new FormData();
     fd.append('file', file);
@@ -126,6 +138,7 @@ const api = {
   unsubscribePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/subscribe`, { method: 'DELETE' }); },
   friends() { return this.request('/api/friends'); },
   friendStatus(id) { return this.request(`/api/friends/${id}`); },
+  friendsOf(id) { return this.request(`/api/friends/${id}/list`); },
   friendRequest(id) { return this.request(`/api/friends/${id}/request`, { method: 'POST' }); },
   friendAccept(id) { return this.request(`/api/friends/${id}/accept`, { method: 'POST' }); },
   friendRemove(id) { return this.request(`/api/friends/${id}`, { method: 'DELETE' }); },
@@ -231,7 +244,7 @@ function ensureSupportButton(me) {
   const fab = el('button', {
     id: 'support-fab', class: 'support-fab', type: 'button', title: 'Связь с поддержкой',
     onclick: openSupportModal,
-    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>'
+    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="14.83" y1="9.17" x2="18.36" y2="5.64"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/></svg>'
   });
   document.body.appendChild(fab);
 }
@@ -264,6 +277,70 @@ function steamLogin(ev) {
   host.addEventListener('click', (e) => { if (e.target === host) close(); });
   document.body.appendChild(host);
   return false;
+}
+
+// Universal player search: accepts SteamID64, Steam URL, vanity, or persona name.
+// Shows live suggestions from our user base; for direct IDs/URLs opens lookup immediately.
+function openSearchModal() {
+  const input = el('input', { class: 'modal-input', placeholder: 'Имя в Steam, ссылка или SteamID', autocomplete: 'off' });
+  const hint = el('div', { class: 'modal-hint' }, 'Можно вставить ссылку на Steam-профиль, никнейм или SteamID64.');
+  const results = el('div', { class: 'search-results' });
+  const open = (id) => { location.href = `/lookup?steamid=${id}`; };
+  let lastQ = '', debounce = null;
+
+  const runSearch = async () => {
+    const q = input.value.trim();
+    if (q === lastQ) return;
+    lastQ = q;
+    if (!q) { results.innerHTML = ''; return; }
+    // Looks like ID / URL / vanity → try resolve directly
+    if (/^\d{17}$/.test(q) || /steamcommunity\.com/.test(q)) {
+      results.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Открываем…</div>';
+      const id = await api.resolveAny(q);
+      if (id) open(id); else { results.innerHTML = ''; toast.err('Не нашли такого игрока'); }
+      return;
+    }
+    // Otherwise: search by persona name
+    if (q.length < 2) { results.innerHTML = ''; return; }
+    const r = await api.request(`/api/search?q=${encodeURIComponent(q)}`).catch(() => ({ ok: false, results: [] }));
+    results.innerHTML = '';
+    if (!r.results?.length) {
+      // Fallback: try as vanity URL anyway
+      results.appendChild(el('div', { class: 'search-empty' },
+        'Никого с таким именем не нашли среди пользователей сайта. ',
+        el('button', { class: 'search-try-vanity', type: 'button', onclick: async () => {
+          const id = await api.resolveAny(q);
+          if (id) open(id); else toast.err('Не вышло резолвить как ник Steam');
+        } }, 'Попробовать как ник Steam')
+      ));
+      return;
+    }
+    for (const u of r.results) {
+      const row = el('button', { class: 'search-result', type: 'button', onclick: () => open(u.steam_id) });
+      const ava = el('div', { class: 'search-result-ava' });
+      if (u.avatar) {
+        const img = el('img', { src: u.avatar, alt: '' });
+        img.onerror = function() { this.remove(); ava.textContent = (u.persona_name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else ava.textContent = (u.persona_name || '?').slice(0, 1).toUpperCase();
+      row.appendChild(ava);
+      row.appendChild(el('div', { class: 'search-result-info' },
+        el('div', { class: 'search-result-name' }, u.persona_name || u.steam_id),
+        el('div', { class: 'search-result-id' }, u.steam_id)
+      ));
+      results.appendChild(row);
+    }
+  };
+  input.addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(runSearch, 250);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounce); runSearch(); }
+  });
+
+  openModal('Найти игрока', [hint, input, results], async () => true, 'Закрыть');
+  setTimeout(() => input.focus(), 50);
 }
 
 function openSupportModal() {
@@ -440,6 +517,8 @@ function renderSidebar(active, me) {
     { href: '/dashboard', label: 'Дашборд',   key: 'dashboard', icon: 'home' },
     { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
+    { href: '/friends',   label: 'Друзья',     key: 'friends',   icon: 'users' },
+    { href: '/communities', label: 'Сообщества', key: 'communities', icon: 'grid' },
     { href: '/inventory', label: 'Инвентарь', key: 'inventory', icon: 'inventory' }
   ];
   const authedBottom = [
@@ -3165,6 +3244,7 @@ async function pageLookup() {
     paintLookupSocial(steamid, profR);
   }
   paintReputation(steamid, repR, me);
+  paintLookupFriends(steamid);
   paintLookupFaceit(faceitR);
   paintLookupLeetify(leetifyR);
   paintLookupInvKpis(invR, histR);
@@ -3256,6 +3336,35 @@ async function paintLookupSocial(steamid, profR) {
   }
 
   card.appendChild(actions);
+  root.appendChild(card);
+}
+
+// Block of in-site friends shown on every profile page.
+async function paintLookupFriends(steamid) {
+  const root = $('#lk-friends');
+  if (!root) return;
+  root.innerHTML = '';
+  const r = await api.friendsOf(steamid).catch(() => ({ ok: false, friends: [] }));
+  if (!r.ok || !r.friends?.length) return; // nothing to show — hide block entirely
+
+  const card = el('div', { class: 'card lk-friends-card' });
+  card.appendChild(el('div', { class: 'card-eyebrow' }, `Друзья на сайте · ${r.count}`));
+  const grid = el('div', { class: 'lk-friends-grid' });
+  for (const f of r.friends.slice(0, 12)) {
+    const ava = el('div', { class: 'lk-friend-ava' });
+    if (f.avatar) {
+      const img = el('img', { src: f.avatar, alt: '', loading: 'lazy' });
+      img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0, 1).toUpperCase(); };
+      ava.appendChild(img);
+    } else ava.textContent = (f.name || '?').slice(0, 1).toUpperCase();
+    grid.appendChild(el('a', { class: 'lk-friend', href: `/lookup?steamid=${f.steam_id}`, title: f.name },
+      ava, el('div', { class: 'lk-friend-name' }, f.name || f.steam_id.slice(-6))
+    ));
+  }
+  card.appendChild(grid);
+  if (r.count > 12) {
+    card.appendChild(el('div', { class: 'lk-friends-more' }, `+${r.count - 12} ещё`));
+  }
   root.appendChild(card);
 }
 
@@ -3991,15 +4100,76 @@ async function renderPublicPage(publicId, me) {
         html: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' }) : null
     ));
     if (post.title) card.appendChild(el('div', { class: 'feed-item-title' }, post.title));
-    if (post.body) card.appendChild(el('div', { class: 'feed-item-body', style: { whiteSpace: 'pre-wrap' } }, post.body));
+    if (post.body) { const b = buildPostBody(post.body, false); if (b) card.appendChild(b); }
     if (post.image) {
       const img = el('img', { class: 'feed-item-img', src: post.image, alt: '', loading: 'lazy' });
       img.onerror = function() { this.remove(); };
       card.appendChild(img);
     }
     if (post.link) card.appendChild(el('a', { class: 'feed-item-link', href: post.link, target: '_blank', rel: 'noopener' }, 'Перейти по ссылке →'));
+    const pf = buildPostFooter({ post_id: post.id, likes: post.likes, views: post.views, liked: post.liked }, me);
+    if (pf) card.appendChild(pf);
+    markPostViewed(post.id);
     list.appendChild(card);
   }
+}
+
+// Build a post-body node with VK/Telegram-style "show more" for long content.
+// `clean` controls stripping (true = run stripFeedHtml, for news bodies).
+function buildPostBody(text, clean) {
+  const raw = String(text || '');
+  if (!raw) return null;
+  const display = clean ? stripFeedHtml(raw) : raw;
+  const long = display.length > 1400 || (display.match(/\n/g) || []).length > 20;
+  const body = el('div', { class: 'feed-item-body' + (long ? ' collapsed' : '') }, display);
+  if (!long) return body;
+  const wrap = el('div');
+  wrap.appendChild(body);
+  const btn = el('button', { class: 'feed-item-expand', type: 'button' }, 'Показать полностью');
+  btn.addEventListener('click', () => {
+    const open = body.classList.toggle('collapsed') === false;
+    btn.textContent = open ? 'Свернуть' : 'Показать полностью';
+  });
+  // Initially collapsed → button says "Показать полностью"
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+// Post footer: like button + view counter. Used in feed and on public pages.
+function buildPostFooter(item, me) {
+  if (!item || item.post_id == null) return null;
+  const likes = item.likes || 0;
+  const views = item.views || 0;
+  const liked = !!item.liked;
+  const heart = el('button', {
+    class: 'post-act' + (liked ? ' liked' : ''), type: 'button',
+    'aria-label': liked ? 'Убрать лайк' : 'Лайкнуть',
+    html: `<svg viewBox="0 0 24 24" width="17" height="17" fill="${liked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg><span class="post-act-n">${likes}</span>`
+  });
+  heart.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!me?.logged_in) { toast.warn('Войдите, чтобы лайкать'); return; }
+    heart.disabled = true;
+    const r = (heart.classList.contains('liked') ? await api.unlikePost(item.post_id) : await api.likePost(item.post_id)).catch(() => ({ ok: false }));
+    if (r.ok) {
+      heart.classList.toggle('liked');
+      heart.querySelector('.post-act-n').textContent = r.likes;
+      heart.querySelector('svg').setAttribute('fill', heart.classList.contains('liked') ? 'currentColor' : 'none');
+    }
+    heart.disabled = false;
+  });
+  const eye = el('span', { class: 'post-act post-views', title: 'Уникальные просмотры',
+    html: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="post-act-n">${views}</span>`
+  });
+  return el('div', { class: 'post-footer' }, heart, eye);
+}
+
+// Mark a post as viewed (best-effort; backend dedupes per user)
+const _viewed = new Set();
+function markPostViewed(postId) {
+  if (!postId || _viewed.has(postId)) return;
+  _viewed.add(postId);
+  api.viewPost(postId).catch(() => {});
 }
 
 function paintFeedList(r) {
@@ -4052,7 +4222,7 @@ function paintFeedList(r) {
     ));
 
     if (it.title) card.appendChild(el('div', { class: 'feed-item-title' }, it.title));
-    if (it.body) card.appendChild(el('div', { class: 'feed-item-body' }, stripFeedHtml(it.body)));
+    if (it.body) { const b = buildPostBody(it.body, it.kind === 'news'); if (b) card.appendChild(b); }
     if (it.image) {
       const img = el('img', { class: 'feed-item-img', src: it.image, alt: '', loading: 'lazy' });
       img.onerror = function() { this.remove(); };
@@ -4063,6 +4233,11 @@ function paintFeedList(r) {
         'Читать полностью ',
         el('span', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>' })
       ));
+    }
+    if (it.kind === 'post' && it.post_id) {
+      const footer = buildPostFooter(it, window.__me);
+      if (footer) card.appendChild(footer);
+      markPostViewed(it.post_id);
     }
     root.appendChild(card);
   }
@@ -4126,7 +4301,7 @@ function paintFeedSide(r) {
 // Modal: manage public co-owners / editors (owner only)
 function openEditorsModal(pub) {
   const listBox = el('div', { class: 'editors-list' });
-  const input = el('input', { class: 'modal-input', placeholder: 'SteamID нового редактора (76561...)' });
+  const input = el('input', { class: 'modal-input', placeholder: 'SteamID, ссылка или ник Steam' });
   const reload = async () => {
     listBox.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Загрузка…</div>';
     const r = await api.publicEditors(pub.id).catch(() => ({ ok: false, editors: [] }));
@@ -4151,8 +4326,8 @@ function openEditorsModal(pub) {
     el('div', { class: 'admin-manual', style: { margin: 0 } },
       input,
       el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-        const id = input.value.trim();
-        if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
+        const id = await api.resolveAny(input.value);
+        if (!id) { toast.warn('Не нашли такого игрока'); return; }
         const r = await api.addPublicEditor(pub.id, id).catch(() => ({ ok: false }));
         if (r.ok) { toast.ok('Добавлен'); input.value = ''; reload(); }
         else toast.err(r.error === 'already-owner' ? 'Это владелец паблика' : 'Ошибка');
@@ -4290,15 +4465,13 @@ function openModal(title, contentNodes, onConfirm, confirmLabel = 'OK') {
 
 // Strip HTML/bbcode-ish noise from Steam news bodies for a clean feed preview
 function stripFeedHtml(s) {
-  let t = String(s || '')
+  return String(s || '')
     .replace(/<[^>]*>/g, ' ')
     .replace(/\[\/?[^\]]+\]/g, ' ')   // [b]...[/b], [url=...] bbcode
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
-  if (t.length > 320) t = t.slice(0, 320).replace(/\s+\S*$/, '') + '…';
-  return t;
 }
 
 // Relative date in Russian
@@ -4641,12 +4814,12 @@ async function paintAdminModerators(panel) {
       ));
     }
   }
-  const input = el('input', { class: 'admin-input', placeholder: 'SteamID нового модератора (76561...)' });
+  const input = el('input', { class: 'admin-input', placeholder: 'SteamID, ссылка или ник Steam' });
   card.appendChild(el('div', { class: 'admin-manual' },
     input,
     el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-      const id = input.value.trim();
-      if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
+      const id = await api.resolveAny(input.value);
+      if (!id) { toast.warn('Не нашли такого игрока'); return; }
       const res = await api.admin.addModerator(id);
       if (res.ok) { toast.ok('Модератор назначен'); paintAdminModerators(panel); }
       else toast.err('Ошибка');
@@ -4734,12 +4907,12 @@ async function paintAdminBans(panel) {
     }
   }
   // Manual ban by SteamID
-  const banInput = el('input', { class: 'admin-input', placeholder: 'SteamID для бана (76561...)' });
+  const banInput = el('input', { class: 'admin-input', placeholder: 'SteamID, ссылка или ник Steam' });
   card.appendChild(el('div', { class: 'admin-manual' },
     banInput,
     el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-      const id = banInput.value.trim();
-      if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
+      const id = await api.resolveAny(banInput.value);
+      if (!id) { toast.warn('Не нашли такого игрока'); return; }
       const reason = prompt('Причина бана:') || '';
       const res = await api.admin.ban(id, reason);
       if (res.ok) { toast.ok('Забанен'); paintAdminBans(panel); }
@@ -4803,19 +4976,246 @@ function paintAdminTools(panel) {
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-eyebrow' }, 'Инструменты'));
   card.appendChild(el('div', { class: 'admin-tool' },
-    el('div', { class: 'admin-row-title' }, 'Проверить игрока'),
-    el('div', { class: 'admin-row-sub' }, 'Открыть полную карточку игрока по SteamID.')
+    el('div', { class: 'admin-row-title' }, 'Найти игрока'),
+    el('div', { class: 'admin-row-sub' }, 'По никнейму, ссылке на профиль или SteamID.')
   ));
-  const input = el('input', { class: 'admin-input', placeholder: 'SteamID (76561...)' });
   card.appendChild(el('div', { class: 'admin-manual' },
-    input,
-    el('button', { class: 'btn btn-sm', type: 'button', onclick: () => {
-      const id = input.value.trim();
-      if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
-      location.href = `/lookup?steamid=${id}`;
-    } }, 'Открыть')
+    el('button', { class: 'btn btn-sm', type: 'button', onclick: openSearchModal }, 'Открыть поиск')
   ));
   panel.appendChild(card);
+}
+
+// ============ page: friends ============
+async function pageFriends() {
+  const me = await renderTopbar('friends');
+  if (!me.logged_in) {
+    toast.warn('Войдите, чтобы открыть друзей');
+    setTimeout(() => location.replace('/'), 800);
+    return;
+  }
+  const tabs = $('#friends-tabs');
+  const body = $('#friends-body');
+  let cur = 'friends';
+
+  const load = async (tab) => {
+    cur = tab;
+    body.innerHTML = '<div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загрузка…</div></div>';
+    if (tab === 'recommend') {
+      const r = await api.recommendFriends().catch(() => ({ ok: false, recommendations: [] }));
+      paintRecommendations(body, r.recommendations || []);
+    } else if (tab === 'blocks') {
+      const r = await api.blocks().catch(() => ({ ok: false, blocked: [] }));
+      paintFriendsBlocks(body, r.blocked || []);
+    } else {
+      const r = await api.friends().catch(() => ({ ok: false }));
+      const arr = r[tab] || [];
+      paintFriendsList(body, arr, tab);
+    }
+  };
+  for (const btn of tabs.querySelectorAll('.feed-tab')) {
+    btn.addEventListener('click', () => {
+      for (const b of tabs.querySelectorAll('.feed-tab')) b.classList.remove('active');
+      btn.classList.add('active');
+      load(btn.dataset.tab);
+    });
+  }
+  load('friends');
+}
+
+function paintFriendsList(root, arr, tab) {
+  root.innerHTML = '';
+  if (!arr.length) {
+    const empties = {
+      friends: ['Пока нет друзей', 'Найдите игрока и отправьте заявку — он появится здесь после подтверждения.'],
+      incoming: ['Заявок нет', 'Когда кто-то добавит вас, заявка появится здесь.'],
+      outgoing: ['Отправленных заявок нет', 'Заявки, которые вы отправили, появятся тут.']
+    };
+    const [t, s] = empties[tab] || ['Пусто', ''];
+    root.appendChild(emptyCard(t, s, '👥'));
+    return;
+  }
+  const card = el('div', { class: 'card' });
+  for (const f of arr) {
+    const actions = el('div', { class: 'friend-row-actions' });
+    if (tab === 'friends') {
+      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${f.steam_id}` }, 'Написать'));
+      actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+        onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); pageFriends(); } } }, 'Удалить'));
+      actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' },
+        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); pageFriends(); } } }, 'В ЧС'));
+    } else if (tab === 'incoming') {
+      actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); pageFriends(); } }, 'Принять'));
+      actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отклонить'));
+    } else {
+      actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отменить'));
+    }
+    card.appendChild(buildFriendRow(f, actions));
+  }
+  root.appendChild(card);
+}
+
+function paintRecommendations(root, arr) {
+  root.innerHTML = '';
+  if (!arr.length) {
+    root.appendChild(emptyCard('Пока нет рекомендаций',
+      'Когда у вас появятся друзья — здесь будут их друзья, которых вы ещё не добавили.', '✨'));
+    return;
+  }
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Друзья ваших друзей'));
+  for (const f of arr) {
+    const actions = el('div', { class: 'friend-row-actions' },
+      el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async (e) => {
+          const btn = e.currentTarget; btn.disabled = true;
+          const r = await api.friendRequest(f.steam_id).catch(() => ({ ok: false }));
+          if (r.ok) { toast.ok('Заявка отправлена'); btn.textContent = 'Заявка отправлена'; btn.classList.add('btn-ghost'); }
+          else { toast.err('Ошибка'); btn.disabled = false; }
+        } }, 'Добавить в друзья'),
+      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${f.steam_id}` }, 'Профиль')
+    );
+    card.appendChild(buildFriendRow(f, actions, `${f.mutuals} общ. ${f.mutuals === 1 ? 'друг' : 'друзей'}`));
+  }
+  root.appendChild(card);
+}
+
+function paintFriendsBlocks(root, arr) {
+  root.innerHTML = '';
+  if (!arr.length) {
+    root.appendChild(emptyCard('Чёрный список пуст', 'Заблокированные не смогут писать и добавляться к вам.', '🚫'));
+    return;
+  }
+  const card = el('div', { class: 'card' });
+  for (const f of arr) {
+    card.appendChild(buildFriendRow(f,
+      el('div', { class: 'friend-row-actions' },
+        el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+          onclick: async () => { await api.unblock(f.steam_id); toast.ok('Разблокирован'); pageFriends(); } }, 'Разблокировать')
+      )
+    ));
+  }
+  root.appendChild(card);
+}
+
+function buildFriendRow(f, actionsNode, subText) {
+  const ava = el('div', { class: 'friend-row-ava' });
+  if (f.avatar) {
+    const img = el('img', { src: f.avatar, alt: '' });
+    img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0,1).toUpperCase(); };
+    ava.appendChild(img);
+  } else ava.textContent = (f.name || '?').slice(0,1).toUpperCase();
+  return el('div', { class: 'friend-row' },
+    ava,
+    el('div', { class: 'friend-row-info' },
+      el('a', { class: 'friend-row-name', href: `/lookup?steamid=${f.steam_id}` }, f.name || f.steam_id),
+      subText ? el('div', { class: 'friend-row-sub' }, subText) : null
+    ),
+    actionsNode
+  );
+}
+
+// ============ page: communities ============
+async function pageCommunities() {
+  const me = await renderTopbar('communities');
+  if (!me.logged_in) {
+    toast.warn('Войдите, чтобы открыть сообщества');
+    setTimeout(() => location.replace('/'), 800);
+    return;
+  }
+  const tabs = $('#cm-tabs');
+  const body = $('#cm-body');
+  const search = $('#cm-search');
+  const state = { tab: 'all', q: '', publics: [], subs: [] };
+
+  const render = () => {
+    body.innerHTML = '';
+    const q = state.q.trim().toLowerCase();
+    let list = state.publics.slice();
+    if (state.tab === 'subs') list = list.filter(p => p.subscribed);
+    else if (state.tab === 'mine') list = list.filter(p => p.is_owner);
+    if (q) list = list.filter(p => (p.name || '').toLowerCase().includes(q)
+      || (p.description || '').toLowerCase().includes(q));
+
+    if (!list.length) {
+      const empties = {
+        all: ['Сообществ пока нет', 'Создайте первое — оно появится здесь и в ленте.'],
+        subs: ['Вы ни на кого не подписаны', 'Откройте вкладку «Все» и подпишитесь.'],
+        mine: ['У вас пока нет сообществ', 'Нажмите «Создать» сверху.']
+      };
+      const [t, s] = empties[state.tab];
+      body.appendChild(emptyCard(t, s, '👥'));
+      return;
+    }
+    const grid = el('div', { class: 'cm-grid' });
+    for (const p of list) grid.appendChild(buildCommunityCard(p));
+    body.appendChild(grid);
+  };
+
+  // Toolbar: "Create" button + search wiring
+  const createBtn = el('button', { class: 'btn btn-sm cm-create', type: 'button',
+    onclick: () => openCreatePublicModal(),
+    html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Создать сообщество' });
+  search.parentElement.insertBefore(createBtn, search.parentElement.firstChild);
+  // Wrap search row
+  search.parentElement.style.display = 'flex';
+  search.parentElement.style.gap = '8px';
+  search.parentElement.style.flexWrap = 'wrap';
+  search.style.flex = '1';
+  search.style.minWidth = '180px';
+
+  search.addEventListener('input', () => { state.q = search.value; render(); });
+  for (const btn of tabs.querySelectorAll('.feed-tab')) {
+    btn.addEventListener('click', () => {
+      for (const b of tabs.querySelectorAll('.feed-tab')) b.classList.remove('active');
+      btn.classList.add('active');
+      state.tab = btn.dataset.tab;
+      render();
+    });
+  }
+
+  // Load
+  const r = await api.publics().catch(() => ({ ok: false, publics: [] }));
+  state.publics = r.publics || [];
+  render();
+}
+
+function buildCommunityCard(p) {
+  const subBtn = el('button', {
+    class: 'btn btn-sm' + (p.subscribed ? ' btn-ghost' : ''), type: 'button',
+    onclick: async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const btn = e.currentTarget; btn.disabled = true;
+      const r = p.subscribed ? await api.unsubscribePublic(p.id) : await api.subscribePublic(p.id);
+      if (r?.ok) {
+        p.subscribed = r.subscribed;
+        btn.textContent = p.subscribed ? 'Отписаться' : 'Подписаться';
+        btn.classList.toggle('btn-ghost', p.subscribed);
+      }
+      btn.disabled = false;
+    }
+  }, p.subscribed ? 'Отписаться' : 'Подписаться');
+
+  const ava = el('div', { class: 'cm-ava' + (p.verified ? ' official' : '') });
+  if (p.avatar) {
+    const img = el('img', { src: p.avatar, alt: '' });
+    img.onerror = function() { this.remove(); ava.textContent = (p.name || '?').slice(0,1).toUpperCase(); };
+    ava.appendChild(img);
+  } else ava.textContent = (p.name || '?').slice(0,1).toUpperCase();
+
+  return el('a', { class: 'cm-card', href: `/feed?public=${encodeURIComponent(p.id)}` },
+    ava,
+    el('div', { class: 'cm-info' },
+      el('div', { class: 'cm-name' }, p.name,
+        p.verified ? el('span', { class: 'feed-verified', title: 'Проверено', html:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' }) : null,
+        p.is_owner ? el('span', { class: 'feed-owner-tag' }, 'мой') : null),
+      p.description ? el('div', { class: 'cm-desc' }, p.description) : null
+    ),
+    p.is_owner ? null : subBtn
+  );
 }
 
 // ============ page: me (mobile hub: profile + menu) ============
@@ -4854,7 +5254,9 @@ async function pageMe() {
 
   // Menu items
   const items = [
-    { href: '/lookup', label: 'Проверить игрока', icon: 'users', desc: 'Анализ любого по SteamID' },
+    { href: '/friends', label: 'Друзья', icon: 'users', desc: 'Список, заявки, рекомендации, ЧС' },
+    { href: '/communities', label: 'Сообщества', icon: 'grid', desc: 'Ваши и подписки' },
+    { action: openSearchModal, label: 'Найти игрока', icon: 'help', desc: 'По никнейму, ссылке или SteamID' },
     { action: openSupportModal, label: 'Связь с поддержкой', icon: 'help', desc: 'Написать администратору' },
     { href: '/settings', label: 'Настройки', icon: 'settings', desc: 'Валюта, Faceit, аккаунт' }
   ];
@@ -5057,7 +5459,7 @@ async function pageSettings() {
 document.addEventListener('DOMContentLoaded', () => {
   initCookieBanner();
   const page = document.body.dataset.page;
-  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe };
+  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities };
   const fn = router[page];
   if (fn) fn().catch(e => { console.error(e); toast.err('Ошибка: ' + (e.message || e)); });
 });

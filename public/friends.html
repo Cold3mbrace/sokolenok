@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Друзья · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1780056568">
+</head>
+<body data-page="friends">
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="main" style="max-width:900px">
+    <div class="main-top"></div>
+    <div class="feed-head">
+      <h1 class="feed-h1">Друзья</h1>
+      <div class="feed-tabs" id="friends-tabs">
+        <button class="feed-tab active" data-tab="friends" type="button">Друзья</button>
+        <button class="feed-tab" data-tab="incoming" type="button">Заявки</button>
+        <button class="feed-tab" data-tab="outgoing" type="button">Отправленные</button>
+        <button class="feed-tab" data-tab="recommend" type="button">Рекомендации</button>
+        <button class="feed-tab" data-tab="blocks" type="button">Чёрный список</button>
+      </div>
+    </div>
+    <div id="friends-body">
+      <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загрузка…</div></div>
+    </div>
+  </main>
+</div>
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1780056731"></script>
+</body>
+</html>

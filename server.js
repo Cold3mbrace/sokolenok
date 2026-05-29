@@ -1426,6 +1426,14 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 404, { ok: false, error: 'unknown-admin-endpoint' });
   }
 
+  // Search players by persona name (among users who logged in here at least once)
+  if (pathname === '/api/search') {
+    const q = (query.get('q') || '').trim();
+    if (q.length < 2) return sendJson(res, 200, { ok: true, results: [] });
+    const results = db.searchUsers(q, 20);
+    return sendJson(res, 200, { ok: true, results });
+  }
+
   if (pathname === '/api/resolve') {
     const raw = query.get('target') || '';
     const target = extractSteamTarget(raw);
@@ -1600,6 +1608,7 @@ async function handleApi(req, res, pathname, query) {
       }
       // scope 'all': include posts from all publics too (discovery)
       const posts = db.listPosts({ publicIds: scope === 'subs' ? publicIds : null, limit: 50 });
+      db.attachPostStats(posts, me);
       for (const p of posts) {
         const pub = db.getPublic(p.public_id);
         items.push({
@@ -1613,6 +1622,7 @@ async function handleApi(req, res, pathname, query) {
           body: p.body,
           link: p.link,
           image: p.image,
+          likes: p.likes, views: p.views, liked: p.liked,
           created_at: p.created_at
         });
       }
@@ -1709,6 +1719,7 @@ async function handleApi(req, res, pathname, query) {
     if (req.method === 'GET') {
       const subs = me ? db.listSubscriptions(me) : [];
       const posts = db.listPosts({ publicIds: [pid], limit: 50 });
+      db.attachPostStats(posts, me);
       const isEditor = me === pub.owner_steam_id || db.isPublicEditor(pid, me);
       return sendJson(res, 200, { ok: true,
         public: { id: pub.id, name: pub.name, description: pub.description, avatar: pub.avatar, cover: pub.cover,
@@ -1758,16 +1769,46 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/posts/')) {
     const me = getRequestSteamId(req);
-    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
-    const postId = pathname.slice('/api/posts/'.length).split('/')[0];
+    const parts = pathname.slice('/api/posts/'.length).split('/');
+    const postId = parts[0];
+    const action = parts[1] || '';
     const post = db.getPost(postId);
     if (!post) return sendJson(res, 404, { ok: false, error: 'no-such-post' });
-    if (req.method === 'DELETE') {
+
+    // Like / unlike
+    if (action === 'like') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+      if (req.method === 'POST') { db.likePost(postId, me); return sendJson(res, 200, { ok: true, liked: true, likes: db.countLikes(postId) }); }
+      if (req.method === 'DELETE') { db.unlikePost(postId, me); return sendJson(res, 200, { ok: true, liked: false, likes: db.countLikes(postId) }); }
+    }
+    // View (idempotent)
+    if (action === 'view' && req.method === 'POST') {
+      if (me) db.viewPost(postId, me);
+      return sendJson(res, 200, { ok: true, views: db.countViews(postId) });
+    }
+    // Delete
+    if (req.method === 'DELETE' && !action) {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
       if (post.author_steam_id !== me && !canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
       db.deletePost(postId);
       return sendJson(res, 200, { ok: true });
     }
     return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
+  // Friend recommendations: friends-of-my-friends
+  if (pathname === '/api/friends/recommend' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const recs = db.recommendFriends(me, 24);
+    const enriched = [];
+    for (const r of recs) {
+      let prof = null; try { prof = await fetchProfile(r.steam_id); } catch (_) {}
+      enriched.push({ steam_id: r.steam_id, mutuals: r.mutuals,
+        name: prof?.personaname || r.steam_id, avatar: prof?.avatar || null });
+    }
+    return sendJson(res, 200, { ok: true, recommendations: enriched });
   }
 
   if (pathname.startsWith('/api/stats/')) {
@@ -1956,6 +1997,14 @@ async function handleApi(req, res, pathname, query) {
       enrichSteamList(lists.outgoing)
     ]);
     return sendJson(res, 200, { ok: true, friends, incoming, outgoing });
+  }
+
+  // Public: list of confirmed friends-on-site for any steamid (used on profile pages)
+  if (/^\/api\/friends\/\d{17}\/list$/.test(pathname) && req.method === 'GET') {
+    const target = pathname.slice('/api/friends/'.length, -'/list'.length);
+    const lists = db.listFriends(target);
+    const friends = await enrichSteamList(lists.friends);
+    return sendJson(res, 200, { ok: true, friends, count: friends.length });
   }
 
   if (pathname.startsWith('/api/friends/')) {
@@ -2149,7 +2198,9 @@ function serveStatic(req, res, pathname) {
     '/terms': 'terms.html',
     '/rules': 'rules.html',
     '/admin': 'admin.html',
-    '/me': 'me.html'
+    '/me': 'me.html',
+    '/friends': 'friends.html',
+    '/communities': 'communities.html'
   };
   const rel = routeMap[pathname] ? `/${routeMap[pathname]}` : pathname;
   const file = safeJoin(PUBLIC_DIR, rel);

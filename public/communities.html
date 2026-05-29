@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d0c">
+  <title>Сообщества · SOKOLENOK</title>
+  <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css?v=1780056568">
+</head>
+<body data-page="communities">
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="main" style="max-width:900px">
+    <div class="main-top"></div>
+    <div class="feed-head">
+      <h1 class="feed-h1">Сообщества</h1>
+      <div class="feed-tabs" id="cm-tabs">
+        <button class="feed-tab active" data-tab="all" type="button">Все</button>
+        <button class="feed-tab" data-tab="subs" type="button">Подписки</button>
+        <button class="feed-tab" data-tab="mine" type="button">Мои</button>
+      </div>
+    </div>
+    <div style="margin-bottom:12px">
+      <input id="cm-search" class="cm-search" type="search" placeholder="Поиск по названию…" autocomplete="off">
+    </div>
+    <div id="cm-body">
+      <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загрузка…</div></div>
+    </div>
+  </main>
+</div>
+<div id="toast-host" class="toast-host"></div>
+<script src="/app.js?v=1780056731"></script>
+</body>
+</html>
