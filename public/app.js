@@ -149,8 +149,14 @@ const api = {
     deletePublic(id) { return api.request(`/api/admin/public/${encodeURIComponent(id)}/delete`, { method: 'POST' }); },
     verifyPublic(id, on) { return api.request(`/api/admin/public/${encodeURIComponent(id)}/${on ? 'verify' : 'unverify'}`, { method: 'POST' }); },
     posts() { return api.request('/api/admin/posts'); },
-    deletePost(id) { return api.request(`/api/admin/post/${id}/delete`, { method: 'POST' }); }
+    deletePost(id) { return api.request(`/api/admin/post/${id}/delete`, { method: 'POST' }); },
+    moderators() { return api.request('/api/admin/moderators'); },
+    addModerator(id) { return api.request(`/api/admin/moderator/${id}/add`, { method: 'POST' }); },
+    removeModerator(id) { return api.request(`/api/admin/moderator/${id}/remove`, { method: 'POST' }); }
   },
+  publicEditors(pid) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors`); },
+  addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'POST' }); },
+  removePublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'DELETE' }); },
   faceit(steamid, opts = {}) {
     const q = new URLSearchParams();
     if (opts.nickname) q.set('nickname', opts.nickname);
@@ -3945,7 +3951,7 @@ async function renderPublicPage(publicId, me) {
       )
     ),
     el('div', { class: 'pub-header-actions' },
-      p.is_owner
+      p.can_post
         ? el('button', { class: 'btn', type: 'button', onclick: () => openCreatePostModal(p) }, 'Новый пост')
         : el('button', { class: 'btn' + (p.subscribed ? ' btn-ghost' : ''), type: 'button',
             onclick: async (e) => {
@@ -3956,6 +3962,8 @@ async function renderPublicPage(publicId, me) {
             } }, p.subscribed ? 'Отписаться' : 'Подписаться'),
       p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
         onclick: () => openEditPublicModal(p, () => renderPublicPage(publicId, me)) }, 'Редактировать') : null,
+      p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
+        onclick: () => openEditorsModal(p) }, 'Редакторы') : null,
       p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
         onclick: async () => { if (confirm('Удалить паблик со всеми постами?')) { await api.deletePublic(p.id); toast.ok('Удалён'); location.href = '/feed'; } } }, 'Удалить паблик') : null
     )
@@ -4065,20 +4073,19 @@ function paintFeedSide(r) {
   if (!root) return;
   root.innerHTML = '';
 
-  // Create-public button
-  const createCard = el('div', { class: 'card', style: { marginBottom: '14px' } });
-  createCard.appendChild(el('button', { class: 'btn btn-full', type: 'button',
-    onclick: () => openCreatePublicModal(),
-    html: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;vertical-align:-2px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Создать паблик' }));
-  root.appendChild(createCard);
-
   const card = el('div', { class: 'card' });
-  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Паблики'));
+  // Title row with inline "+" create button
+  card.appendChild(el('div', { class: 'feed-side-h' },
+    el('div', { class: 'card-eyebrow', style: { margin: 0 } }, 'Паблики'),
+    el('button', { class: 'feed-side-create', type: 'button', title: 'Создать паблик',
+      onclick: () => openCreatePublicModal(),
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span>Создать</span>' })
+  ));
 
   const publics = r?.publics || [];
   if (!publics.length) {
     card.appendChild(el('div', { class: 'feed-side-empty' },
-      'Пока нет пабликов. Создайте первый — он появится здесь и в ленте.'));
+      'Пока нет пабликов. Нажмите «Создать», чтобы сделать свой.'));
     root.appendChild(card);
     return;
   }
@@ -4106,7 +4113,7 @@ function paintFeedSide(r) {
           p.is_owner ? el('span', { class: 'feed-owner-tag' }, 'мой') : null),
         p.description ? el('div', { class: 'feed-pub-desc' }, p.description) : null
       ),
-      p.is_owner
+      p.can_post
         ? el('button', { class: 'btn btn-sm', type: 'button', onclick: () => openCreatePostModal(p) }, 'Пост')
         : subBtn
     );
@@ -4114,6 +4121,45 @@ function paintFeedSide(r) {
   }
   card.appendChild(list);
   root.appendChild(card);
+}
+
+// Modal: manage public co-owners / editors (owner only)
+function openEditorsModal(pub) {
+  const listBox = el('div', { class: 'editors-list' });
+  const input = el('input', { class: 'modal-input', placeholder: 'SteamID нового редактора (76561...)' });
+  const reload = async () => {
+    listBox.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Загрузка…</div>';
+    const r = await api.publicEditors(pub.id).catch(() => ({ ok: false, editors: [] }));
+    listBox.innerHTML = '';
+    if (!r.editors?.length) {
+      listBox.appendChild(el('div', { class: 'modal-hint' }, 'Редакторов пока нет. Они смогут публиковать посты в этом паблике.'));
+    } else {
+      for (const e of r.editors) {
+        listBox.appendChild(el('div', { class: 'editor-row' },
+          el('a', { class: 'editor-name', href: `/lookup?steamid=${e.steam_id}` }, e.name || e.steam_id),
+          el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+            onclick: async () => { await api.removePublicEditor(pub.id, e.steam_id); toast.ok('Удалён'); reload(); } }, 'Убрать')
+        ));
+      }
+    }
+  };
+  openModal(`Редакторы · ${pub.name}`, [
+    el('div', { class: 'modal-hint' },
+      'Редакторы могут публиковать посты в ваш паблик. Удалять паблик и менять настройки может только владелец.'),
+    listBox,
+    el('label', { class: 'modal-label' }, 'Добавить редактора'),
+    el('div', { class: 'admin-manual', style: { margin: 0 } },
+      input,
+      el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+        const id = input.value.trim();
+        if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
+        const r = await api.addPublicEditor(pub.id, id).catch(() => ({ ok: false }));
+        if (r.ok) { toast.ok('Добавлен'); input.value = ''; reload(); }
+        else toast.err(r.error === 'already-owner' ? 'Это владелец паблика' : 'Ошибка');
+      } }, 'Добавить')
+    )
+  ], async () => true, 'Готово');
+  reload();
 }
 
 // Modal: edit an existing public
@@ -4544,6 +4590,9 @@ async function pageAdmin() {
   gate.style.display = 'none';
   bodyEl.style.display = '';
 
+  // Moderators tab is superadmin-only
+  if (me.is_superadmin) { const t = $('#tab-moderators'); if (t) t.style.display = ''; }
+
   // Stats
   try {
     const s = await api.admin.stats();
@@ -4558,6 +4607,7 @@ async function pageAdmin() {
     if (tab === 'bans') return paintAdminBans(panel);
     if (tab === 'publics') return paintAdminPublics(panel);
     if (tab === 'posts') return paintAdminPosts(panel);
+    if (tab === 'moderators') return paintAdminModerators(panel);
     if (tab === 'tools') return paintAdminTools(panel);
   };
   for (const btn of tabs.querySelectorAll('.tab')) {
@@ -4568,6 +4618,41 @@ async function pageAdmin() {
     });
   }
   load('reports');
+}
+
+async function paintAdminModerators(panel) {
+  const r = await api.admin.moderators().catch(() => ({ ok: false, moderators: [] }));
+  panel.innerHTML = '';
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Модераторы'));
+  card.appendChild(el('div', { class: 'admin-row-sub', style: { marginBottom: '12px' } },
+    'Модераторы могут банить, удалять контент и обрабатывать жалобы, но не могут назначать других модераторов. Назначать и снимать можете только вы.'));
+  if (!r.moderators?.length) {
+    card.appendChild(el('div', { class: 'admin-empty' }, 'Модераторов пока нет.'));
+  } else {
+    for (const m of r.moderators) {
+      card.appendChild(el('div', { class: 'admin-row' },
+        el('div', { class: 'admin-row-main' },
+          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id)),
+          el('div', { class: 'admin-row-sub' }, 'Назначен ', relDate(m.created_at))),
+        el('div', { class: 'admin-row-actions' },
+          el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+            onclick: async () => { if (confirm('Снять модератора?')) { await api.admin.removeModerator(m.steam_id); toast.ok('Снят'); paintAdminModerators(panel); } } }, 'Снять'))
+      ));
+    }
+  }
+  const input = el('input', { class: 'admin-input', placeholder: 'SteamID нового модератора (76561...)' });
+  card.appendChild(el('div', { class: 'admin-manual' },
+    input,
+    el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+      const id = input.value.trim();
+      if (!/^\d{17}$/.test(id)) { toast.warn('Неверный SteamID'); return; }
+      const res = await api.admin.addModerator(id);
+      if (res.ok) { toast.ok('Модератор назначен'); paintAdminModerators(panel); }
+      else toast.err('Ошибка');
+    } }, 'Назначить')
+  ));
+  panel.appendChild(card);
 }
 
 function paintAdminStats(s) {

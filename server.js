@@ -61,6 +61,14 @@ const ADMIN_STEAMIDS = new Set(
 function isAdminSteamId(steamid) {
   return !!steamid && ADMIN_STEAMIDS.has(steamid);
 }
+// Superadmin = env admin (unremovable, can manage moderators).
+function isSuperAdmin(steamid) {
+  return isAdminSteamId(steamid);
+}
+// canModerate = superadmin OR a site moderator (bans, deletions, reports).
+function canModerate(steamid) {
+  return isSuperAdmin(steamid) || db.isModerator(steamid);
+}
 
 // ---------- message encryption at rest ----------
 // DMs are stored encrypted with AES-256-GCM. The key is derived from MESSAGE_SECRET
@@ -1288,7 +1296,8 @@ async function handleApi(req, res, pathname, query) {
     if (!profile) profile = await fetchProfile(steamid);
     const settings = db.getSettings(steamid);
     return sendJson(res, 200, { logged_in: true, steamid, profile, settings,
-      is_admin: isAdminSteamId(steamid),
+      is_admin: canModerate(steamid),
+      is_superadmin: isSuperAdmin(steamid),
       consented: !!settings.consent_at });
   }
 
@@ -1324,8 +1333,30 @@ async function handleApi(req, res, pathname, query) {
   // ---------- admin (gated by SteamID) ----------
   if (pathname.startsWith('/api/admin/')) {
     const me = getRequestSteamId(req);
-    if (!isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    if (!canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
     const sub = pathname.slice('/api/admin/'.length);
+
+    // ----- moderator management (SUPERADMIN ONLY) -----
+    if (sub === 'moderators' && req.method === 'GET') {
+      if (!isSuperAdmin(me)) return sendJson(res, 403, { ok: false, error: 'superadmin-only' });
+      const mods = db.listModerators();
+      const enriched = [];
+      for (const m of mods) {
+        let p = null; try { p = await fetchProfile(m.steam_id); } catch (_) {}
+        enriched.push({ ...m, name: p?.personaname || m.steam_id });
+      }
+      return sendJson(res, 200, { ok: true, moderators: enriched });
+    }
+    if (sub.startsWith('moderator/') && req.method === 'POST') {
+      if (!isSuperAdmin(me)) return sendJson(res, 403, { ok: false, error: 'superadmin-only' });
+      const parts = sub.slice('moderator/'.length).split('/');
+      const target = parts[0];
+      const action = parts[1];
+      if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+      if (action === 'add') { db.addModerator(target, me); db.logEvent('mod-grant', me, { target }); return sendJson(res, 200, { ok: true }); }
+      if (action === 'remove') { db.removeModerator(target); db.logEvent('mod-revoke', me, { target }); return sendJson(res, 200, { ok: true }); }
+      return sendJson(res, 400, { ok: false, error: 'bad-action' });
+    }
 
     if (sub === 'stats' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, stats: db.adminStats() });
@@ -1616,7 +1647,8 @@ async function handleApi(req, res, pathname, query) {
     const publics = db.listPublics().map(p => ({
       id: p.id, name: p.name, description: p.description, avatar: p.avatar,
       verified: !!p.verified, subscribed: subs.includes(p.id),
-      owner: p.owner_steam_id, is_owner: me === p.owner_steam_id
+      owner: p.owner_steam_id, is_owner: me === p.owner_steam_id,
+      can_post: me === p.owner_steam_id || (me ? db.isPublicEditor(p.id, me) : false)
     }));
     return sendJson(res, 200, { ok: true, publics, subscriptions: subs });
   }
@@ -1631,6 +1663,42 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
   }
 
+  // Public editors (co-owners) — owner only
+  if (/^\/api\/publics\/[^/]+\/editors/.test(pathname)) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const pid = decodeURIComponent(pathname.slice('/api/publics/'.length).split('/')[0]);
+    const pub = db.getPublic(pid);
+    if (!pub) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
+    if (me !== pub.owner_steam_id) return sendJson(res, 403, { ok: false, error: 'not-owner' });
+
+    // GET list
+    if (req.method === 'GET') {
+      const eds = db.listPublicEditors(pid);
+      const enriched = [];
+      for (const e of eds) {
+        let p = null; try { p = await fetchProfile(e.steam_id); } catch (_) {}
+        enriched.push({ steam_id: e.steam_id, name: p?.personaname || e.steam_id, avatar: p?.avatar || null });
+      }
+      return sendJson(res, 200, { ok: true, editors: enriched });
+    }
+    // POST add  /editors/:steamid
+    const parts = pathname.slice('/api/publics/'.length).split('/');
+    const target = parts[2] ? decodeURIComponent(parts[2]) : '';
+    if (req.method === 'POST') {
+      if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+      if (target === pub.owner_steam_id) return sendJson(res, 400, { ok: false, error: 'already-owner' });
+      db.addPublicEditor(pid, target, me);
+      db.logEvent('public-editor-add', me, { pid, target });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'DELETE') {
+      db.removePublicEditor(pid, target);
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+  }
+
   // Public detail + its posts; DELETE removes own public
   if (pathname.startsWith('/api/publics/')) {
     const me = getRequestSteamId(req);
@@ -1641,10 +1709,11 @@ async function handleApi(req, res, pathname, query) {
     if (req.method === 'GET') {
       const subs = me ? db.listSubscriptions(me) : [];
       const posts = db.listPosts({ publicIds: [pid], limit: 50 });
+      const isEditor = me === pub.owner_steam_id || db.isPublicEditor(pid, me);
       return sendJson(res, 200, { ok: true,
         public: { id: pub.id, name: pub.name, description: pub.description, avatar: pub.avatar, cover: pub.cover,
           verified: !!pub.verified, owner: pub.owner_steam_id,
-          is_owner: me === pub.owner_steam_id, subscribed: subs.includes(pid) },
+          is_owner: me === pub.owner_steam_id, can_post: isEditor, subscribed: subs.includes(pid) },
         posts
       });
     }
@@ -1660,7 +1729,7 @@ async function handleApi(req, res, pathname, query) {
       return sendJson(res, 200, { ok: true });
     }
     if (req.method === 'DELETE') {
-      if (me !== pub.owner_steam_id && !isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      if (me !== pub.owner_steam_id && !canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
       db.deletePublic(pid);
       return sendJson(res, 200, { ok: true });
     }
@@ -1676,7 +1745,7 @@ async function handleApi(req, res, pathname, query) {
     const public_id = String(body.public_id || '').trim();
     const pub = db.getPublic(public_id);
     if (!pub) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
-    if (pub.owner_steam_id !== me) return sendJson(res, 403, { ok: false, error: 'not-owner' });
+    if (pub.owner_steam_id !== me && !db.isPublicEditor(public_id, me)) return sendJson(res, 403, { ok: false, error: 'not-owner' });
     const title = String(body.title || '').trim().slice(0, 200) || null;
     const text = String(body.body || '').trim().slice(0, 5000);
     const link = String(body.link || '').trim().slice(0, 500) || null;
@@ -1694,7 +1763,7 @@ async function handleApi(req, res, pathname, query) {
     const post = db.getPost(postId);
     if (!post) return sendJson(res, 404, { ok: false, error: 'no-such-post' });
     if (req.method === 'DELETE') {
-      if (post.author_steam_id !== me && !isAdminSteamId(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      if (post.author_steam_id !== me && !canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
       db.deletePost(postId);
       return sendJson(res, 200, { ok: true });
     }

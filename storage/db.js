@@ -209,6 +209,24 @@ CREATE TABLE IF NOT EXISTS user_bans (
   created_at  TEXT NOT NULL
 );
 
+-- Site moderators (granted via the panel by the env superadmin).
+-- They get moderation powers but cannot grant/revoke other moderators.
+CREATE TABLE IF NOT EXISTS moderators (
+  steam_id    TEXT PRIMARY KEY,
+  granted_by  TEXT,
+  created_at  TEXT NOT NULL
+);
+
+-- Public co-owners / editors: can post into a public they don't own.
+CREATE TABLE IF NOT EXISTS public_editors (
+  public_id   TEXT NOT NULL,
+  steam_id    TEXT NOT NULL,
+  added_by    TEXT,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (public_id, steam_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pubed_steam ON public_editors(steam_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -282,6 +300,8 @@ function emptyFallback() {
     messages: [],
     reports: [],
     user_bans: {},
+    moderators: {},
+    public_editors: {},
     events: []
   };
 }
@@ -1220,6 +1240,84 @@ function listBans() {
   return Object.values(readFallback().user_bans || {}).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
+// ----- moderators -----
+function addModerator(steamId, bySteamId) {
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(`INSERT INTO moderators (steam_id, granted_by, created_at) VALUES (?,?,?)
+      ON CONFLICT(steam_id) DO NOTHING`).run(steamId, bySteamId || null, created_at);
+  } else {
+    const state = readFallback();
+    if (!state.moderators) state.moderators = {};
+    state.moderators[steamId] = { steam_id: steamId, granted_by: bySteamId || null, created_at };
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function removeModerator(steamId) {
+  if (useSqlite()) {
+    openSqlite().prepare(`DELETE FROM moderators WHERE steam_id=?`).run(steamId);
+  } else {
+    const state = readFallback();
+    delete (state.moderators || {})[steamId];
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function isModerator(steamId) {
+  if (!steamId) return false;
+  if (useSqlite()) {
+    return !!openSqlite().prepare(`SELECT 1 FROM moderators WHERE steam_id=?`).get(steamId);
+  }
+  return !!(readFallback().moderators || {})[steamId];
+}
+function listModerators() {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM moderators ORDER BY created_at DESC`).all();
+  }
+  return Object.values(readFallback().moderators || {}).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
+
+// ----- public editors (co-owners) -----
+function addPublicEditor(publicId, steamId, bySteamId) {
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(`INSERT INTO public_editors (public_id, steam_id, added_by, created_at) VALUES (?,?,?,?)
+      ON CONFLICT(public_id, steam_id) DO NOTHING`).run(publicId, steamId, bySteamId || null, created_at);
+  } else {
+    const state = readFallback();
+    if (!state.public_editors) state.public_editors = {};
+    state.public_editors[`${publicId}:${steamId}`] = { public_id: publicId, steam_id: steamId, added_by: bySteamId || null, created_at };
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function removePublicEditor(publicId, steamId) {
+  if (useSqlite()) {
+    openSqlite().prepare(`DELETE FROM public_editors WHERE public_id=? AND steam_id=?`).run(publicId, steamId);
+  } else {
+    const state = readFallback();
+    delete (state.public_editors || {})[`${publicId}:${steamId}`];
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+function listPublicEditors(publicId) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT steam_id, created_at FROM public_editors WHERE public_id=?`).all(publicId);
+  }
+  return Object.values(readFallback().public_editors || {})
+    .filter(e => e.public_id === publicId)
+    .map(e => ({ steam_id: e.steam_id, created_at: e.created_at }));
+}
+function isPublicEditor(publicId, steamId) {
+  if (!steamId) return false;
+  if (useSqlite()) {
+    return !!openSqlite().prepare(`SELECT 1 FROM public_editors WHERE public_id=? AND steam_id=?`).get(publicId, steamId);
+  }
+  return !!(readFallback().public_editors || {})[`${publicId}:${steamId}`];
+}
+
 // Content deletion (admin)
 function deletePost(id) {
   if (useSqlite()) {
@@ -1237,11 +1335,13 @@ function deletePublic(id) {
     d.prepare(`DELETE FROM publics WHERE id=?`).run(id);
     d.prepare(`DELETE FROM posts WHERE public_id=?`).run(id);
     d.prepare(`DELETE FROM subscriptions WHERE public_id=?`).run(id);
+    d.prepare(`DELETE FROM public_editors WHERE public_id=?`).run(id);
   } else {
     const state = readFallback();
     delete (state.publics || {})[id];
     state.posts = (state.posts || []).filter(p => p.public_id !== id);
     for (const k of Object.keys(state.subscriptions || {})) if (k.endsWith(':' + id)) delete state.subscriptions[k];
+    for (const k of Object.keys(state.public_editors || {})) if (k.startsWith(id + ':')) delete state.public_editors[k];
     writeFallback(state);
   }
   return { ok: true };
@@ -1352,6 +1452,8 @@ module.exports = {
   // moderation
   createReport, listReports, resolveReport, countOpenReports,
   banUser, unbanUser, isUserBanned, listBans,
+  addModerator, removeModerator, isModerator, listModerators,
+  addPublicEditor, removePublicEditor, listPublicEditors, isPublicEditor,
   deletePost, deletePublic, setPublicVerified, adminStats,
   // events
   logEvent, storageHealth
