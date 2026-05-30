@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
   steam_url TEXT,
   visibility TEXT,
   profile_json TEXT,
+  last_seen_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   telegram_id TEXT,
   faceit_nickname TEXT,
   consent_at TEXT,
+  show_activity INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
 
@@ -227,6 +229,25 @@ CREATE TABLE IF NOT EXISTS public_editors (
 );
 CREATE INDEX IF NOT EXISTS idx_pubed_steam ON public_editors(steam_id);
 
+-- Custom team roles ("Команда SOKOLENOK"): admin-defined labels with colors
+CREATE TABLE IF NOT EXISTS roles (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  color       TEXT NOT NULL DEFAULT 'green',
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+
+-- Assignments of users to roles
+CREATE TABLE IF NOT EXISTS role_members (
+  role_id     INTEGER NOT NULL,
+  steam_id    TEXT NOT NULL,
+  added_by    TEXT,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (role_id, steam_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rolemb_steam ON role_members(steam_id);
+
 -- Likes on posts (unique per user per post)
 CREATE TABLE IF NOT EXISTS post_likes (
   post_id    INTEGER NOT NULL,
@@ -244,6 +265,16 @@ CREATE TABLE IF NOT EXISTS post_views (
   PRIMARY KEY (post_id, steam_id)
 );
 CREATE INDEX IF NOT EXISTS idx_views_post ON post_views(post_id);
+
+-- Comments on posts
+CREATE TABLE IF NOT EXISTS post_comments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id    INTEGER NOT NULL,
+  author_steam_id TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comments_post ON post_comments(post_id, created_at);
 
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,6 +307,11 @@ function openSqlite() {
     if (!colNames.has('consent_at')) {
       db.exec('ALTER TABLE user_settings ADD COLUMN consent_at TEXT');
     }
+    if (!colNames.has('show_activity')) {
+      // SQLite ALTER doesn't allow NOT NULL DEFAULT in some versions of node:sqlite;
+      // add as nullable and treat NULL as 1 in reads.
+      db.exec('ALTER TABLE user_settings ADD COLUMN show_activity INTEGER DEFAULT 1');
+    }
   } catch (_) { /* best-effort */ }
   try {
     const cols = db.prepare("PRAGMA table_info(reputation)").all();
@@ -292,6 +328,12 @@ function openSqlite() {
     const cols = db.prepare("PRAGMA table_info(publics)").all();
     if (!new Set(cols.map(c => c.name)).has('cover')) {
       db.exec('ALTER TABLE publics ADD COLUMN cover TEXT');
+    }
+  } catch (_) { /* best-effort */ }
+  try {
+    const cols = db.prepare("PRAGMA table_info(users)").all();
+    if (!new Set(cols.map(c => c.name)).has('last_seen_at')) {
+      db.exec('ALTER TABLE users ADD COLUMN last_seen_at TEXT');
     }
   } catch (_) { /* best-effort */ }
   return db;
@@ -322,6 +364,9 @@ function emptyFallback() {
     public_editors: {},
     post_likes: {},
     post_views: {},
+    post_comments: [],
+    roles: [],
+    role_members: {},
     events: []
   };
 }
@@ -386,6 +431,28 @@ function getUser(steamId) {
     return openSqlite().prepare('SELECT * FROM users WHERE steam_id = ?').get(steamId) || null;
   }
   return readFallback().users[steamId] || null;
+}
+
+// Update last activity timestamp; called by middleware on every authed request.
+// Throttle externally — this method itself just writes.
+function touchLastSeen(steamId, iso) {
+  if (!steamId) return;
+  const at = iso || nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare('UPDATE users SET last_seen_at = ? WHERE steam_id = ?').run(at, steamId);
+  } else {
+    const state = readFallback();
+    if (state.users[steamId]) { state.users[steamId].last_seen_at = at; writeFallback(state); }
+  }
+}
+
+function getLastSeen(steamId) {
+  if (!steamId) return null;
+  if (useSqlite()) {
+    const r = openSqlite().prepare('SELECT last_seen_at FROM users WHERE steam_id = ?').get(steamId);
+    return r?.last_seen_at || null;
+  }
+  return readFallback().users[steamId]?.last_seen_at || null;
 }
 
 // Case-insensitive search by persona_name among users who logged in at least once.
@@ -608,12 +675,16 @@ function removeWatch(steamId, marketName) {
 function getSettings(steamId) {
   if (!steamId) return null;
   const empty = { steam_id: steamId, currency: 'RUB', language: 'ru',
-    telegram_id: null, faceit_nickname: null, consent_at: null, updated_at: null };
+    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, updated_at: null };
+  let row;
   if (useSqlite()) {
-    return openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId)
-      || empty;
+    row = openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId) || empty;
+  } else {
+    row = readFallback().user_settings[steamId] || empty;
   }
-  return readFallback().user_settings[steamId] || empty;
+  // Treat NULL/undefined as default ON for show_activity
+  if (row.show_activity == null) row.show_activity = 1;
+  return row;
 }
 
 function setSettings(steamId, patch = {}) {
@@ -625,19 +696,21 @@ function setSettings(steamId, patch = {}) {
     telegram_id: patch.telegram_id !== undefined ? patch.telegram_id : cur.telegram_id,
     faceit_nickname: patch.faceit_nickname !== undefined ? patch.faceit_nickname : cur.faceit_nickname,
     consent_at: patch.consent_at !== undefined ? patch.consent_at : cur.consent_at,
+    show_activity: patch.show_activity !== undefined ? (patch.show_activity ? 1 : 0) : (cur.show_activity ?? 1),
     updated_at: nowIso()
   };
   if (useSqlite()) {
-    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, updated_at)
-      VALUES (?,?,?,?,?,?,?)
+    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, updated_at)
+      VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(steam_id) DO UPDATE SET
         currency = excluded.currency,
         language = excluded.language,
         telegram_id = excluded.telegram_id,
         faceit_nickname = excluded.faceit_nickname,
         consent_at = excluded.consent_at,
+        show_activity = excluded.show_activity,
         updated_at = excluded.updated_at`)
-      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.updated_at);
+      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.updated_at);
   } else {
     const state = readFallback();
     state.user_settings[steamId] = next;
@@ -999,25 +1072,84 @@ function countViews(postId) {
   return Object.values(readFallback().post_views || {}).filter(v => v.post_id === Number(postId)).length;
 }
 
+// ----- post comments -----
+function addComment(postId, authorSteamId, body) {
+  const created_at = nowIso();
+  const text = String(body || '').slice(0, 1000);
+  if (useSqlite()) {
+    const info = openSqlite().prepare(
+      `INSERT INTO post_comments (post_id, author_steam_id, body, created_at) VALUES (?,?,?,?)`
+    ).run(Number(postId), authorSteamId, text, created_at);
+    return { id: Number(info.lastInsertRowid), post_id: Number(postId), author_steam_id: authorSteamId, body: text, created_at };
+  }
+  const state = readFallback();
+  if (!state.post_comments) state.post_comments = [];
+  const id = (state.post_comments.reduce((m, c) => Math.max(m, c.id || 0), 0) || 0) + 1;
+  const row = { id, post_id: Number(postId), author_steam_id: authorSteamId, body: text, created_at };
+  state.post_comments.push(row);
+  writeFallback(state);
+  return row;
+}
+
+function deleteComment(id) {
+  if (useSqlite()) {
+    openSqlite().prepare(`DELETE FROM post_comments WHERE id=?`).run(Number(id));
+  } else {
+    const state = readFallback();
+    state.post_comments = (state.post_comments || []).filter(c => c.id !== Number(id));
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+function getComment(id) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM post_comments WHERE id=?`).get(Number(id)) || null;
+  }
+  return (readFallback().post_comments || []).find(c => c.id === Number(id)) || null;
+}
+
+function listComments(postId, limit = 200) {
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT * FROM post_comments WHERE post_id=? ORDER BY created_at ASC LIMIT ?`
+    ).all(Number(postId), limit);
+  }
+  return (readFallback().post_comments || [])
+    .filter(c => c.post_id === Number(postId))
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+    .slice(0, limit);
+}
+
+function countComments(postId) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT COUNT(*) AS c FROM post_comments WHERE post_id=?`).get(Number(postId)).c;
+  }
+  return (readFallback().post_comments || []).filter(c => c.post_id === Number(postId)).length;
+}
+
 // Attach like/view counts to an array of posts; mark which I liked.
 function attachPostStats(posts, mySteamId) {
   if (!posts?.length) return posts;
   const ids = posts.map(p => Number(p.id));
-  let likeMap = {}, viewMap = {}, mineSet = new Set();
+  let likeMap = {}, viewMap = {}, commentMap = {}, mineSet = new Set();
   if (useSqlite()) {
     const d = openSqlite();
     const ph = ids.map(() => '?').join(',');
     for (const r of d.prepare(`SELECT post_id, COUNT(*) AS c FROM post_likes WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids)) likeMap[r.post_id] = r.c;
     for (const r of d.prepare(`SELECT post_id, COUNT(*) AS c FROM post_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids)) viewMap[r.post_id] = r.c;
+    for (const r of d.prepare(`SELECT post_id, COUNT(*) AS c FROM post_comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids)) commentMap[r.post_id] = r.c;
     if (mySteamId) for (const r of d.prepare(`SELECT post_id FROM post_likes WHERE post_id IN (${ph}) AND steam_id=?`).all(...ids, mySteamId)) mineSet.add(r.post_id);
   } else {
     const state = readFallback();
     for (const l of Object.values(state.post_likes || {})) { if (ids.includes(l.post_id)) { likeMap[l.post_id] = (likeMap[l.post_id] || 0) + 1; if (l.steam_id === mySteamId) mineSet.add(l.post_id); } }
     for (const v of Object.values(state.post_views || {})) { if (ids.includes(v.post_id)) viewMap[v.post_id] = (viewMap[v.post_id] || 0) + 1; }
+    for (const c of (state.post_comments || [])) { if (ids.includes(c.post_id)) commentMap[c.post_id] = (commentMap[c.post_id] || 0) + 1; }
   }
   for (const p of posts) {
     p.likes = likeMap[p.id] || 0;
     p.views = viewMap[p.id] || 0;
+    p.comments = commentMap[p.id] || 0;
     p.liked = mineSet.has(p.id);
   }
   return posts;
@@ -1432,6 +1564,154 @@ function listModerators() {
   return Object.values(readFallback().moderators || {}).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
+// ----- custom roles ("Команда SOKOLENOK") -----
+function createRole({ name, color, sort_order }) {
+  const created_at = nowIso();
+  const safeColor = String(color || 'green').slice(0, 16);
+  const safeName = String(name || '').trim().slice(0, 32);
+  const order = Number(sort_order) || 0;
+  if (useSqlite()) {
+    const info = openSqlite().prepare(
+      `INSERT INTO roles (name, color, sort_order, created_at) VALUES (?,?,?,?)`
+    ).run(safeName, safeColor, order, created_at);
+    return { id: Number(info.lastInsertRowid), name: safeName, color: safeColor, sort_order: order, created_at };
+  }
+  const state = readFallback();
+  if (!state.roles) state.roles = [];
+  const id = (state.roles.reduce((m, r) => Math.max(m, r.id || 0), 0) || 0) + 1;
+  const row = { id, name: safeName, color: safeColor, sort_order: order, created_at };
+  state.roles.push(row);
+  writeFallback(state);
+  return row;
+}
+
+function updateRole(id, { name, color, sort_order }) {
+  if (useSqlite()) {
+    const cur = openSqlite().prepare(`SELECT * FROM roles WHERE id=?`).get(Number(id));
+    if (!cur) return { error: 'not-found' };
+    const next = {
+      name: name !== undefined ? String(name).trim().slice(0, 32) : cur.name,
+      color: color !== undefined ? String(color).slice(0, 16) : cur.color,
+      sort_order: sort_order !== undefined ? Number(sort_order) || 0 : cur.sort_order
+    };
+    openSqlite().prepare(`UPDATE roles SET name=?, color=?, sort_order=? WHERE id=?`)
+      .run(next.name, next.color, next.sort_order, Number(id));
+    return { ok: true };
+  }
+  const state = readFallback();
+  const r = (state.roles || []).find(x => x.id === Number(id));
+  if (!r) return { error: 'not-found' };
+  if (name !== undefined) r.name = String(name).trim().slice(0, 32);
+  if (color !== undefined) r.color = String(color).slice(0, 16);
+  if (sort_order !== undefined) r.sort_order = Number(sort_order) || 0;
+  writeFallback(state);
+  return { ok: true };
+}
+
+function deleteRole(id) {
+  if (useSqlite()) {
+    const d = openSqlite();
+    d.prepare(`DELETE FROM roles WHERE id=?`).run(Number(id));
+    d.prepare(`DELETE FROM role_members WHERE role_id=?`).run(Number(id));
+  } else {
+    const state = readFallback();
+    state.roles = (state.roles || []).filter(r => r.id !== Number(id));
+    for (const k of Object.keys(state.role_members || {})) {
+      if (k.startsWith(id + ':')) delete state.role_members[k];
+    }
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+function listRoles() {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM roles ORDER BY sort_order ASC, id ASC`).all();
+  }
+  return (readFallback().roles || []).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id);
+}
+
+function getRole(id) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM roles WHERE id=?`).get(Number(id)) || null;
+  }
+  return (readFallback().roles || []).find(r => r.id === Number(id)) || null;
+}
+
+function addRoleMember(roleId, steamId, bySteamId) {
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(
+      `INSERT INTO role_members (role_id, steam_id, added_by, created_at) VALUES (?,?,?,?)
+       ON CONFLICT(role_id, steam_id) DO NOTHING`
+    ).run(Number(roleId), steamId, bySteamId || null, created_at);
+  } else {
+    const state = readFallback();
+    if (!state.role_members) state.role_members = {};
+    state.role_members[`${roleId}:${steamId}`] = { role_id: Number(roleId), steam_id: steamId, added_by: bySteamId || null, created_at };
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+function removeRoleMember(roleId, steamId) {
+  if (useSqlite()) {
+    openSqlite().prepare(`DELETE FROM role_members WHERE role_id=? AND steam_id=?`).run(Number(roleId), steamId);
+  } else {
+    const state = readFallback();
+    delete (state.role_members || {})[`${roleId}:${steamId}`];
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+function listRoleMembers(roleId) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM role_members WHERE role_id=? ORDER BY created_at ASC`).all(Number(roleId));
+  }
+  return Object.values(readFallback().role_members || {})
+    .filter(m => m.role_id === Number(roleId))
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+}
+
+// Resolve the (first/primary) role for a given user.
+// Returns { id, name, color } or null. Lowest sort_order wins.
+function getUserRole(steamId) {
+  if (!steamId) return null;
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT r.id, r.name, r.color FROM role_members rm
+       JOIN roles r ON r.id = rm.role_id
+       WHERE rm.steam_id = ?
+       ORDER BY r.sort_order ASC, r.id ASC LIMIT 1`
+    ).get(steamId) || null;
+  }
+  const state = readFallback();
+  const roleIds = Object.values(state.role_members || {})
+    .filter(m => m.steam_id === steamId)
+    .map(m => m.role_id);
+  if (!roleIds.length) return null;
+  const roles = (state.roles || []).filter(r => roleIds.includes(r.id))
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id);
+  if (!roles[0]) return null;
+  return { id: roles[0].id, name: roles[0].name, color: roles[0].color };
+}
+
+// Attach role info to an array of objects with a steam_id field (e.g., comments, messages)
+function attachRoles(rows, sidField = 'steam_id') {
+  if (!rows?.length) return rows;
+  const ids = Array.from(new Set(rows.map(r => r[sidField]).filter(Boolean)));
+  const map = {};
+  for (const id of ids) {
+    const r = getUserRole(id);
+    if (r) map[id] = r;
+  }
+  for (const row of rows) {
+    if (map[row[sidField]]) row.role = map[row[sidField]];
+  }
+  return rows;
+}
+
 // ----- public editors (co-owners) -----
 function addPublicEditor(publicId, steamId, bySteamId) {
   const created_at = nowIso();
@@ -1479,11 +1759,13 @@ function deletePost(id) {
     d.prepare(`DELETE FROM posts WHERE id=?`).run(id);
     d.prepare(`DELETE FROM post_likes WHERE post_id=?`).run(Number(id));
     d.prepare(`DELETE FROM post_views WHERE post_id=?`).run(Number(id));
+    d.prepare(`DELETE FROM post_comments WHERE post_id=?`).run(Number(id));
   } else {
     const state = readFallback();
     state.posts = (state.posts || []).filter(p => p.id !== Number(id));
     for (const k of Object.keys(state.post_likes || {})) if (k.startsWith(id + ':')) delete state.post_likes[k];
     for (const k of Object.keys(state.post_views || {})) if (k.startsWith(id + ':')) delete state.post_views[k];
+    state.post_comments = (state.post_comments || []).filter(c => c.post_id !== Number(id));
     writeFallback(state);
   }
   return { ok: true };
@@ -1584,7 +1866,7 @@ module.exports = {
   // common
   nowIso, uuid,
   // users
-  upsertUser, getUser, searchUsers,
+  upsertUser, getUser, searchUsers, touchLastSeen, getLastSeen,
   // sessions
   createSession, getSession, deleteSession,
   // inventory
@@ -1604,6 +1886,7 @@ module.exports = {
   createPost, getPost, listPosts,
   likePost, unlikePost, hasLiked, countLikes,
   viewPost, countViews, attachPostStats,
+  addComment, deleteComment, getComment, listComments, countComments,
   recommendFriends,
   listSubscriptions, subscribe, unsubscribe,
   // friends / blocks
@@ -1615,6 +1898,8 @@ module.exports = {
   createReport, listReports, resolveReport, countOpenReports,
   banUser, unbanUser, isUserBanned, listBans,
   addModerator, removeModerator, isModerator, listModerators,
+  createRole, updateRole, deleteRole, listRoles, getRole,
+  addRoleMember, removeRoleMember, listRoleMembers, getUserRole, attachRoles,
   addPublicEditor, removePublicEditor, listPublicEditors, isPublicEditor,
   deletePost, deletePublic, setPublicVerified, adminStats,
   // events

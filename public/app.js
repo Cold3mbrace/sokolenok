@@ -127,7 +127,11 @@ const api = {
   likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
   unlikePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'DELETE' }); },
   viewPost(id) { return this.request(`/api/posts/${id}/view`, { method: 'POST' }); },
+  listComments(id) { return this.request(`/api/posts/${id}/comments`); },
+  addComment(id, body) { return this.request(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }); },
+  deleteComment(postId, commentId) { return this.request(`/api/posts/${postId}/comments/${commentId}`, { method: 'DELETE' }); },
   recommendFriends() { return this.request('/api/friends/recommend'); },
+  presence(ids) { return this.request('/api/presence', { method: 'POST', body: JSON.stringify({ ids }) }); },
   async upload(file) {
     const fd = new FormData();
     fd.append('file', file);
@@ -165,7 +169,13 @@ const api = {
     deletePost(id) { return api.request(`/api/admin/post/${id}/delete`, { method: 'POST' }); },
     moderators() { return api.request('/api/admin/moderators'); },
     addModerator(id) { return api.request(`/api/admin/moderator/${id}/add`, { method: 'POST' }); },
-    removeModerator(id) { return api.request(`/api/admin/moderator/${id}/remove`, { method: 'POST' }); }
+    removeModerator(id) { return api.request(`/api/admin/moderator/${id}/remove`, { method: 'POST' }); },
+    roles() { return api.request('/api/admin/roles'); },
+    createRole(data) { return api.request('/api/admin/roles', { method: 'POST', body: JSON.stringify(data) }); },
+    updateRole(id, data) { return api.request(`/api/admin/roles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); },
+    deleteRole(id) { return api.request(`/api/admin/roles/${id}`, { method: 'DELETE' }); },
+    addRoleMember(id, sid) { return api.request(`/api/admin/roles/${id}/members/${sid}`, { method: 'POST' }); },
+    removeRoleMember(id, sid) { return api.request(`/api/admin/roles/${id}/members/${sid}`, { method: 'DELETE' }); }
   },
   publicEditors(pid) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors`); },
   addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'POST' }); },
@@ -230,25 +240,27 @@ async function renderTopbar(active = '') {
   renderSidebar(active, me);
   renderMainToolbar(me);
   ensureMobileNav();
-  ensureSupportButton(me);
+  // (FAB removed: support is now in sidebar/me menu)
+  document.getElementById('support-fab')?.remove();
   // First-login consent gate (152-ФЗ explicit consent)
   if (me.logged_in && me.consented === false) showConsentGate();
+  // Background polling for unread messages (stops on next page change naturally)
+  ensureUnreadPolling();
   return me;
 }
 
-// Floating "Support" button (bottom-right) for logged-in users.
-function ensureSupportButton(me) {
-  const existing = document.getElementById('support-fab');
-  if (!me || !me.logged_in) { if (existing) existing.remove(); return; }
-  if (existing) return;
-  const fab = el('button', {
-    id: 'support-fab', class: 'support-fab', type: 'button', title: 'Связь с поддержкой',
-    onclick: openSupportModal,
-    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="14.83" y1="9.17" x2="18.36" y2="5.64"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/></svg>'
+let _unreadTimer = null;
+function ensureUnreadPolling() {
+  if (_unreadTimer) return;
+  _unreadTimer = setInterval(() => { refreshUnreadBadge(); }, 15000);
+  // Pause polling when tab is hidden, resume when visible (battery + bandwidth saving)
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (_unreadTimer) { clearInterval(_unreadTimer); _unreadTimer = null; } }
+    else if (!_unreadTimer) { refreshUnreadBadge(); _unreadTimer = setInterval(() => { refreshUnreadBadge(); }, 15000); }
   });
-  document.body.appendChild(fab);
 }
 
+// Floating "Support" button (bottom-right) for logged-in users.
 // Anti-scam explainer before redirecting to Steam OpenID.
 function steamLogin(ev) {
   if (ev) ev.preventDefault();
@@ -426,7 +438,8 @@ function ensureMobileNav() {
   }
   bar.innerHTML = '';
   for (const item of buildItems(meCached)) {
-    const isActive = active === item.key || (item.key === 'me' && active === 'settings');
+    const isActive = active === item.key ||
+      (item.key === 'me' && ['settings', 'friends', 'communities'].includes(active));
     const link = el('a', { class: 'bn-item' + (isActive ? ' active' : ''), href: item.href },
       el('span', { class: 'bn-icon', html: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${navIconPath(item.icon)}</svg>` }),
       el('span', { class: 'bn-label' }, item.label)
@@ -490,11 +503,44 @@ async function refreshUnreadBadge() {
   try {
     const r = await api.conversations();
     const n = r?.unread_total || 0;
+    // Play notification sound if unread count increased (but skip first run)
+    if (typeof _lastUnread === 'number' && n > _lastUnread) {
+      playNotifySound();
+    }
+    _lastUnread = n;
     for (const id of ['nav-unread-badge', 'bn-unread']) {
       const badge = document.getElementById(id);
       if (!badge) continue;
       if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = ''; }
       else { badge.style.display = 'none'; }
+    }
+  } catch (_) { /* ignore */ }
+}
+let _lastUnread = null;
+
+// Generated notification "tink" using Web Audio API — no audio file needed.
+// Note: browsers block autoplay until first user interaction; first ping may be silent.
+let _audioCtx = null;
+function playNotifySound() {
+  try {
+    if (!_audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      _audioCtx = new AC();
+    }
+    const ctx = _audioCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const now = ctx.currentTime;
+    // Two short sine tones, descending — pleasant "tink" not annoying
+    for (const [t, freq] of [[0, 880], [0.08, 660]]) {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = freq;
+      g.gain.setValueAtTime(0, now + t);
+      g.gain.linearRampToValueAtTime(0.18, now + t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + t + 0.18);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(now + t); o.stop(now + t + 0.2);
     }
   } catch (_) { /* ignore */ }
 }
@@ -519,7 +565,8 @@ function renderSidebar(active, me) {
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
     { href: '/friends',   label: 'Друзья',     key: 'friends',   icon: 'users' },
     { href: '/communities', label: 'Сообщества', key: 'communities', icon: 'grid' },
-    { href: '/inventory', label: 'Инвентарь', key: 'inventory', icon: 'inventory' }
+    { href: '/inventory', label: 'Инвентарь', key: 'inventory', icon: 'inventory' },
+    { action: 'support',  label: 'Поддержка',  key: 'support',   icon: 'help' }
   ];
   const authedBottom = [
     { href: '/settings',  label: 'Настройки', key: 'settings',  icon: 'settings' }
@@ -539,12 +586,12 @@ function renderSidebar(active, me) {
   const nav = el('nav', { class: 'nav' });
   const topItems = me.logged_in ? authedTop : baseItems;
   for (const item of topItems) {
-    const link = el('a', {
-      class: `nav-link${active === item.key ? ' active' : ''}`,
-      href: item.href
-    }, navIcon(item.icon), el('span', { class: 'nav-label' }, item.label));
+    const isAction = item.action === 'support';
+    const link = el(isAction ? 'button' : 'a', isAction
+        ? { type: 'button', class: `nav-link${active === item.key ? ' active' : ''}`, onclick: openSupportModal }
+        : { class: `nav-link${active === item.key ? ' active' : ''}`, href: item.href },
+      navIcon(item.icon), el('span', { class: 'nav-label' }, item.label));
     if (item.badge === 'unread') {
-      // placeholder badge, filled async by refreshUnreadBadge()
       link.appendChild(el('span', { class: 'nav-badge', id: 'nav-unread-badge', style: { display: 'none' } }, '0'));
     }
     nav.appendChild(link);
@@ -3289,15 +3336,39 @@ async function paintLookupSocial(steamid, profR) {
   if (!root) return;
   root.innerHTML = '';
   const name = profR?.profile?.personaname || 'игрок';
+  const me = window.__me;
+  const card = el('div', { class: 'card lk-social-card' });
+  const actions = el('div', { class: 'lk-social-actions' });
+  const rerender = () => paintLookupSocial(steamid, profR);
+
+  // Anonymous: show login + share only, skip friend/block actions
+  if (!me?.logged_in) {
+    actions.appendChild(el('a', { class: 'btn lk-social-primary', href: '/auth/steam',
+      onclick: typeof steamLogin === 'function' ? steamLogin : null
+    }, 'Войти и добавить в друзья'));
+    actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
+      onclick: () => openShareProfileModal(steamid, name, profR?.profile),
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>Поделиться'
+    }));
+    card.appendChild(actions);
+    root.appendChild(card);
+    return;
+  }
+
+  // Can't friend yourself
+  if (me.steamid === steamid) {
+    actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
+      onclick: () => openShareProfileModal(steamid, name, profR?.profile),
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>Поделиться своим профилем'
+    }));
+    card.appendChild(actions);
+    root.appendChild(card);
+    return;
+  }
 
   // Fetch current relationship status
   let status = 'none';
   try { const r = await api.friendStatus(steamid); status = r?.status || 'none'; } catch (_) {}
-
-  const card = el('div', { class: 'card lk-social-card' });
-  const actions = el('div', { class: 'lk-social-actions' });
-
-  const rerender = () => paintLookupSocial(steamid, profR);
 
   if (status === 'friends') {
     actions.appendChild(el('a', { class: 'btn lk-social-primary', href: `/messages?to=${steamid}` }, 'Написать'));
@@ -3335,8 +3406,83 @@ async function paintLookupSocial(steamid, profR) {
       } }, 'Заблокировать'));
   }
 
+  // Share — visible to everyone, even anonymous. Drives virality.
+  actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
+    onclick: () => openShareProfileModal(steamid, name, profR?.profile),
+    html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>Поделиться'
+  }));
+
   card.appendChild(actions);
   root.appendChild(card);
+}
+
+// Share profile link: copy + send to friend in DM
+function openShareProfileModal(steamid, name, profile) {
+  const link = `${location.origin}/lookup?steamid=${steamid}`;
+  const me = window.__me;
+  const listBox = el('div', { class: 'share-list' });
+
+  const content = [
+    el('div', { class: 'modal-hint' },
+      'Поделитесь карточкой игрока. При отправке в Telegram, VK или Discord — появляется превью с аватаром и статистикой.'),
+    el('div', { class: 'share-link-row' },
+      el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
+      el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        catch (_) { toast.warn('Скопируйте вручную'); }
+      } }, 'Копировать')
+    )
+  ];
+
+  // Native share API on mobile
+  if (navigator.share) {
+    content.push(el('button', { class: 'btn btn-full', type: 'button', style: { marginTop: '8px' },
+      onclick: async () => {
+        try { await navigator.share({ title: `Профиль ${name} на SOKOLENOK`, url: link }); }
+        catch (_) { /* user cancelled */ }
+      }
+    }, 'Открыть «Поделиться…»'));
+  }
+
+  if (me?.logged_in) {
+    content.push(el('label', { class: 'modal-label', style: { marginTop: '8px' } }, 'Или отправить другу на сайте'));
+    content.push(listBox);
+  }
+
+  openModal(`Поделиться · ${name}`, content, async () => true, 'Закрыть');
+
+  if (me?.logged_in) {
+    listBox.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Друзья…</div>';
+    api.friends().then(r => {
+      const friends = r?.friends || [];
+      listBox.innerHTML = '';
+      if (!friends.length) {
+        listBox.appendChild(el('div', { class: 'share-empty' }, 'Друзей на сайте пока нет.'));
+        return;
+      }
+      for (const f of friends) {
+        const row = el('button', { class: 'share-row', type: 'button' });
+        const ava = el('div', { class: 'share-ava' });
+        if (f.avatar) {
+          const img = el('img', { src: f.avatar, alt: '' });
+          img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0,1).toUpperCase(); };
+          ava.appendChild(img);
+        } else ava.textContent = (f.name || '?').slice(0,1).toUpperCase();
+        row.appendChild(ava);
+        row.appendChild(el('div', { class: 'share-name' }, f.name));
+        const sendBtn = el('span', { class: 'share-send-tag' }, 'Отправить');
+        row.appendChild(sendBtn);
+        row.addEventListener('click', async () => {
+          row.disabled = true; sendBtn.textContent = '…';
+          const text = `Посмотри профиль игрока: ${link}`;
+          const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
+          if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+          else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
+        });
+        listBox.appendChild(row);
+      }
+    }).catch(() => { listBox.innerHTML = ''; });
+  }
 }
 
 // Block of in-site friends shown on every profile page.
@@ -3717,6 +3863,11 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
     nameRow.appendChild(el('span', { class: 'verified', title: 'Публичный профиль', html:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' }));
   }
+  // Role badge (from presence)
+  if (profR?.presence?.role) {
+    const rb = roleBadge(profR.presence.role);
+    if (rb) nameRow.appendChild(rb);
+  }
   info.appendChild(nameRow);
   info.appendChild(el('div', { class: 'pc-sub' },
     `Steam ID: ${p.steamid || '—'}`,
@@ -3724,6 +3875,16 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
       onclick: () => { try { navigator.clipboard.writeText(p.steamid || ''); toast.ok('SteamID скопирован'); } catch (_) {} }
     }, el('span', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' }))
   ));
+  // Presence row: in-site activity + Steam in-game (respects target's privacy)
+  const presence = profR?.presence;
+  const presLbl = presenceLabel(presence);
+  if (presLbl) {
+    const state = presenceState(presence);
+    info.appendChild(el('div', { class: 'pc-presence pc-presence-' + state },
+      el('span', { class: 'presence-dot presence-' + state }),
+      presLbl
+    ));
+  }
   top.appendChild(info);
   card.appendChild(top);
 
@@ -4107,7 +4268,7 @@ async function renderPublicPage(publicId, me) {
       card.appendChild(img);
     }
     if (post.link) card.appendChild(el('a', { class: 'feed-item-link', href: post.link, target: '_blank', rel: 'noopener' }, 'Перейти по ссылке →'));
-    const pf = buildPostFooter({ post_id: post.id, likes: post.likes, views: post.views, liked: post.liked }, me);
+    const pf = buildPostFooter({ post_id: post.id, public_id: post.public_id, likes: post.likes, views: post.views, comments: post.comments, liked: post.liked }, me);
     if (pf) card.appendChild(pf);
     markPostViewed(post.id);
     list.appendChild(card);
@@ -4135,33 +4296,204 @@ function buildPostBody(text, clean) {
   return wrap;
 }
 
-// Post footer: like button + view counter. Used in feed and on public pages.
+// Post footer: like, comments, share + counters.
 function buildPostFooter(item, me) {
   if (!item || item.post_id == null) return null;
   const likes = item.likes || 0;
   const views = item.views || 0;
+  const commentsCount = item.comments || 0;
   const liked = !!item.liked;
+
+  // Like button
   const heart = el('button', {
     class: 'post-act' + (liked ? ' liked' : ''), type: 'button',
     'aria-label': liked ? 'Убрать лайк' : 'Лайкнуть',
     html: `<svg viewBox="0 0 24 24" width="17" height="17" fill="${liked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg><span class="post-act-n">${likes}</span>`
   });
+  // Like button — state in variable, optimistic update for instant feedback
+  let isLiked = !!liked;
+  let likeCount = likes;
+  const renderHeart = () => {
+    heart.classList.toggle('liked', isLiked);
+    heart.querySelector('.post-act-n').textContent = likeCount;
+    const svg = heart.querySelector('svg');
+    if (svg) svg.setAttribute('fill', isLiked ? 'currentColor' : 'none');
+  };
   heart.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (!me?.logged_in) { toast.warn('Войдите, чтобы лайкать'); return; }
+    // Optimistic flip — instant UI response
+    const wasLiked = isLiked;
+    isLiked = !isLiked;
+    likeCount += isLiked ? 1 : -1;
+    renderHeart();
     heart.disabled = true;
-    const r = (heart.classList.contains('liked') ? await api.unlikePost(item.post_id) : await api.likePost(item.post_id)).catch(() => ({ ok: false }));
+    const r = await (wasLiked ? api.unlikePost(item.post_id) : api.likePost(item.post_id)).catch(() => ({ ok: false }));
     if (r.ok) {
-      heart.classList.toggle('liked');
-      heart.querySelector('.post-act-n').textContent = r.likes;
-      heart.querySelector('svg').setAttribute('fill', heart.classList.contains('liked') ? 'currentColor' : 'none');
+      // Reconcile with server count
+      if (typeof r.likes === 'number') { likeCount = r.likes; renderHeart(); }
+    } else {
+      // Revert on failure
+      isLiked = wasLiked; likeCount += wasLiked ? 1 : -1; renderHeart();
+      toast.err('Не удалось');
     }
     heart.disabled = false;
   });
+
+  // Comment toggle
+  const commentBtn = el('button', {
+    class: 'post-act', type: 'button', 'aria-label': 'Комментарии',
+    html: `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg><span class="post-act-n">${commentsCount}</span>`
+  });
+
+  // Share
+  const shareBtn = el('button', {
+    class: 'post-act', type: 'button', 'aria-label': 'Поделиться',
+    html: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>'
+  });
+  shareBtn.addEventListener('click', (e) => { e.stopPropagation(); openShareModal(item, me); });
+
+  // Views
   const eye = el('span', { class: 'post-act post-views', title: 'Уникальные просмотры',
     html: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="post-act-n">${views}</span>`
   });
-  return el('div', { class: 'post-footer' }, heart, eye);
+
+  const footer = el('div', { class: 'post-footer' }, heart, commentBtn, shareBtn, eye);
+
+  // Comment panel (hidden initially)
+  const panel = el('div', { class: 'comments-panel', style: { display: 'none' } });
+  commentBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (panel.style.display === 'none') {
+      panel.style.display = '';
+      await loadCommentsInto(panel, item.post_id, me, () => {
+        // Update count badge on add/delete
+        const n = panel.querySelectorAll('.comment-row').length;
+        commentBtn.querySelector('.post-act-n').textContent = n;
+      });
+    } else {
+      panel.style.display = 'none';
+    }
+  });
+
+  const wrap = el('div');
+  wrap.appendChild(footer);
+  wrap.appendChild(panel);
+  return wrap;
+}
+
+async function loadCommentsInto(panel, postId, me, onChange) {
+  panel.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Загрузка…</div>';
+  const r = await api.listComments(postId).catch(() => ({ ok: false, comments: [] }));
+  const list = el('div', { class: 'comments-list' });
+  const renderOne = (c) => {
+    const ava = el('div', { class: 'comment-ava' });
+    if (c.author_avatar) {
+      const img = el('img', { src: c.author_avatar, alt: '' });
+      img.onerror = function() { this.remove(); ava.textContent = (c.author_name || '?').slice(0,1).toUpperCase(); };
+      ava.appendChild(img);
+    } else ava.textContent = (c.author_name || '?').slice(0,1).toUpperCase();
+    const canDelete = me?.logged_in && (c.author_steam_id === me.steamid || me.is_admin);
+    return el('div', { class: 'comment-row', 'data-cid': String(c.id) },
+      ava,
+      el('div', { class: 'comment-body' },
+        el('div', { class: 'comment-head' },
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          roleBadge(c.author_role),
+          el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
+        ),
+        el('div', { class: 'comment-text' }, c.body),
+        canDelete ? el('button', { class: 'comment-del', type: 'button',
+          onclick: async () => { if (!confirm('Удалить комментарий?')) return;
+            const res = await api.deleteComment(postId, c.id);
+            if (res.ok) { const row = list.querySelector(`[data-cid="${c.id}"]`); if (row) row.remove(); onChange && onChange(); }
+          }, html: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>' }) : null
+      )
+    );
+  };
+  for (const c of (r.comments || [])) list.appendChild(renderOne(c));
+  if (!r.comments?.length) list.appendChild(el('div', { class: 'comments-empty' }, 'Пока нет комментариев. Будьте первым!'));
+
+  panel.innerHTML = '';
+  panel.appendChild(list);
+
+  if (me?.logged_in) {
+    const input = el('textarea', { class: 'comment-input', rows: '1', placeholder: 'Написать комментарий…', maxlength: '1000' });
+    input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(120, input.scrollHeight) + 'px'; });
+    const sendBtn = el('button', { class: 'btn btn-sm comment-send', type: 'button',
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' });
+    const send = async () => {
+      const text = input.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      const res = await api.addComment(postId, text).catch(() => ({ ok: false }));
+      sendBtn.disabled = false;
+      if (res.ok && res.comment) {
+        input.value = ''; input.style.height = 'auto';
+        // Remove empty placeholder if present
+        const emptyEl = list.querySelector('.comments-empty'); if (emptyEl) emptyEl.remove();
+        list.appendChild(renderOne(res.comment));
+        onChange && onChange();
+      } else {
+        toast.err(res.error === 'banned' ? 'Вы заблокированы' : 'Не отправлено');
+      }
+    };
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+    panel.appendChild(el('div', { class: 'comment-form' }, input, sendBtn));
+  } else {
+    panel.appendChild(el('div', { class: 'comments-empty' }, 'Войдите, чтобы оставить комментарий.'));
+  }
+}
+
+// Share to a friend in DM (post link)
+async function openShareModal(item, me) {
+  if (!me?.logged_in) { toast.warn('Войдите, чтобы поделиться'); return; }
+  const link = `${location.origin}/feed?public=${encodeURIComponent(item.public_id)}#post-${item.post_id}`;
+  const listBox = el('div', { class: 'share-list' });
+  listBox.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Друзья…</div>';
+
+  openModal('Поделиться постом', [
+    el('div', { class: 'modal-hint' }, 'Отправьте пост другу в личные сообщения.'),
+    listBox,
+    el('label', { class: 'modal-label' }, 'Или скопируйте ссылку'),
+    el('div', { class: 'share-link-row' },
+      el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
+      el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        catch (_) { toast.warn('Скопируйте вручную'); }
+      } }, 'Копировать')
+    )
+  ], async () => true, 'Закрыть');
+
+  const r = await api.friends().catch(() => ({ ok: false, friends: [] }));
+  listBox.innerHTML = '';
+  const friends = r.friends || [];
+  if (!friends.length) {
+    listBox.appendChild(el('div', { class: 'share-empty' }, 'У вас пока нет друзей на сайте. Добавьте кого-нибудь, чтобы делиться.'));
+    return;
+  }
+  for (const f of friends) {
+    const row = el('button', { class: 'share-row', type: 'button' });
+    const ava = el('div', { class: 'share-ava' });
+    if (f.avatar) {
+      const img = el('img', { src: f.avatar, alt: '' });
+      img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0,1).toUpperCase(); };
+      ava.appendChild(img);
+    } else ava.textContent = (f.name || '?').slice(0,1).toUpperCase();
+    row.appendChild(ava);
+    row.appendChild(el('div', { class: 'share-name' }, f.name));
+    const sendBtn = el('span', { class: 'share-send-tag' }, 'Отправить');
+    row.appendChild(sendBtn);
+    row.addEventListener('click', async () => {
+      row.disabled = true; sendBtn.textContent = '…';
+      const text = `Поделился постом: ${link}`;
+      const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
+      if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+      else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
+    });
+    listBox.appendChild(row);
+  }
 }
 
 // Mark a post as viewed (best-effort; backend dedupes per user)
@@ -4172,6 +4504,42 @@ function markPostViewed(postId) {
   api.viewPost(postId).catch(() => {});
 }
 
+// Empty state card for the feed — with action buttons depending on scope.
+function buildFeedEmpty(scope) {
+  const card = el('div', { class: 'card feed-empty' });
+  let icon = '📰', title = 'Лента пуста', desc = '', cta = null;
+
+  if (scope === 'subs') {
+    icon = '👥';
+    title = 'Вы пока ни на кого не подписаны';
+    desc = 'Подпишитесь на сообщества, чтобы видеть их посты в этой вкладке. Или загляните во вкладку «Все» — там новости CS2 и посты сообществ.';
+    cta = el('div', { class: 'feed-empty-actions' },
+      el('button', { class: 'btn', type: 'button', onclick: () => {
+        const allTab = document.querySelector('.feed-tab[data-scope="all"]');
+        if (allTab) allTab.click();
+      } }, 'Открыть «Все»'),
+      el('a', { class: 'btn btn-ghost', href: '/communities' }, 'К сообществам')
+    );
+  } else if (scope === 'official') {
+    icon = '🎮';
+    title = 'Официальных новостей пока нет';
+    desc = 'Когда Valve опубликует новости CS2, они появятся здесь.';
+  } else {
+    icon = '📰';
+    title = 'Лента пуста';
+    desc = 'Пока что нет ни новостей, ни постов от сообществ. Загляните позже или создайте своё сообщество.';
+    cta = el('div', { class: 'feed-empty-actions' },
+      el('a', { class: 'btn', href: '/communities' }, 'Создать сообщество')
+    );
+  }
+
+  card.appendChild(el('div', { class: 'feed-empty-icon' }, icon));
+  card.appendChild(el('div', { class: 'feed-empty-title' }, title));
+  card.appendChild(el('div', { class: 'feed-empty-desc' }, desc));
+  if (cta) card.appendChild(cta);
+  return card;
+}
+
 function paintFeedList(r) {
   const root = $('#feed-list');
   if (!root) return;
@@ -4179,11 +4547,7 @@ function paintFeedList(r) {
 
   const items = r?.items || [];
   if (!items.length) {
-    root.appendChild(emptyCard('Лента пуста',
-      r?.scope === 'subs'
-        ? 'Вы пока ни на кого не подписаны. Подпишитесь на паблики справа, чтобы видеть их посты.'
-        : 'Пока нет записей. Официальные новости появятся здесь.',
-      '📰'));
+    root.appendChild(buildFeedEmpty(r?.scope || 'all'));
     return;
   }
 
@@ -4474,7 +4838,44 @@ function stripFeedHtml(s) {
     .trim();
 }
 
+// Render a small role badge next to a user's name. Returns null if no role.
+function roleBadge(role) {
+  if (!role || !role.name) return null;
+  const color = String(role.color || 'green').replace(/[^a-z]/gi, '').toLowerCase();
+  return el('span', { class: 'role-badge role-color-' + color, title: role.name }, role.name);
+}
+
 // Relative date in Russian
+// Build a short Russian presence label, e.g.:
+//   { online: true, in_game: {name:'Counter-Strike 2'} } → "в сети · играет в Counter-Strike 2"
+//   { online: false, last_seen: ISO } → "был 5 мин назад"
+//   { hidden: true } → "" (no label)
+function presenceLabel(presence) {
+  if (!presence || presence.hidden) return '';
+  const parts = [];
+  if (presence.online) parts.push('в сети');
+  else if (presence.last_seen) parts.push('был ' + relDate(presence.last_seen));
+  if (presence.in_game && presence.in_game.name) {
+    parts.push('играет в ' + presence.in_game.name);
+  }
+  return parts.join(' · ');
+}
+
+// Returns 'online' | 'in-game' | 'offline' for color coding the dot
+function presenceState(presence) {
+  if (!presence || presence.hidden) return 'offline';
+  if (presence.in_game) return 'in-game';
+  if (presence.online) return 'online';
+  return 'offline';
+}
+
+// Build a small status dot — used overlayed on avatars in lists
+function presenceDot(presence) {
+  const state = presenceState(presence);
+  if (state === 'offline') return null;
+  return el('span', { class: 'presence-dot presence-' + state, title: presenceLabel(presence) });
+}
+
 function relDate(iso) {
   const d = Date.parse(iso);
   if (!d) return '';
@@ -4535,11 +4936,13 @@ async function pageMessages() {
       return;
     }
     for (const c of convos) {
+      const ava = avatarEl(c.avatar, c.name, 'msgr-avatar');
+      ava.dataset.sid = c.steam_id;
       list.appendChild(el('div', {
         class: 'msgr-convo' + (state.activeOther === c.steam_id ? ' active' : ''),
         onclick: () => openThread(c.steam_id)
       },
-        avatarEl(c.avatar, c.name, 'msgr-avatar'),
+        ava,
         el('div', { class: 'msgr-convo-body' },
           el('div', { class: 'msgr-convo-top' },
             el('span', { class: 'msgr-convo-name' }, c.name),
@@ -4552,6 +4955,17 @@ async function pageMessages() {
           )
         )
       ));
+    }
+    // Batch fetch presence and decorate avatars
+    const ids = convos.map(c => c.steam_id);
+    if (ids.length) {
+      api.presence(ids).then(r => {
+        if (!r?.ok) return;
+        for (const av of list.querySelectorAll('.msgr-avatar')) {
+          const sid = av.dataset.sid;
+          if (sid && r.presence[sid]) setAvatarPresence(av, r.presence[sid]);
+        }
+      }).catch(() => {});
     }
   }
 
@@ -4600,6 +5014,7 @@ async function pageMessages() {
     state.activeOther = other;
     state.lastMsgId = 0;
     state.lastDate = null;
+    state.threadLoaded = false;
     document.body.classList.add('msgr-thread-open'); // mobile: show thread, hide list
     renderLeft(); // refresh active highlight
     const right = $('#msgr-right');
@@ -4608,6 +5023,28 @@ async function pageMessages() {
     if (!r.ok) { right.innerHTML = '<div class="msgr-empty"><div class="msgr-empty-title">Не удалось загрузить</div></div>'; return; }
     paintThread(r);
     refreshUnreadBadge(); // opening marks read
+    loadThreadPresence(other);
+  }
+
+  async function loadThreadPresence(steamId) {
+    const r = await api.presence([steamId]).catch(() => null);
+    const p = r?.ok ? r.presence[steamId] : null;
+    // Attach a role badge to the thread name (idempotent — remove old badge first)
+    const nameNode = document.querySelector('.msgr-thread-name');
+    if (nameNode) {
+      const old = nameNode.parentElement?.querySelector(':scope > .role-badge'); if (old) old.remove();
+      const rb = p?.role ? roleBadge(p.role) : null;
+      if (rb) nameNode.parentElement?.insertBefore(rb, nameNode.nextSibling);
+    }
+    const node = $('#msgr-thread-presence');
+    if (!node) return;
+    const lbl = presenceLabel(p);
+    if (!lbl) { node.textContent = ''; node.className = 'msgr-thread-presence'; return; }
+    node.innerHTML = '';
+    const st = presenceState(p);
+    node.className = 'msgr-thread-presence msgr-thread-presence-' + st;
+    node.appendChild(el('span', { class: 'presence-dot presence-' + st }));
+    node.appendChild(document.createTextNode(' ' + lbl));
   }
 
   // Append only messages we haven't drawn yet (by id), inserting date separators as needed.
@@ -4616,6 +5053,7 @@ async function pageMessages() {
     if (!scroll) return;
     const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
     let added = false;
+    let gotIncoming = false;
     for (const m of messages) {
       if (m.id != null && m.id <= state.lastMsgId) continue; // already drawn
       const d = m.created_at ? new Date(m.created_at).toDateString() : null;
@@ -4632,11 +5070,15 @@ async function pageMessages() {
         )
       ));
       if (m.id != null && m.id > state.lastMsgId) state.lastMsgId = m.id;
+      if (!m.from_me) gotIncoming = true;
       added = true;
     }
     if (added && nearBottom) {
       requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
     }
+    // Skip sound on the very first load of a thread — only ping for subsequent poll updates.
+    if (state.threadLoaded && gotIncoming) playNotifySound();
+    state.threadLoaded = true;
   }
 
   function paintThread(r) {
@@ -4653,7 +5095,8 @@ async function pageMessages() {
         html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>' }),
       avatarEl(o.avatar, o.name, 'msgr-avatar'),
       el('div', { class: 'msgr-thread-h-info' },
-        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${o.steam_id}` }, o.name)
+        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${o.steam_id}` }, o.name),
+        el('div', { class: 'msgr-thread-presence', id: 'msgr-thread-presence' }, '')
       ),
       el('div', { class: 'msgr-thread-actions' },
         el('button', { class: 'icon-btn', title: 'Заблокировать', type: 'button',
@@ -4713,21 +5156,24 @@ async function pageMessages() {
   if (toId && /^\d{17}$/.test(toId)) openThread(toId);
 
   // Light polling: fetch the open thread and append ONLY new messages (no full repaint).
-  // Poll a bit faster (6s) so incoming messages feel near-real-time.
+  // 3s in active thread feels near-real-time without flooding the server.
   state.pollTimer = setInterval(() => {
+    if (document.hidden) return; // pause when tab not visible
     if (state.activeOther) {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
-        // Only append new bubbles; don't rebuild the thread (keeps scroll + input intact)
         if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
       }).catch(() => {});
+      loadThreadPresence(state.activeOther);
     }
     refreshUnreadBadge();
-  }, 6000);
+  }, 3000);
 }
 
 function avatarEl(src, name, cls) {
-  const wrap = el('div', { class: cls || 'msgr-avatar' });
+  // Wrap in positioned container so we can overlay a presence dot
+  const outer = el('div', { class: 'avatar-wrap ' + (cls || 'msgr-avatar') });
+  const wrap = el('div', { class: 'avatar-inner' });
   if (src) {
     const img = el('img', { src, alt: '', loading: 'lazy' });
     img.onerror = function() { this.remove(); wrap.textContent = (name || '?').slice(0, 1).toUpperCase(); };
@@ -4735,7 +5181,20 @@ function avatarEl(src, name, cls) {
   } else {
     wrap.textContent = (name || '?').slice(0, 1).toUpperCase();
   }
-  return wrap;
+  outer.appendChild(wrap);
+  return outer;
+}
+// Add or update a small presence dot on an avatar produced by avatarEl
+function setAvatarPresence(avatarNode, presence) {
+  if (!avatarNode) return;
+  // Remove any old dot
+  const old = avatarNode.querySelector(':scope > .presence-dot'); if (old) old.remove();
+  const state = presenceState(presence);
+  if (state === 'offline') return;
+  avatarNode.appendChild(el('span', {
+    class: 'presence-dot presence-' + state + ' avatar-dot',
+    title: presenceLabel(presence)
+  }));
 }
 function msgTime(iso) {
   const d = new Date(iso); return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -4765,6 +5224,7 @@ async function pageAdmin() {
 
   // Moderators tab is superadmin-only
   if (me.is_superadmin) { const t = $('#tab-moderators'); if (t) t.style.display = ''; }
+  if (me.is_superadmin) { const t = $('#tab-roles'); if (t) t.style.display = ''; }
 
   // Stats
   try {
@@ -4781,6 +5241,7 @@ async function pageAdmin() {
     if (tab === 'publics') return paintAdminPublics(panel);
     if (tab === 'posts') return paintAdminPosts(panel);
     if (tab === 'moderators') return paintAdminModerators(panel);
+    if (tab === 'roles') return paintAdminRoles(panel);
     if (tab === 'tools') return paintAdminTools(panel);
   };
   for (const btn of tabs.querySelectorAll('.tab')) {
@@ -4826,6 +5287,120 @@ async function paintAdminModerators(panel) {
     } }, 'Назначить')
   ));
   panel.appendChild(card);
+}
+
+const ROLE_COLORS = [
+  { key: 'gold',   label: 'Золотой' },
+  { key: 'green',  label: 'Зелёный' },
+  { key: 'blue',   label: 'Синий' },
+  { key: 'red',    label: 'Красный' },
+  { key: 'purple', label: 'Фиолетовый' },
+  { key: 'orange', label: 'Оранжевый' },
+  { key: 'cyan',   label: 'Бирюзовый' },
+  { key: 'gray',   label: 'Серый' }
+];
+
+async function paintAdminRoles(panel) {
+  panel.innerHTML = '';
+  const top = el('div', { class: 'card' },
+    el('div', { class: 'card-eyebrow' }, 'Команда SOKOLENOK — роли'),
+    el('div', { class: 'admin-row-sub', style: { marginBottom: '12px' } },
+      'Создавайте роли с любым названием и цветом. Назначайте людей в роли — рядом с их ником будет виден бейдж.'),
+    (function () {
+      const nameI = el('input', { class: 'admin-input', placeholder: 'Название роли (например, "Администратор")', maxlength: '32' });
+      const colorSel = el('select', { class: 'admin-input' });
+      for (const c of ROLE_COLORS) colorSel.appendChild(el('option', { value: c.key }, c.label));
+      colorSel.value = 'green';
+      return el('div', { class: 'admin-manual' },
+        nameI, colorSel,
+        el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+          const name = nameI.value.trim();
+          if (name.length < 2) { toast.warn('Минимум 2 символа'); return; }
+          const r = await api.admin.createRole({ name, color: colorSel.value }).catch(() => ({ ok: false }));
+          if (r.ok) { toast.ok('Роль создана'); nameI.value = ''; paintAdminRoles(panel); }
+          else toast.err('Ошибка');
+        } }, '+ Создать роль')
+      );
+    })()
+  );
+  panel.appendChild(top);
+
+  const r = await api.admin.roles().catch(() => ({ ok: false, roles: [] }));
+  for (const role of (r.roles || [])) {
+    const card = el('div', { class: 'card role-admin-card' });
+    const headRow = el('div', { class: 'role-admin-head' },
+      roleBadge({ name: role.name, color: role.color }),
+      el('div', { class: 'role-admin-meta' }, role.members.length + ' ' + plural(role.members.length, ['участник', 'участника', 'участников'])),
+      el('div', { class: 'role-admin-actions' },
+        el('button', { class: 'btn btn-sm btn-ghost', type: 'button', onclick: () => openRoleEditModal(role, panel) }, 'Изменить'),
+        el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' }, onclick: async () => {
+          if (!confirm(`Удалить роль "${role.name}"? Все назначения этой роли будут сняты.`)) return;
+          const res = await api.admin.deleteRole(role.id).catch(() => ({ ok: false }));
+          if (res.ok) { toast.ok('Удалено'); paintAdminRoles(panel); }
+          else toast.err('Ошибка');
+        } }, 'Удалить')
+      )
+    );
+    card.appendChild(headRow);
+
+    if (role.members.length) {
+      const list = el('div', { class: 'role-members-list' });
+      for (const m of role.members) {
+        list.appendChild(el('div', { class: 'role-member' },
+          el('a', { class: 'role-member-link', href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id),
+          el('button', { class: 'btn btn-sm btn-ghost', type: 'button', onclick: async () => {
+            if (!confirm('Снять роль с этого игрока?')) return;
+            await api.admin.removeRoleMember(role.id, m.steam_id);
+            toast.ok('Снято'); paintAdminRoles(panel);
+          } }, 'Убрать')
+        ));
+      }
+      card.appendChild(list);
+    } else {
+      card.appendChild(el('div', { class: 'role-empty' }, 'Пока никого. Добавьте первого участника ниже.'));
+    }
+
+    const addInput = el('input', { class: 'admin-input', placeholder: 'SteamID, ссылка или ник Steam' });
+    card.appendChild(el('div', { class: 'admin-manual' },
+      addInput,
+      el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+        const id = await api.resolveAny(addInput.value);
+        if (!id) { toast.warn('Не нашли такого игрока'); return; }
+        const res = await api.admin.addRoleMember(role.id, id).catch(() => ({ ok: false }));
+        if (res.ok) { toast.ok('Добавлен'); paintAdminRoles(panel); }
+        else toast.err('Ошибка');
+      } }, '+ Добавить игрока')
+    ));
+    panel.appendChild(card);
+  }
+}
+
+function openRoleEditModal(role, panel) {
+  const nameI = el('input', { class: 'modal-input', value: role.name, maxlength: '32' });
+  const colorSel = el('select', { class: 'modal-input' });
+  for (const c of ROLE_COLORS) colorSel.appendChild(el('option', { value: c.key }, c.label));
+  colorSel.value = role.color || 'green';
+  openModal('Редактировать роль', [
+    el('label', { class: 'modal-label' }, 'Название'), nameI,
+    el('label', { class: 'modal-label' }, 'Цвет бейджа'), colorSel,
+    el('div', { style: { marginTop: '8px' } }, 'Предпросмотр: ', roleBadge({ name: role.name, color: role.color }))
+  ], async () => {
+    const name = nameI.value.trim();
+    if (name.length < 2) { toast.warn('Минимум 2 символа'); return false; }
+    const r = await api.admin.updateRole(role.id, { name, color: colorSel.value }).catch(() => ({ ok: false }));
+    if (r.ok) { toast.ok('Сохранено'); paintAdminRoles(panel); return true; }
+    toast.err('Ошибка'); return false;
+  }, 'Сохранить');
+}
+
+// Russian noun plural helper: pick form based on count
+function plural(n, forms) {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return forms[2];
+  if (b > 1 && b < 5) return forms[1];
+  if (b === 1) return forms[0];
+  return forms[2];
 }
 
 function paintAdminStats(s) {
@@ -5055,6 +5630,7 @@ function paintFriendsList(root, arr, tab) {
     card.appendChild(buildFriendRow(f, actions));
   }
   root.appendChild(card);
+  decorateFriendPresence(card);
 }
 
 function paintRecommendations(root, arr) {
@@ -5101,7 +5677,7 @@ function paintFriendsBlocks(root, arr) {
 }
 
 function buildFriendRow(f, actionsNode, subText) {
-  const ava = el('div', { class: 'friend-row-ava' });
+  const ava = el('div', { class: 'friend-row-ava', 'data-sid': f.steam_id });
   if (f.avatar) {
     const img = el('img', { src: f.avatar, alt: '' });
     img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0,1).toUpperCase(); };
@@ -5115,6 +5691,25 @@ function buildFriendRow(f, actionsNode, subText) {
     ),
     actionsNode
   );
+}
+
+// Batch-load presence for all friend rows in a container
+async function decorateFriendPresence(root) {
+  const avas = Array.from(root.querySelectorAll('.friend-row-ava[data-sid]'));
+  const ids = avas.map(a => a.dataset.sid).filter(Boolean);
+  if (!ids.length) return;
+  const r = await api.presence(ids).catch(() => null);
+  if (!r?.ok) return;
+  for (const av of avas) {
+    const sid = av.dataset.sid;
+    if (!sid || !r.presence[sid]) continue;
+    const state = presenceState(r.presence[sid]);
+    if (state === 'offline') continue;
+    // Friend-row-ava already has position relative? if not, set it
+    av.style.position = av.style.position || 'relative';
+    av.appendChild(el('span', { class: 'presence-dot presence-' + state + ' avatar-dot',
+      title: presenceLabel(r.presence[sid]) }));
+  }
 }
 
 // ============ page: communities ============
@@ -5385,6 +5980,18 @@ async function pageSettings() {
       'По умолчанию ищем Faceit-профиль по SteamID. Если ваш Faceit привязан к другому Steam, укажите ник вручную.')
   ));
 
+  // Privacy: show activity (online + last seen) to other users
+  prefs.appendChild(el('div', { class: 'field' },
+    el('label', { class: 'field-label' }, 'Приватность'),
+    el('label', { class: 'check-row', style: { display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' } },
+      el('input', { type: 'checkbox', id: 'set-show-activity' }),
+      el('span', null,
+        el('div', { style: { fontWeight: 600 } }, 'Показывать мою активность'),
+        el('div', { style: { fontSize: '11.5px', color: 'var(--mute)', marginTop: '2px' } },
+          'Другие видят, в сети ли вы и когда были последний раз. Информация о текущей игре в Steam остаётся публичной независимо от этой настройки (это Steam-данные).'))
+    )
+  ));
+
   prefs.appendChild(el('div', { class: 'flex gap-1 mt-2' },
     el('button', { class: 'btn btn-primary', id: 'set-save', type: 'button' }, 'Сохранить'),
     el('button', { class: 'btn btn-ghost', id: 'set-revert', type: 'button',
@@ -5425,6 +6032,7 @@ async function pageSettings() {
     $('#set-language').value = s.language || 'ru';
     $('#set-telegram').value = s.telegram_id || '';
     $('#set-faceit').value = s.faceit_nickname || '';
+    $('#set-show-activity').checked = s.show_activity == null ? true : !!s.show_activity;
   };
   applyValues();
 
@@ -5439,7 +6047,8 @@ async function pageSettings() {
         currency: $('#set-currency').value,
         language: $('#set-language').value,
         telegram_id: $('#set-telegram').value.trim() || null,
-        faceit_nickname: $('#set-faceit').value.trim() || null
+        faceit_nickname: $('#set-faceit').value.trim() || null,
+        show_activity: $('#set-show-activity').checked
       });
       if (r.ok) {
         Object.assign(s, r.settings);

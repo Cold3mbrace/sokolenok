@@ -210,6 +210,51 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Returns combined activity status: { online, last_seen, in_game }
+// Respects target user's privacy: if show_activity is off, last_seen + online are hidden.
+// Steam in_game is always public (it's Steam-side, we just relay).
+function buildPresence(steamId, steamProfile) {
+  const settings = steamId ? db.getSettings(steamId) : null;
+  const showActivity = !settings || settings.show_activity !== 0;
+  const lastSeen = showActivity ? db.getLastSeen(steamId) : null;
+  let online = false;
+  if (lastSeen) {
+    const diffMs = Date.now() - Date.parse(lastSeen);
+    online = diffMs >= 0 && diffMs < 2 * 60 * 1000; // <2min ago = online
+  }
+  let inGame = null;
+  if (steamProfile?.gameid) {
+    inGame = { id: String(steamProfile.gameid),
+      name: steamProfile.gameextrainfo || (steamProfile.gameid === '730' ? 'Counter-Strike 2' : 'игра') };
+  }
+  return { online, last_seen: lastSeen, in_game: inGame, hidden: !showActivity, role: db.getUserRole(steamId) };
+}
+
+function renderOgTags({ title, desc, image, url }) {
+  const t = escapeHtml(title || 'SOKOLENOK');
+  const d = escapeHtml(desc || '');
+  const i = escapeHtml(image || '');
+  const u = escapeHtml(url || '');
+  return [
+    `<meta property="og:title" content="${t}">`,
+    `<meta property="og:description" content="${d}">`,
+    i ? `<meta property="og:image" content="${i}">` : '',
+    `<meta property="og:url" content="${u}">`,
+    `<meta property="og:type" content="profile">`,
+    `<meta property="og:site_name" content="SOKOLENOK">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+    `<meta name="twitter:title" content="${t}">`,
+    `<meta name="twitter:description" content="${d}">`,
+    i ? `<meta name="twitter:image" content="${i}">` : '',
+  ].filter(Boolean).join('\n  ');
+}
+
 function readBody(req, maxBytes = 256 * 1024) {
   return new Promise((resolve, reject) => {
     let len = 0; const chunks = [];
@@ -1186,12 +1231,24 @@ async function fetchPlayerBans(steamid) {
 }
 
 // ---------- request handler ----------
+const _lastSeenCache = new Map(); // steam_id -> ms timestamp of last DB write
+const LAST_SEEN_THROTTLE_MS = 60 * 1000;
+
 function getRequestSteamId(req) {
   const cookies = parseCookies(req);
   const token = cookies[SESSION_COOKIE];
   if (!token) return null;
   const s = db.getSession(token);
-  return s?.steam_id || null;
+  const sid = s?.steam_id || null;
+  if (sid) {
+    const now = Date.now();
+    const last = _lastSeenCache.get(sid) || 0;
+    if (now - last > LAST_SEEN_THROTTLE_MS) {
+      _lastSeenCache.set(sid, now);
+      try { db.touchLastSeen(sid); } catch (_) {}
+    }
+  }
+  return sid;
 }
 
 async function handleSteamOpenId(req, res, parsedUrl) {
@@ -1358,6 +1415,66 @@ async function handleApi(req, res, pathname, query) {
       return sendJson(res, 400, { ok: false, error: 'bad-action' });
     }
 
+    // ----- ROLES (SUPERADMIN ONLY) -----
+    // GET    /api/admin/roles                      → list roles with members
+    // POST   /api/admin/roles                      → create role  {name, color, sort_order}
+    // PATCH  /api/admin/roles/:id                  → update role  {name?, color?, sort_order?}
+    // DELETE /api/admin/roles/:id                  → delete role + memberships
+    // POST   /api/admin/roles/:id/members/:sid     → add member
+    // DELETE /api/admin/roles/:id/members/:sid     → remove member
+    if (sub === 'roles' && req.method === 'GET') {
+      if (!isSuperAdmin(me)) return sendJson(res, 403, { ok: false, error: 'superadmin-only' });
+      const roles = db.listRoles();
+      const enriched = [];
+      for (const r of roles) {
+        const members = db.listRoleMembers(r.id);
+        const memberDetails = [];
+        for (const m of members) {
+          let p = null; try { p = await fetchProfile(m.steam_id); } catch (_) {}
+          memberDetails.push({ steam_id: m.steam_id, name: p?.personaname || m.steam_id, avatar: p?.avatar || null, created_at: m.created_at });
+        }
+        enriched.push({ ...r, members: memberDetails });
+      }
+      return sendJson(res, 200, { ok: true, roles: enriched });
+    }
+    if (sub === 'roles' && req.method === 'POST') {
+      if (!isSuperAdmin(me)) return sendJson(res, 403, { ok: false, error: 'superadmin-only' });
+      const body = await readJsonBody(req);
+      const name = String(body.name || '').trim();
+      if (!name) return sendJson(res, 400, { ok: false, error: 'name-required' });
+      const role = db.createRole({ name, color: body.color, sort_order: body.sort_order });
+      db.logEvent('role-create', me, { id: role.id, name: role.name });
+      return sendJson(res, 200, { ok: true, role });
+    }
+    if (sub.startsWith('roles/')) {
+      if (!isSuperAdmin(me)) return sendJson(res, 403, { ok: false, error: 'superadmin-only' });
+      const parts = sub.slice('roles/'.length).split('/');
+      const roleId = parseInt(parts[0], 10);
+      if (!Number.isFinite(roleId)) return sendJson(res, 400, { ok: false, error: 'bad-id' });
+      // /roles/:id  PATCH/DELETE
+      if (parts.length === 1) {
+        if (req.method === 'PATCH' || req.method === 'PUT') {
+          const body = await readJsonBody(req);
+          const r = db.updateRole(roleId, body);
+          if (r.error) return sendJson(res, 404, { ok: false, error: r.error });
+          return sendJson(res, 200, { ok: true });
+        }
+        if (req.method === 'DELETE') {
+          db.deleteRole(roleId);
+          db.logEvent('role-delete', me, { id: roleId });
+          return sendJson(res, 200, { ok: true });
+        }
+      }
+      // /roles/:id/members/:sid  POST/DELETE
+      if (parts[1] === 'members' && parts[2]) {
+        const sid = parts[2];
+        if (!/^\d{17}$/.test(sid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+        if (req.method === 'POST') { db.addRoleMember(roleId, sid, me); db.logEvent('role-add-member', me, { role: roleId, sid }); return sendJson(res, 200, { ok: true }); }
+        if (req.method === 'DELETE') { db.removeRoleMember(roleId, sid); return sendJson(res, 200, { ok: true }); }
+      }
+      return sendJson(res, 400, { ok: false, error: 'bad-action' });
+    }
+
     if (sub === 'stats' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, stats: db.adminStats() });
     }
@@ -1443,12 +1560,47 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, steamid, target });
   }
 
+  // Batch presence lookup — list of steam_ids → presence objects.
+  // POST /api/presence  { ids: ["7656...", ...] }
+  if (pathname === '/api/presence' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const ids = Array.isArray(body.ids) ? body.ids.filter(x => /^\d{17}$/.test(x)).slice(0, 100) : [];
+    const out = {};
+    const now = Date.now();
+    const FRESH_MS = 3 * 60 * 1000; // 3 min: how stale profile is allowed
+    const refreshable = []; // IDs to refresh from Steam (active users with stale profile)
+    for (const id of ids) {
+      let p = null;
+      let updatedAtMs = 0;
+      try {
+        const u = db.getUser(id);
+        if (u?.profile_json) { try { p = JSON.parse(u.profile_json); } catch (_) {} }
+        updatedAtMs = u?.updated_at ? Date.parse(u.updated_at) : 0;
+      } catch (_) {}
+      // Active = seen on the site in the last 2 min
+      const lastSeen = db.getLastSeen(id);
+      const isActive = lastSeen && (now - Date.parse(lastSeen)) < 2 * 60 * 1000;
+      if (isActive && (now - updatedAtMs) > FRESH_MS) {
+        refreshable.push(id);
+      }
+      out[id] = buildPresence(id, p);
+    }
+    // Refresh in background (don't block response); use Steam API for active users only.
+    // Cap to 10 per request so we don't get rate-limited.
+    if (refreshable.length) {
+      const batch = refreshable.slice(0, 10);
+      Promise.all(batch.map(id => fetchProfile(id).then(p => p && db.upsertUser(p)).catch(() => {})));
+    }
+    return sendJson(res, 200, { ok: true, presence: out });
+  }
+
   if (pathname.startsWith('/api/profile/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length).split('/')[0] || '').trim();
     if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
     const profile = await fetchProfile(steamid);
     db.upsertUser(profile);
-    return sendJson(res, 200, { ok: true, profile });
+    const presence = buildPresence(steamid, profile);
+    return sendJson(res, 200, { ok: true, profile, presence });
   }
 
   if (pathname.startsWith('/api/inventory/history')) {
@@ -1786,6 +1938,48 @@ async function handleApi(req, res, pathname, query) {
     if (action === 'view' && req.method === 'POST') {
       if (me) db.viewPost(postId, me);
       return sendJson(res, 200, { ok: true, views: db.countViews(postId) });
+    }
+    // Comments: GET list, POST add
+    if (action === 'comments') {
+      if (req.method === 'GET') {
+        const rows = db.listComments(postId, 200);
+        const enriched = [];
+        for (const c of rows) {
+          let p = null; try { p = await fetchProfile(c.author_steam_id); } catch (_) {}
+          enriched.push({ id: c.id, author_steam_id: c.author_steam_id, body: c.body, created_at: c.created_at,
+            author_name: p?.personaname || c.author_steam_id, author_avatar: p?.avatar || null,
+            author_role: db.getUserRole(c.author_steam_id) });
+        }
+        return sendJson(res, 200, { ok: true, comments: enriched });
+      }
+      if (req.method === 'POST') {
+        if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+        if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+        const body = await readJsonBody(req);
+        const text = String(body.body || '').trim();
+        if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
+        if (text.length > 1000) return sendJson(res, 400, { ok: false, error: 'too-long' });
+        const c = db.addComment(postId, me, text);
+        let p = null; try { p = await fetchProfile(me); } catch (_) {}
+        db.logEvent('comment', me, { post_id: post.id });
+        return sendJson(res, 200, { ok: true, comment: {
+          id: c.id, author_steam_id: me, body: c.body, created_at: c.created_at,
+          author_name: p?.personaname || me, author_avatar: p?.avatar || null,
+          author_role: db.getUserRole(me)
+        }});
+      }
+    }
+    // Delete comment: /api/posts/:id/comments/:cid
+    if (parts[1] === 'comments' && parts[2] && req.method === 'DELETE') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      const cid = parts[2];
+      const c = db.getComment(cid);
+      if (!c || c.post_id !== Number(postId)) return sendJson(res, 404, { ok: false, error: 'no-such-comment' });
+      // Author of comment, post author, or moderator can delete
+      if (c.author_steam_id !== me && post.author_steam_id !== me && !canModerate(me))
+        return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      db.deleteComment(cid);
+      return sendJson(res, 200, { ok: true });
     }
     // Delete
     if (req.method === 'DELETE' && !action) {
@@ -2151,6 +2345,9 @@ async function handleApi(req, res, pathname, query) {
         const raw = body.faceit_nickname ? String(body.faceit_nickname).trim().slice(0, 32) : '';
         allowed.faceit_nickname = raw && /^[A-Za-z0-9_.\-]+$/.test(raw) ? raw : null;
       }
+      if (body.show_activity !== undefined) {
+        allowed.show_activity = body.show_activity ? 1 : 0;
+      }
       const next = db.setSettings(steamid, allowed);
       db.logEvent('settings-update', steamid, allowed);
       return sendJson(res, 200, { ok: true, settings: next });
@@ -2181,6 +2378,54 @@ function serveStatic(req, res, pathname) {
       const ctype = MIME[ext] || 'application/octet-stream';
       res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400' });
       fs.createReadStream(file).pipe(res);
+    });
+    return;
+  }
+
+  // OG meta-tag injection for richer link previews in Telegram/Discord/VK.
+  // Replaces a <!--OG--> placeholder in the HTML with generated tags based on URL params.
+  if ((pathname === '/lookup' || pathname === '/feed') && req.headers.accept && req.headers.accept.includes('text/html')) {
+    const file = path.join(PUBLIC_DIR, pathname === '/lookup' ? 'lookup.html' : 'feed.html');
+    const query = new URL(req.url, 'http://x').searchParams;
+    fs.readFile(file, 'utf8', async (err, html) => {
+      if (err) return sendText(res, 404, 'Not found');
+      try {
+        const base = getBaseUrl(req);
+        const defaultImage = `${base}/assets/logo-full-dark.png`;
+        let og = '';
+        if (pathname === '/lookup' && /^\d{17}$/.test(query.get('steamid') || '')) {
+          const sid = query.get('steamid');
+          const p = await fetchProfile(sid).catch(() => null);
+          const name = escapeHtml(p?.personaname || 'Игрок');
+          const avatar = p?.avatarfull || p?.avatar || defaultImage;
+          const title = `${name} — профиль CS2 на SOKOLENOK`;
+          const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
+          og = renderOgTags({ title, desc, image: avatar, url: `${base}/lookup?steamid=${sid}` });
+        } else if (pathname === '/feed' && query.get('public')) {
+          const pid = query.get('public');
+          const pub = db.getPublic(pid);
+          if (pub) {
+            const name = escapeHtml(pub.name || 'Сообщество');
+            const desc = escapeHtml((pub.description || 'Сообщество CS2 на SOKOLENOK').slice(0, 160));
+            og = renderOgTags({ title: `${name} — SOKOLENOK`, desc, image: pub.avatar || defaultImage,
+              url: `${base}/feed?public=${encodeURIComponent(pid)}` });
+          }
+        } else {
+          // Default OG tags for plain /lookup and /feed
+          og = renderOgTags({
+            title: pathname === '/lookup' ? 'Найти игрока — SOKOLENOK' : 'Лента CS2 — SOKOLENOK',
+            desc: 'SOKOLENOK / LUDIK — экосистема для игроков CS2: статистика, репутация, инвентарь и сообщество.',
+            image: defaultImage,
+            url: `${base}${pathname}`
+          });
+        }
+        const out = html.replace('<!--OG-->', og);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(out);
+      } catch (_) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(html);
+      }
     });
     return;
   }
