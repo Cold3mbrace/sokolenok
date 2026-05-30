@@ -3173,9 +3173,10 @@ button.nav-link {
   opacity: 0; transition: opacity 0.12s;
 }
 .msgr-bubble-row:hover .msgr-bubble-actions { opacity: 1; }
-/* For "me" rows (own messages, on the right), action buttons go BEFORE the bubble
-   so they appear to the LEFT of it. */
-.msgr-bubble-row.me { flex-direction: row-reverse; }
+/* For "me" rows: bubble is justify-content:flex-end (already right-aligned via parent rule),
+   so we move action buttons BEFORE the bubble via flex order — without reversing the whole row. */
+.msgr-bubble-row.me .msgr-bubble { order: 2; }
+.msgr-bubble-row.me .msgr-bubble-actions { order: 1; }
 .msgr-bubble-act {
   width: 28px; height: 28px; border-radius: 50%;
   background: var(--card-2); border: 1px solid var(--line);
