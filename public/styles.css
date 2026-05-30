@@ -2152,11 +2152,11 @@ button { cursor: pointer; }
 .feed-item-expand:hover { color: #5beb91; }
 /* Image bleeds to card edges (VK / Telegram style) — cancel parent padding sideways */
 .feed-item-img {
-  display: block; width: calc(100% + 28px); margin: 12px -14px 0;
-  max-height: 420px; object-fit: cover; border-top: 1px solid var(--line);
+  display: block; width: 100%; margin: 12px 0 0;
+  max-height: 420px; object-fit: cover; border-radius: 8px;
 }
-/* If image is the last child, also remove bottom padding gap */
-.feed-item-img:last-child { margin-bottom: -12px; }
+/* No bottom hack needed — image is inside the padding now */
+.feed-item-img:last-child { margin-bottom: 0; }
 .feed-item-link {
   display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
   font-size: 12px; font-weight: 700; color: var(--g);
@@ -2767,8 +2767,8 @@ button.me-menu-item + .me-menu-item,
 /* On VERY narrow screens, slightly tighter feed cards */
 @media (max-width: 420px) {
   .feed-item { padding: 11px 12px; }
-  .feed-item-img { width: calc(100% + 24px); margin: 11px -12px 0; }
-  .feed-item-img:last-child { margin-bottom: -11px; }
+  .feed-item-img { width: 100%; margin: 11px 0 0; border-radius: 6px; }
+  .feed-item-img:last-child { margin-bottom: 0; }
   .feed-item-title { font-size: 14px; }
   .feed-item-body { font-size: 12.5px; }
 }
@@ -2870,7 +2870,7 @@ button.me-menu-item + .me-menu-item,
 .post-act.liked { color: var(--red, #ff5b6e); }
 .post-act svg { display: block; }
 .post-act-n { font-variant-numeric: tabular-nums; }
-.post-views { cursor: default; }
+.post-views { cursor: default; margin-left: auto; color: var(--mute); }
 .post-views:hover { background: transparent; color: var(--mute); }
 
 /* ============ FRIENDS PAGE ROWS ============ */
@@ -3165,27 +3165,47 @@ button.nav-link {
 }
 
 /* ============ MESSAGE ACTION BUTTONS (reply / forward) ============ */
-.msgr-bubble-row { position: relative; }
+/* Buttons live in the flex row next to the bubble — no absolute positioning,
+   so the layout never shifts and hover never gets lost. */
+.msgr-bubble-row { align-items: center; gap: 4px; }
 .msgr-bubble-actions {
-  position: absolute; top: 50%; transform: translateY(-50%);
-  display: flex; gap: 4px; opacity: 0;
-  transition: opacity 0.15s; pointer-events: none;
+  display: flex; gap: 4px; flex-shrink: 0;
+  opacity: 0; transition: opacity 0.12s;
 }
-.msgr-bubble-row.me .msgr-bubble-actions { right: 100%; margin-right: 6px; }
-.msgr-bubble-row.them .msgr-bubble-actions { left: 100%; margin-left: 6px; }
-.msgr-bubble-row:hover .msgr-bubble-actions { opacity: 1; pointer-events: auto; }
+.msgr-bubble-row:hover .msgr-bubble-actions { opacity: 1; }
+/* For "me" rows (own messages, on the right), action buttons go BEFORE the bubble
+   so they appear to the LEFT of it. */
+.msgr-bubble-row.me { flex-direction: row-reverse; }
 .msgr-bubble-act {
   width: 28px; height: 28px; border-radius: 50%;
   background: var(--card-2); border: 1px solid var(--line);
   color: var(--dim); display: flex; align-items: center; justify-content: center;
   cursor: pointer; padding: 0;
 }
-.msgr-bubble-act:hover { color: var(--g); border-color: var(--g); }
+.msgr-bubble-act:hover { color: var(--g); border-color: var(--g); background: var(--card); }
 
-/* On mobile, action buttons are always visible (touch interface) */
+/* On mobile: hide inline action buttons entirely — long-press opens a menu instead.
+   Touch interface doesn't have hover, and the inline buttons squeeze the bubble. */
 @media (max-width: 860px) {
-  .msgr-bubble-actions { opacity: 0.6; pointer-events: auto; }
-  .msgr-bubble-act { width: 24px; height: 24px; }
+  .msgr-bubble-actions { display: none; }
+}
+
+/* Long-press action menu (mobile-only popup) */
+.msgr-action-menu {
+  position: fixed; z-index: 100; min-width: 180px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  padding: 4px; display: flex; flex-direction: column;
+}
+.msgr-action-menu button {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; background: none; border: none; color: var(--text);
+  font-family: inherit; font-size: 14px; text-align: left; cursor: pointer; border-radius: 4px;
+}
+.msgr-action-menu button:hover, .msgr-action-menu button:active { background: var(--card-2); }
+.msgr-action-menu button svg { color: var(--g); }
+.msgr-action-menu-backdrop {
+  position: fixed; inset: 0; z-index: 99; background: rgba(0, 0, 0, 0.4);
 }
 
 /* ============ REPLY BAR (above composer) ============ */

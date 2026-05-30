@@ -4938,6 +4938,39 @@ function relDate(iso) {
   return shortDate(iso);
 }
 
+// Show a small popup menu at (x,y) with Reply / Forward actions — triggered by long-press on mobile.
+function openMessageActionMenu(x, y, { onReply, onForward }) {
+  document.querySelectorAll('.msgr-action-menu, .msgr-action-menu-backdrop').forEach(n => n.remove());
+  const backdrop = el('div', { class: 'msgr-action-menu-backdrop' });
+  const menu = el('div', { class: 'msgr-action-menu' });
+  const close = () => { backdrop.remove(); menu.remove(); };
+
+  const replyBtn = el('button', { type: 'button',
+    html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span>Ответить</span>'
+  });
+  replyBtn.addEventListener('click', () => { close(); onReply(); });
+
+  const forwardBtn = el('button', { type: 'button',
+    html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span>Переслать</span>'
+  });
+  forwardBtn.addEventListener('click', () => { close(); onForward(); });
+
+  menu.appendChild(replyBtn);
+  menu.appendChild(forwardBtn);
+  backdrop.addEventListener('click', close);
+  document.body.appendChild(backdrop);
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let left = Math.min(x, vw - rect.width - 8);
+  let top = Math.min(y, vh - rect.height - 8);
+  left = Math.max(8, left);
+  top = Math.max(8, top);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
 // Forward a message to another friend — opens a friend picker, then sends.
 async function openForwardPicker(messageId) {
   const listBox = el('div', { class: 'share-list' });
@@ -5318,7 +5351,7 @@ async function pageMessages() {
       );
       right.appendChild(composer);
 
-      // Delegate clicks on message action buttons (Reply / Forward)
+      // Delegate clicks on message action buttons (Reply / Forward) — desktop hover buttons
       const scrollEl = $('#msgr-thread-scroll');
       if (scrollEl) {
         scrollEl.addEventListener('click', (e) => {
@@ -5327,7 +5360,6 @@ async function pageMessages() {
           const mid = parseInt(btn.dataset.mid, 10);
           if (!Number.isFinite(mid)) return;
           const act = btn.dataset.act;
-          // Find bubble text for preview
           const row = btn.closest('.msgr-bubble-row');
           const textEl = row?.querySelector('.msgr-bubble-text');
           const preview = textEl ? textEl.textContent : '';
@@ -5336,6 +5368,48 @@ async function pageMessages() {
           if (act === 'reply') setReplyTo(mid, preview, authorName);
           else if (act === 'forward') openForwardPicker(mid);
         });
+
+        // Long-press on bubble → action menu (mobile)
+        let pressTimer = null;
+        let pressedRow = null;
+        let pressX = 0, pressY = 0;
+        const startPress = (e, row) => {
+          if (pressTimer) clearTimeout(pressTimer);
+          pressedRow = row;
+          const touch = e.touches ? e.touches[0] : e;
+          pressX = touch.clientX; pressY = touch.clientY;
+          pressTimer = setTimeout(() => {
+            if (!pressedRow) return;
+            const mid = parseInt(pressedRow.dataset.mid, 10);
+            if (!Number.isFinite(mid)) return;
+            // haptic feedback
+            try { navigator.vibrate?.(20); } catch (_) {}
+            const textEl = pressedRow.querySelector('.msgr-bubble-text');
+            const preview = textEl ? textEl.textContent : '';
+            const isMine = pressedRow.classList.contains('me');
+            const authorName = isMine ? 'вам' : o.name;
+            openMessageActionMenu(pressX, pressY, {
+              onReply: () => setReplyTo(mid, preview, authorName),
+              onForward: () => openForwardPicker(mid)
+            });
+          }, 450);
+        };
+        const cancelPress = () => {
+          if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+          pressedRow = null;
+        };
+        const onMove = (e) => {
+          if (!pressTimer) return;
+          const t = e.touches ? e.touches[0] : e;
+          if (Math.abs(t.clientX - pressX) > 10 || Math.abs(t.clientY - pressY) > 10) cancelPress();
+        };
+        scrollEl.addEventListener('touchstart', (e) => {
+          const row = e.target.closest('.msgr-bubble-row');
+          if (row) startPress(e, row);
+        }, { passive: true });
+        scrollEl.addEventListener('touchmove', onMove, { passive: true });
+        scrollEl.addEventListener('touchend', cancelPress);
+        scrollEl.addEventListener('touchcancel', cancelPress);
       }
 
       requestAnimationFrame(() => {
