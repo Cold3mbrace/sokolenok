@@ -2516,15 +2516,35 @@ function serveStatic(req, res, pathname) {
     return;
   }
 
-  // Short profile URL: /u/<steamid> → /lookup?steamid=<steamid>
+  // Short profile URL: /u/<steamid> — serves lookup HTML with OG tags directly
+  // (no redirect, because crawlers like Telegram don't follow 302 for previews).
+  // The page then rewrites its URL via history.replaceState so the frontend sees ?steamid=
   if (pathname.startsWith('/u/')) {
     const sid = pathname.slice(3).split('/')[0];
-    if (/^\d{17}$/.test(sid)) {
-      res.writeHead(302, { 'Location': `/lookup?steamid=${sid}` });
-      res.end();
-      return;
-    }
-    sendText(res, 404, 'Not found');
+    if (!/^\d{17}$/.test(sid)) { sendText(res, 404, 'Not found'); return; }
+    const file = path.join(PUBLIC_DIR, 'lookup.html');
+    fs.readFile(file, 'utf8', async (err, html) => {
+      if (err) return sendText(res, 404, 'Not found');
+      try {
+        const base = getBaseUrl(req);
+        const defaultImage = `${base}/assets/logo-full-dark.png`;
+        const p = await fetchProfile(sid).catch(() => null);
+        const name = escapeHtml(p?.personaname || 'Игрок');
+        const avatar = p?.avatarfull || p?.avatar || defaultImage;
+        const title = `${name} — профиль CS2 на SOKOLENOK`;
+        const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
+        const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
+        // Inject a tiny script that rewrites the URL to the canonical ?steamid= form,
+        // so existing frontend logic (which reads URLSearchParams) keeps working.
+        const rewrite = `<script>try{history.replaceState({},'','/lookup?steamid=${sid}');}catch(_){}</script>`;
+        const out = html.replace('<!--OG-->', og + rewrite);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(out);
+      } catch (_) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(html);
+      }
+    });
     return;
   }
 
