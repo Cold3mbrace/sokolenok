@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS messages (
   sender_steam_id   TEXT NOT NULL,
   recipient_steam_id TEXT NOT NULL,
   body_enc    TEXT NOT NULL,
+  attachment_enc TEXT,
   created_at  TEXT NOT NULL,
   read_at     TEXT
 );
@@ -334,6 +335,12 @@ function openSqlite() {
     const cols = db.prepare("PRAGMA table_info(users)").all();
     if (!new Set(cols.map(c => c.name)).has('last_seen_at')) {
       db.exec('ALTER TABLE users ADD COLUMN last_seen_at TEXT');
+    }
+  } catch (_) { /* best-effort */ }
+  try {
+    const cols = db.prepare("PRAGMA table_info(messages)").all();
+    if (!new Set(cols.map(c => c.name)).has('attachment_enc')) {
+      db.exec('ALTER TABLE messages ADD COLUMN attachment_enc TEXT');
     }
   } catch (_) { /* best-effort */ }
   return db;
@@ -1370,17 +1377,17 @@ function listBlocks(steamId) {
 }
 
 // Store an (already-encrypted) message. Caller must verify friendship first.
-function insertMessage(sender, recipient, bodyEnc) {
+function insertMessage(sender, recipient, bodyEnc, attachmentEnc) {
   const created_at = nowIso();
   if (useSqlite()) {
-    const info = openSqlite().prepare(`INSERT INTO messages (sender_steam_id, recipient_steam_id, body_enc, created_at)
-      VALUES (?,?,?,?)`).run(sender, recipient, bodyEnc, created_at);
+    const info = openSqlite().prepare(`INSERT INTO messages (sender_steam_id, recipient_steam_id, body_enc, attachment_enc, created_at)
+      VALUES (?,?,?,?,?)`).run(sender, recipient, bodyEnc, attachmentEnc || null, created_at);
     return { id: Number(info.lastInsertRowid), created_at };
   }
   const state = readFallback();
   if (!state.messages) state.messages = [];
   const id = (state.messages.reduce((m, x) => Math.max(m, x.id || 0), 0) || 0) + 1;
-  state.messages.push({ id, sender_steam_id: sender, recipient_steam_id: recipient, body_enc: bodyEnc, created_at, read_at: null });
+  state.messages.push({ id, sender_steam_id: sender, recipient_steam_id: recipient, body_enc: bodyEnc, attachment_enc: attachmentEnc || null, created_at, read_at: null });
   writeFallback(state);
   return { id, created_at };
 }
@@ -1397,6 +1404,14 @@ function listMessages(a, b, limit = 100) {
     .filter(m => (m.sender_steam_id === a && m.recipient_steam_id === b) || (m.sender_steam_id === b && m.recipient_steam_id === a))
     .sort((x, y) => (x.created_at || '').localeCompare(y.created_at || ''))
     .slice(-limit);
+}
+
+// Fetch a single message by id (for replies/forwards lookup)
+function getMessage(id) {
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM messages WHERE id=?`).get(Number(id)) || null;
+  }
+  return (readFallback().messages || []).find(m => m.id === Number(id)) || null;
 }
 
 // Mark messages from `other` to `me` as read
@@ -1893,7 +1908,7 @@ module.exports = {
   friendStatus, sendFriendRequest, acceptFriendRequest, removeFriend,
   listFriends, areFriends, blockUser, unblockUser, listBlocks, isBlocked, eitherBlocked,
   // messages
-  insertMessage, listMessages, markRead, listConversations, countUnread,
+  insertMessage, getMessage, listMessages, markRead, listConversations, countUnread,
   // moderation
   createReport, listReports, resolveReport, countOpenReports,
   banUser, unbanUser, isUserBanned, listBans,

@@ -216,6 +216,66 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Validate + normalize attachment from client.
+// Allowed types: 'post', 'reply', 'forward'. Anything else → null.
+function sanitizeAttachment(att) {
+  if (!att || typeof att !== 'object') return null;
+  const t = String(att.type || '');
+  if (t === 'post') {
+    const pid = parseInt(att.post_id, 10);
+    if (!Number.isFinite(pid)) return null;
+    return { type: 'post', post_id: pid };
+  }
+  if (t === 'reply') {
+    const mid = parseInt(att.message_id, 10);
+    if (!Number.isFinite(mid)) return null;
+    return { type: 'reply', message_id: mid };
+  }
+  if (t === 'forward') {
+    const mid = parseInt(att.message_id, 10);
+    if (!Number.isFinite(mid)) return null;
+    return { type: 'forward', message_id: mid };
+  }
+  return null;
+}
+
+// Enrich attachment with display data fetched fresh from the DB.
+// We store only IDs in the encrypted blob; the rest is hydrated on read.
+async function hydrateAttachment(att) {
+  if (!att) return null;
+  if (att.type === 'post') {
+    try {
+      const p = db.getPost(att.post_id);
+      if (!p) return { type: 'post', missing: true };
+      const pub = db.getPublic(p.public_id);
+      return {
+        type: 'post', post_id: p.id, public_id: p.public_id,
+        public_name: pub?.name || null, public_avatar: pub?.avatar || null,
+        title: p.title || '', body_preview: String(p.body || '').slice(0, 200),
+        image: p.image || null
+      };
+    } catch (_) { return { type: 'post', missing: true }; }
+  }
+  if (att.type === 'reply' || att.type === 'forward') {
+    try {
+      const m = db.getMessage(att.message_id);
+      if (!m) return { type: att.type, missing: true };
+      const text = decryptMessage(m.body_enc);
+      let author = null;
+      try { author = await fetchProfile(m.sender_steam_id); } catch (_) {}
+      return {
+        type: att.type, message_id: m.id,
+        author_steam_id: m.sender_steam_id,
+        author_name: author?.personaname || m.sender_steam_id,
+        author_avatar: author?.avatar || null,
+        text_preview: String(text || '').slice(0, 280),
+        created_at: m.created_at
+      };
+    } catch (_) { return { type: att.type, missing: true }; }
+  }
+  return null;
+}
+
 // Returns combined activity status: { online, last_seen, in_game }
 // Respects target user's privacy: if show_activity is off, last_seen + online are hidden.
 // Steam in_game is always public (it's Steam-side, we just relay).
@@ -2267,12 +2327,26 @@ async function handleApi(req, res, pathname, query) {
     for (const c of convos) {
       let prof = null;
       try { prof = await fetchProfile(c.steam_id); } catch (_) {}
+      let preview = '';
+      if (c.last) {
+        const text = decryptMessage(c.last.body_enc);
+        if (text) preview = text.slice(0, 80);
+        else if (c.last.attachment_enc) {
+          try {
+            const att = JSON.parse(decryptMessage(c.last.attachment_enc));
+            if (att.type === 'post') preview = '📎 Пост';
+            else if (att.type === 'forward') preview = '↪ Пересланное сообщение';
+            else if (att.type === 'reply') preview = '↩ Ответ';
+            else preview = '📎 Вложение';
+          } catch (_) { preview = '📎 Вложение'; }
+        }
+      }
       enriched.push({
         steam_id: c.steam_id,
         name: prof?.personaname || c.steam_id,
         avatar: prof?.avatar || prof?.avatarfull || null,
         unread: c.unread,
-        last_text: c.last ? decryptMessage(c.last.body_enc).slice(0, 80) : '',
+        last_text: preview,
         last_at: c.last?.created_at || null,
         last_from_me: c.last ? c.last.sender_steam_id === me : false
       });
@@ -2287,15 +2361,23 @@ async function handleApi(req, res, pathname, query) {
     if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
 
     if (req.method === 'GET') {
-      db.markRead(me, other);
       const rows = db.listMessages(me, other, 200);
-      const messages = rows.map(m => ({
-        id: m.id,
-        from_me: m.sender_steam_id === me,
-        text: decryptMessage(m.body_enc),
-        created_at: m.created_at,
-        read: !!m.read_at
-      }));
+      const messages = [];
+      for (const m of rows) {
+        let attachment = null;
+        if (m.attachment_enc) {
+          try { attachment = JSON.parse(decryptMessage(m.attachment_enc)); } catch (_) {}
+          if (attachment) attachment = await hydrateAttachment(attachment);
+        }
+        messages.push({
+          id: m.id, from_me: m.sender_steam_id === me,
+          text: decryptMessage(m.body_enc),
+          attachment,
+          created_at: m.created_at,
+          read: !!m.read_at
+        });
+      }
+      db.markRead(me, other);
       let prof = null;
       try { prof = await fetchProfile(other); } catch (_) {}
       return sendJson(res, 200, { ok: true, other: {
@@ -2310,13 +2392,16 @@ async function handleApi(req, res, pathname, query) {
       if (!db.areFriends(me, other)) return sendJson(res, 403, { ok: false, error: 'not-friends' });
       const body = await readJsonBody(req);
       const text = String(body.text || '').trim();
-      if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
+      const attachment = body.attachment && typeof body.attachment === 'object' ? sanitizeAttachment(body.attachment) : null;
+      if (!text && !attachment) return sendJson(res, 400, { ok: false, error: 'empty' });
       if (text.length > 2000) return sendJson(res, 400, { ok: false, error: 'too-long' });
       const enc = encryptMessage(text);
-      const saved = db.insertMessage(me, other, enc);
-      db.logEvent('message-send', me, { to: other });
+      const attEnc = attachment ? encryptMessage(JSON.stringify(attachment)) : null;
+      const saved = db.insertMessage(me, other, enc, attEnc);
+      db.logEvent('message-send', me, { to: other, attachment_type: attachment?.type });
+      const hydratedAtt = attachment ? await hydrateAttachment(attachment) : null;
       return sendJson(res, 200, { ok: true, message: {
-        id: saved.id, from_me: true, text, created_at: saved.created_at, read: false
+        id: saved.id, from_me: true, text, attachment: hydratedAtt, created_at: saved.created_at, read: false
       } });
     }
     return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
@@ -2384,7 +2469,8 @@ function serveStatic(req, res, pathname) {
 
   // OG meta-tag injection for richer link previews in Telegram/Discord/VK.
   // Replaces a <!--OG--> placeholder in the HTML with generated tags based on URL params.
-  if ((pathname === '/lookup' || pathname === '/feed') && req.headers.accept && req.headers.accept.includes('text/html')) {
+  // No Accept-header filter — crawlers send various Accept values and we want to serve them OG too.
+  if (pathname === '/lookup' || pathname === '/feed') {
     const file = path.join(PUBLIC_DIR, pathname === '/lookup' ? 'lookup.html' : 'feed.html');
     const query = new URL(req.url, 'http://x').searchParams;
     fs.readFile(file, 'utf8', async (err, html) => {
@@ -2427,6 +2513,18 @@ function serveStatic(req, res, pathname) {
         res.end(html);
       }
     });
+    return;
+  }
+
+  // Short profile URL: /u/<steamid> → /lookup?steamid=<steamid>
+  if (pathname.startsWith('/u/')) {
+    const sid = pathname.slice(3).split('/')[0];
+    if (/^\d{17}$/.test(sid)) {
+      res.writeHead(302, { 'Location': `/lookup?steamid=${sid}` });
+      res.end();
+      return;
+    }
+    sendText(res, 404, 'Not found');
     return;
   }
 

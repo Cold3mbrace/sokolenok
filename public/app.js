@@ -151,7 +151,10 @@ const api = {
   unblock(id) { return this.request(`/api/blocks/${id}`, { method: 'DELETE' }); },
   conversations() { return this.request('/api/conversations'); },
   messages(id) { return this.request(`/api/messages/${id}`); },
-  sendMessage(id, text) { return this.request(`/api/messages/${id}`, { method: 'POST', body: JSON.stringify({ text }) }); },
+  sendMessage(id, text, attachment) {
+    const body = attachment ? { text: text || '', attachment } : { text };
+    return this.request(`/api/messages/${id}`, { method: 'POST', body: JSON.stringify(body) });
+  },
   report(target_type, target_id, reason) {
     return this.request('/api/report', { method: 'POST', body: JSON.stringify({ target_type, target_id, reason }) });
   },
@@ -368,7 +371,7 @@ function openSupportModal() {
     const r = await api.report('support', 'support', text).catch(() => ({ ok: false }));
     if (r.ok) { toast.ok('Сообщение отправлено в поддержку'); return true; }
     toast.err('Не удалось отправить'); return false;
-  }, 'Отправить');
+  }, 'Отправить', { guard: true });
 }
 
 // Explicit consent modal shown once after first login. Cannot be dismissed without accepting.
@@ -3418,7 +3421,7 @@ async function paintLookupSocial(steamid, profR) {
 
 // Share profile link: copy + send to friend in DM
 function openShareProfileModal(steamid, name, profile) {
-  const link = `${location.origin}/lookup?steamid=${steamid}`;
+  const link = `${location.origin}/u/${steamid}`;
   const me = window.__me;
   const listBox = el('div', { class: 'share-list' });
 
@@ -4487,8 +4490,7 @@ async function openShareModal(item, me) {
     row.appendChild(sendBtn);
     row.addEventListener('click', async () => {
       row.disabled = true; sendBtn.textContent = '…';
-      const text = `Поделился постом: ${link}`;
-      const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
+      const res = await api.sendMessage(f.steam_id, '', { type: 'post', post_id: item.post_id }).catch(() => ({ ok: false }));
       if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
       else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
     });
@@ -4707,6 +4709,7 @@ function openEditPublicModal(pub, onDone) {
   const descInput = el('textarea', { class: 'modal-input', rows: '2', maxlength: '300' }); descInput.value = pub.description || '';
   const ava = imageUploadField('Аватар', pub.avatar || '');
   const cover = imageUploadField('Обложка (баннер)', pub.cover || '');
+  const snapshot = JSON.stringify({ n: nameInput.value, d: descInput.value, a: ava.getUrl(), c: cover.getUrl() });
   openModal('Редактировать паблик', [
     el('label', { class: 'modal-label' }, 'Название'), nameInput,
     el('label', { class: 'modal-label' }, 'Описание'), descInput,
@@ -4719,7 +4722,7 @@ function openEditPublicModal(pub, onDone) {
     }).catch(() => ({ ok: false }));
     if (res.ok) { toast.ok('Сохранено'); if (onDone) onDone(); return true; }
     toast.err('Не удалось сохранить'); return false;
-  }, 'Сохранить');
+  }, 'Сохранить', { guard: true, snapshot: () => JSON.stringify({ n: nameInput.value, d: descInput.value, a: ava.getUrl(), c: cover.getUrl() }), initialSnapshot: snapshot });
 }
 
 // Modal: create a public
@@ -4741,7 +4744,7 @@ function openCreatePublicModal() {
     if (res.ok) { toast.ok('Паблик создан'); location.href = `/feed?public=${encodeURIComponent(res.public.id)}`; return true; }
     toast.err(res.error === 'too-many' ? 'Лимит 5 пабликов' : res.error === 'name-too-short' ? 'Название слишком короткое' : 'Ошибка');
     return false;
-  }, 'Создать');
+  }, 'Создать', { guard: true });
 }
 
 // Modal: create a post in a public
@@ -4762,7 +4765,7 @@ function openCreatePostModal(pub) {
     if (res.ok) { toast.ok('Опубликовано'); location.reload(); return true; }
     toast.err('Не удалось опубликовать');
     return false;
-  }, 'Опубликовать');
+  }, 'Опубликовать', { guard: true });
 }
 
 // Image upload field: button + hidden file input + preview. Returns { node, getUrl }.
@@ -4800,30 +4803,75 @@ function imageUploadField(label, initialUrl) {
 }
 
 // Generic modal helper
-function openModal(title, contentNodes, onConfirm, confirmLabel = 'OK') {
+// openModal supports two call shapes:
+//   openModal(title, contentNodes, onConfirm, confirmLabel)
+//   openModal(title, contentNodes, onConfirm, confirmLabel, { guard: true })
+// guard=true → asks before closing if any text input/textarea inside has non-empty content
+function openModal(title, contentNodes, onConfirm, confirmLabel = 'OK', opts = {}) {
   const existing = $('#modal-host'); if (existing) existing.remove();
   const host = el('div', { id: 'modal-host', class: 'modal-host' });
-  const close = () => host.remove();
+
+  // Check whether any input inside the modal has content the user might lose
+  const hasUnsavedInput = () => {
+    if (!opts.guard) return false;
+    // If snapshot mode is provided — compare against initial
+    if (typeof opts.snapshot === 'function' && opts.initialSnapshot != null) {
+      return opts.snapshot() !== opts.initialSnapshot;
+    }
+    // Otherwise — any non-empty input/textarea counts as unsaved
+    const inputs = host.querySelectorAll('input, textarea');
+    for (const inp of inputs) {
+      if (inp.type === 'hidden' || inp.readOnly) continue;
+      const v = String(inp.value || '').trim();
+      if (v.length > 0) return true;
+    }
+    return false;
+  };
+
+  const close = (force = false) => {
+    if (!force && hasUnsavedInput()) {
+      if (!confirm('У вас есть несохранённые изменения. Закрыть всё равно?')) return;
+    }
+    host.remove();
+  };
+
   const confirmBtn = el('button', { class: 'btn', type: 'button' }, confirmLabel);
   confirmBtn.addEventListener('click', async () => {
     confirmBtn.disabled = true;
     const keep = await onConfirm();
-    if (keep) close();
+    if (keep) close(true);  // confirmed save = bypass guard
     else confirmBtn.disabled = false;
   });
   const dialog = el('div', { class: 'modal-dialog' },
     el('div', { class: 'modal-head' },
       el('div', { class: 'modal-title' }, title),
-      el('button', { class: 'modal-x', type: 'button', onclick: close, html: '&times;' })
+      el('button', { class: 'modal-x', type: 'button', onclick: () => close(), html: '&times;' })
     ),
     el('div', { class: 'modal-body' }, ...contentNodes),
     el('div', { class: 'modal-foot' },
-      el('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Отмена'),
+      el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => close() }, 'Отмена'),
       confirmBtn
     )
   );
   host.appendChild(dialog);
   host.addEventListener('click', (e) => { if (e.target === host) close(); });
+
+  // Escape key closes (with guard)
+  const onEsc = (e) => {
+    if (e.key === 'Escape' && document.body.contains(host)) {
+      e.preventDefault();
+      close();
+    }
+  };
+  document.addEventListener('keydown', onEsc);
+  const observer = new MutationObserver(() => {
+    if (!document.body.contains(host)) {
+      document.removeEventListener('keydown', onEsc);
+      observer.disconnect();
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: false });
+
   document.body.appendChild(host);
 }
 
@@ -4890,6 +4938,41 @@ function relDate(iso) {
   return shortDate(iso);
 }
 
+// Forward a message to another friend — opens a friend picker, then sends.
+async function openForwardPicker(messageId) {
+  const listBox = el('div', { class: 'share-list' });
+  listBox.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Друзья…</div>';
+  openModal('Переслать сообщение', [
+    el('div', { class: 'modal-hint' }, 'Выберите кому переслать.'),
+    listBox
+  ], async () => true, 'Закрыть');
+
+  const r = await api.friends().catch(() => ({ ok: false, friends: [] }));
+  listBox.innerHTML = '';
+  const friends = r.friends || [];
+  if (!friends.length) { listBox.appendChild(el('div', { class: 'share-empty' }, 'Нет друзей на сайте.')); return; }
+  for (const f of friends) {
+    const row = el('button', { class: 'share-row', type: 'button' });
+    const ava = el('div', { class: 'share-ava' });
+    if (f.avatar) {
+      const img = el('img', { src: f.avatar, alt: '' });
+      img.onerror = function () { this.remove(); ava.textContent = (f.name || '?').slice(0, 1).toUpperCase(); };
+      ava.appendChild(img);
+    } else ava.textContent = (f.name || '?').slice(0, 1).toUpperCase();
+    row.appendChild(ava);
+    row.appendChild(el('div', { class: 'share-name' }, f.name));
+    const tag = el('span', { class: 'share-send-tag' }, 'Переслать');
+    row.appendChild(tag);
+    row.addEventListener('click', async () => {
+      row.disabled = true; tag.textContent = '…';
+      const res = await api.sendMessage(f.steam_id, '', { type: 'forward', message_id: messageId }).catch(() => ({ ok: false }));
+      if (res.ok) { tag.textContent = 'Отправлено ✓'; tag.classList.add('sent'); }
+      else { tag.textContent = 'Ошибка'; row.disabled = false; }
+    });
+    listBox.appendChild(row);
+  }
+}
+
 // ============ page: messages ============
 async function pageMessages() {
   const me = await renderTopbar('messages');
@@ -4909,15 +4992,20 @@ async function pageMessages() {
         for (const b of tabs.querySelectorAll('.msgr-tab')) b.classList.remove('active');
         btn.classList.add('active');
         state.tab = btn.dataset.tab;
+        state.leftRendered = false; // different content — show spinner once
         renderLeft();
       });
     }
   }
 
-  async function renderLeft() {
+  async function renderLeft(opts = {}) {
     const list = $('#msgr-list');
     if (!list) return;
-    list.innerHTML = '<div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загрузка…</div>';
+    // Show spinner only on first paint or explicit force; silent refresh keeps content
+    const isFirst = !state.leftRendered;
+    if (isFirst && !opts.silent) {
+      list.innerHTML = '<div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загрузка…</div>';
+    }
     if (state.tab === 'chats') {
       const r = await api.conversations().catch(() => ({ ok: false, conversations: [] }));
       renderChatList(r.conversations || []);
@@ -4925,6 +5013,7 @@ async function pageMessages() {
       const r = await api.friends().catch(() => ({ ok: false, friends: [], incoming: [], outgoing: [] }));
       renderFriendList(r);
     }
+    state.leftRendered = true;
   }
 
   function renderChatList(convos) {
@@ -5062,12 +5151,28 @@ async function pageMessages() {
           el('span', null, msgDateLabel(m.created_at))));
         state.lastDate = d;
       }
+      // Bubble contents: optional attachment card → text → time
+      const bubble = el('div', { class: 'msgr-bubble' });
+      if (m.attachment) {
+        const card = buildAttachmentCard(m.attachment);
+        if (card) bubble.appendChild(card);
+      }
+      if (m.text) {
+        bubble.appendChild(el('div', { class: 'msgr-bubble-text' }, m.text));
+      }
+      bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
+      // Action buttons (reply, forward) — visible on hover/long-press
+      const actions = el('div', { class: 'msgr-bubble-actions' },
+        el('button', { class: 'msgr-bubble-act', type: 'button', title: 'Ответить',
+          'data-act': 'reply', 'data-mid': String(m.id || ''),
+          html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>' }),
+        el('button', { class: 'msgr-bubble-act', type: 'button', title: 'Переслать',
+          'data-act': 'forward', 'data-mid': String(m.id || ''),
+          html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg>' })
+      );
       scroll.appendChild(el('div', { class: 'msgr-bubble-row ' + (m.from_me ? 'me' : 'them'),
         'data-mid': m.id != null ? String(m.id) : '' },
-        el('div', { class: 'msgr-bubble' },
-          el('div', { class: 'msgr-bubble-text' }, m.text),
-          el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : '')
-        )
+        bubble, actions
       ));
       if (m.id != null && m.id > state.lastMsgId) state.lastMsgId = m.id;
       if (!m.from_me) gotIncoming = true;
@@ -5076,9 +5181,48 @@ async function pageMessages() {
     if (added && nearBottom) {
       requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
     }
-    // Skip sound on the very first load of a thread — only ping for subsequent poll updates.
     if (state.threadLoaded && gotIncoming) playNotifySound();
     state.threadLoaded = true;
+  }
+
+  // Render an inline attachment card (post / reply / forward)
+  function buildAttachmentCard(att) {
+    if (!att) return null;
+    if (att.missing) {
+      return el('div', { class: 'msg-att msg-att-missing' }, 'Вложение недоступно');
+    }
+    if (att.type === 'post') {
+      const link = `${location.origin}/feed?public=${encodeURIComponent(att.public_id)}#post-${att.post_id}`;
+      const card = el('a', { class: 'msg-att msg-att-post', href: link });
+      if (att.image) card.appendChild(el('div', { class: 'msg-att-img' }, el('img', { src: att.image, alt: '' })));
+      const body = el('div', { class: 'msg-att-body' });
+      const head = el('div', { class: 'msg-att-head' });
+      if (att.public_avatar) {
+        const av = el('div', { class: 'msg-att-ava' });
+        av.appendChild(el('img', { src: att.public_avatar, alt: '' }));
+        head.appendChild(av);
+      }
+      head.appendChild(el('div', { class: 'msg-att-pub' }, att.public_name || 'Сообщество'));
+      body.appendChild(head);
+      if (att.title) body.appendChild(el('div', { class: 'msg-att-title' }, att.title));
+      if (att.body_preview) body.appendChild(el('div', { class: 'msg-att-preview' }, att.body_preview));
+      body.appendChild(el('div', { class: 'msg-att-cta' }, 'Открыть пост →'));
+      card.appendChild(body);
+      return card;
+    }
+    if (att.type === 'reply') {
+      const card = el('div', { class: 'msg-att msg-att-reply' });
+      card.appendChild(el('div', { class: 'msg-att-author' }, '↩ ' + (att.author_name || 'Сообщение')));
+      if (att.text_preview) card.appendChild(el('div', { class: 'msg-att-preview' }, att.text_preview));
+      return card;
+    }
+    if (att.type === 'forward') {
+      const card = el('div', { class: 'msg-att msg-att-forward' });
+      card.appendChild(el('div', { class: 'msg-att-author' }, '↪ Переслано от ' + (att.author_name || 'неизвестно')));
+      if (att.text_preview) card.appendChild(el('div', { class: 'msg-att-preview' }, att.text_preview));
+      return card;
+    }
+    return null;
   }
 
   function paintThread(r) {
@@ -5118,29 +5262,86 @@ async function pageMessages() {
 
     // Composer (only if still friends)
     if (r.friend) {
+      const draftKey = `sok:draft:${me?.steamid || 'a'}:${o.steam_id}`;
       const input = el('textarea', { class: 'msgr-input', rows: '1', placeholder: 'Сообщение…', maxlength: '2000' });
+      try { input.value = localStorage.getItem(draftKey) || ''; } catch (_) {}
+      const persistDraft = () => { try { localStorage.setItem(draftKey, input.value); } catch (_) {} };
+      const clearDraft = () => { try { localStorage.removeItem(draftKey); } catch (_) {} };
+
+      // Reply bar shown above input when replying
+      const replyBar = el('div', { class: 'msgr-reply-bar', style: { display: 'none' } });
+      const setReplyTo = (msgId, msgText, authorName) => {
+        state.replyToId = msgId || null;
+        if (!msgId) { replyBar.style.display = 'none'; replyBar.innerHTML = ''; return; }
+        replyBar.style.display = '';
+        replyBar.innerHTML = '';
+        replyBar.appendChild(el('div', { class: 'msgr-reply-line' }));
+        replyBar.appendChild(el('div', { class: 'msgr-reply-body' },
+          el('div', { class: 'msgr-reply-author' }, '↩ Ответ ' + (authorName ? ('— ' + authorName) : '')),
+          el('div', { class: 'msgr-reply-text' }, (msgText || '').slice(0, 120))
+        ));
+        replyBar.appendChild(el('button', { class: 'msgr-reply-x', type: 'button',
+          onclick: () => setReplyTo(null), html: '&times;' }));
+        input.focus();
+      };
+
       const send = async () => {
         const text = input.value.trim();
-        if (!text) return;
-        input.value = ''; input.style.height = 'auto';
-        const res = await api.sendMessage(o.steam_id, text).catch(() => ({ ok: false }));
+        const replyId = state.replyToId;
+        if (!text && !replyId) return;
+        input.value = ''; input.style.height = 'auto'; clearDraft();
+        const attachment = replyId ? { type: 'reply', message_id: replyId } : null;
+        setReplyTo(null);
+        const res = await api.sendMessage(o.steam_id, text, attachment).catch(() => ({ ok: false }));
         if (res.ok && res.message) {
-          renderMessages([res.message]); // instant, incremental
-          // bump convo list preview
-          renderLeft();
+          renderMessages([res.message]);
+          renderLeft({ silent: true });
         } else {
           toast.err(res.error === 'not-friends' ? 'Вы больше не друзья' : res.error === 'blocked' ? 'Недоступно' : 'Не отправлено');
-          input.value = text;
+          input.value = text; persistDraft();
         }
       };
-      input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(120, input.scrollHeight) + 'px'; });
+      input.addEventListener('input', () => {
+        input.style.height = 'auto';
+        input.style.height = Math.min(120, input.scrollHeight) + 'px';
+        persistDraft();
+      });
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
-      right.appendChild(el('div', { class: 'msgr-composer' },
-        input,
-        el('button', { class: 'msgr-send', type: 'button', onclick: send,
-          html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' })
-      ));
-      requestAnimationFrame(() => input.focus());
+
+      const composer = el('div', { class: 'msgr-composer-wrap' },
+        replyBar,
+        el('div', { class: 'msgr-composer' },
+          input,
+          el('button', { class: 'msgr-send', type: 'button', onclick: send,
+            html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' })
+        )
+      );
+      right.appendChild(composer);
+
+      // Delegate clicks on message action buttons (Reply / Forward)
+      const scrollEl = $('#msgr-thread-scroll');
+      if (scrollEl) {
+        scrollEl.addEventListener('click', (e) => {
+          const btn = e.target.closest('.msgr-bubble-act');
+          if (!btn) return;
+          const mid = parseInt(btn.dataset.mid, 10);
+          if (!Number.isFinite(mid)) return;
+          const act = btn.dataset.act;
+          // Find bubble text for preview
+          const row = btn.closest('.msgr-bubble-row');
+          const textEl = row?.querySelector('.msgr-bubble-text');
+          const preview = textEl ? textEl.textContent : '';
+          const isMine = row?.classList.contains('me');
+          const authorName = isMine ? 'вам' : o.name;
+          if (act === 'reply') setReplyTo(mid, preview, authorName);
+          else if (act === 'forward') openForwardPicker(mid);
+        });
+      }
+
+      requestAnimationFrame(() => {
+        input.focus();
+        if (input.value) { input.style.height = 'auto'; input.style.height = Math.min(120, input.scrollHeight) + 'px'; }
+      });
     } else {
       right.appendChild(el('div', { class: 'msgr-composer-locked' },
         'Вы не друзья — переписка недоступна. Добавьте игрока в друзья на странице профиля.'));
@@ -5380,6 +5581,7 @@ function openRoleEditModal(role, panel) {
   const colorSel = el('select', { class: 'modal-input' });
   for (const c of ROLE_COLORS) colorSel.appendChild(el('option', { value: c.key }, c.label));
   colorSel.value = role.color || 'green';
+  const snap = JSON.stringify({ n: nameI.value, c: colorSel.value });
   openModal('Редактировать роль', [
     el('label', { class: 'modal-label' }, 'Название'), nameI,
     el('label', { class: 'modal-label' }, 'Цвет бейджа'), colorSel,
@@ -5390,7 +5592,7 @@ function openRoleEditModal(role, panel) {
     const r = await api.admin.updateRole(role.id, { name, color: colorSel.value }).catch(() => ({ ok: false }));
     if (r.ok) { toast.ok('Сохранено'); paintAdminRoles(panel); return true; }
     toast.err('Ошибка'); return false;
-  }, 'Сохранить');
+  }, 'Сохранить', { guard: true, snapshot: () => JSON.stringify({ n: nameI.value, c: colorSel.value }), initialSnapshot: snap });
 }
 
 // Russian noun plural helper: pick form based on count

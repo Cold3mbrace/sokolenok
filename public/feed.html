@@ -7,10 +7,20 @@
   <title>Лента · SOKOLENOK</title>
   <!--OG-->
   <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
-  <link rel="stylesheet" href="/styles.css?v=1780133629">
+  <link rel="stylesheet" href="/styles.css?v=1780154983">
   <style>
-    .feed-grid { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
-    @media (max-width: 1000px) { .feed-grid { grid-template-columns: 1fr; } }
+    /* Feed: narrow main column (like VK/Twitter) + sidebar on the right.
+       max-width on the post column prevents the ugly "stretches to full screen" look. */
+    .feed-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 640px) 300px;
+      gap: 24px;
+      justify-content: center;
+      align-items: start;
+    }
+    @media (max-width: 1000px) {
+      .feed-grid { grid-template-columns: minmax(0, 640px); justify-content: center; }
+    }
   </style>
 </head>
 <body data-page="feed">
@@ -39,6 +49,6 @@
   </main>
 </div>
 <div id="toast-host" class="toast-host"></div>
-<script src="/app.js?v=1780133629"></script>
+<script src="/app.js?v=1780154983"></script>
 </body>
 </html>
