@@ -129,6 +129,7 @@ const api = {
   pinPost(id) { return this.request(`/api/posts/${id}/pin`, { method: 'POST' }); },
   unpinPost(id) { return this.request(`/api/posts/${id}/unpin`, { method: 'POST' }); },
   recommendCommunities() { return this.request('/api/publics/recommend', { method: 'GET' }); },
+  publicStats(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/stats`); },
   deleteMessage(id) { return this.request(`/api/messages/msg/${id}`, { method: 'DELETE' }); },
   reactToMessage(msgId, emoji) { return this.request(`/api/messages/reactions/${msgId}`, { method: 'POST', body: JSON.stringify({ emoji }) }); },
   likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
@@ -304,55 +305,133 @@ function steamLogin(ev) {
 // Universal player search: accepts SteamID64, Steam URL, vanity, or persona name.
 // Shows live suggestions from our user base; for direct IDs/URLs opens lookup immediately.
 function openSearchModal() {
-  const input = el('input', { class: 'modal-input', placeholder: 'Имя в Steam, ссылка или SteamID', autocomplete: 'off' });
-  const hint = el('div', { class: 'modal-hint' }, 'Можно вставить ссылку на Steam-профиль, никнейм или SteamID64.');
+  const input = el('input', { class: 'modal-input', placeholder: 'Игроки, сообщества, посты, ссылка Steam…', autocomplete: 'off' });
+  const hint = el('div', { class: 'modal-hint' }, 'Ищет по никам, сообществам и тексту постов. Можно вставить ссылку Steam, ник или SteamID.');
   const results = el('div', { class: 'search-results' });
-  const open = (id) => { location.href = `/lookup?steamid=${id}`; };
+  const open = (url) => { location.href = url; };
   let lastQ = '', debounce = null;
+
+  // Helper: wrap matched substring with <mark>; HTML-safe.
+  const highlight = (text, q) => {
+    const t = String(text || '');
+    const lower = t.toLowerCase(), needle = q.toLowerCase();
+    const i = lower.indexOf(needle);
+    if (i < 0) return [document.createTextNode(t)];
+    return [
+      document.createTextNode(t.slice(0, i)),
+      el('mark', { class: 'search-hl' }, t.slice(i, i + needle.length)),
+      document.createTextNode(t.slice(i + needle.length))
+    ];
+  };
+
+  const renderSection = (title, items, builder) => {
+    if (!items?.length) return null;
+    const sec = el('div', { class: 'search-section' });
+    sec.appendChild(el('div', { class: 'search-section-h' }, title));
+    for (const it of items) sec.appendChild(builder(it));
+    return sec;
+  };
 
   const runSearch = async () => {
     const q = input.value.trim();
     if (q === lastQ) return;
     lastQ = q;
     if (!q) { results.innerHTML = ''; return; }
-    // Looks like ID / URL / vanity → try resolve directly
+
+    // Looks like ID / URL → resolve directly
     if (/^\d{17}$/.test(q) || /steamcommunity\.com/.test(q)) {
       results.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Открываем…</div>';
       const id = await api.resolveAny(q);
-      if (id) open(id); else { results.innerHTML = ''; toast.err('Не нашли такого игрока'); }
+      if (id) open(`/lookup?steamid=${id}`);
+      else { results.innerHTML = ''; toast.err('Не нашли такого игрока'); }
       return;
     }
-    // Otherwise: search by persona name
     if (q.length < 2) { results.innerHTML = ''; return; }
-    const r = await api.request(`/api/search?q=${encodeURIComponent(q)}`).catch(() => ({ ok: false, results: [] }));
+
+    results.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Ищем…</div>';
+    const r = await api.request(`/api/search?q=${encodeURIComponent(q)}`).catch(() => null);
     results.innerHTML = '';
-    if (!r.results?.length) {
-      // Fallback: try as vanity URL anyway
+    if (!r?.ok) { results.appendChild(el('div', { class: 'search-empty' }, 'Ошибка поиска')); return; }
+
+    const total = (r.users?.length || 0) + (r.publics?.length || 0) + (r.posts?.length || 0);
+    if (!total) {
       results.appendChild(el('div', { class: 'search-empty' },
-        'Никого с таким именем не нашли среди пользователей сайта. ',
+        'Ничего не нашли. ',
         el('button', { class: 'search-try-vanity', type: 'button', onclick: async () => {
           const id = await api.resolveAny(q);
-          if (id) open(id); else toast.err('Не вышло резолвить как ник Steam');
+          if (id) open(`/lookup?steamid=${id}`);
+          else toast.err('Не вышло резолвить как ник Steam');
         } }, 'Попробовать как ник Steam')
       ));
       return;
     }
-    for (const u of r.results) {
-      const row = el('button', { class: 'search-result', type: 'button', onclick: () => open(u.steam_id) });
+
+    // Users
+    const usersSec = renderSection(`👤 Игроки (${r.users.length})`, r.users, u => {
+      const row = el('button', { class: 'search-result', type: 'button',
+        onclick: () => open(`/lookup?steamid=${u.steam_id}`) });
       const ava = el('div', { class: 'search-result-ava' });
       if (u.avatar) {
         const img = el('img', { src: u.avatar, alt: '' });
-        img.onerror = function() { this.remove(); ava.textContent = (u.persona_name || '?').slice(0, 1).toUpperCase(); };
+        img.onerror = function () { this.remove(); ava.textContent = (u.persona_name || '?').slice(0, 1).toUpperCase(); };
         ava.appendChild(img);
       } else ava.textContent = (u.persona_name || '?').slice(0, 1).toUpperCase();
       row.appendChild(ava);
-      row.appendChild(el('div', { class: 'search-result-info' },
-        el('div', { class: 'search-result-name' }, u.persona_name || u.steam_id),
-        el('div', { class: 'search-result-id' }, u.steam_id)
-      ));
-      results.appendChild(row);
-    }
+      const info = el('div', { class: 'search-result-info' });
+      const name = el('div', { class: 'search-result-name' });
+      for (const n of highlight(u.persona_name || u.steam_id, q)) name.appendChild(n);
+      info.appendChild(name);
+      info.appendChild(el('div', { class: 'search-result-id' }, u.steam_id));
+      row.appendChild(info);
+      return row;
+    });
+    if (usersSec) results.appendChild(usersSec);
+
+    // Publics
+    const pubSec = renderSection(`👥 Сообщества (${r.publics.length})`, r.publics, p => {
+      const row = el('button', { class: 'search-result', type: 'button',
+        onclick: () => open(`/feed?public=${encodeURIComponent(p.id)}`) });
+      const ava = el('div', { class: 'search-result-ava' });
+      if (p.avatar) {
+        const img = el('img', { src: p.avatar, alt: '' });
+        img.onerror = function () { this.remove(); ava.textContent = (p.name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else ava.textContent = (p.name || '?').slice(0, 1).toUpperCase();
+      row.appendChild(ava);
+      const info = el('div', { class: 'search-result-info' });
+      const name = el('div', { class: 'search-result-name' });
+      for (const n of highlight(p.name, q)) name.appendChild(n);
+      info.appendChild(name);
+      if (p.description) {
+        const desc = el('div', { class: 'search-result-id' });
+        for (const n of highlight(p.description, q)) desc.appendChild(n);
+        info.appendChild(desc);
+      }
+      row.appendChild(info);
+      return row;
+    });
+    if (pubSec) results.appendChild(pubSec);
+
+    // Posts
+    const postSec = renderSection(`📝 Посты (${r.posts.length})`, r.posts, p => {
+      const row = el('button', { class: 'search-result search-result-post', type: 'button',
+        onclick: () => open(`/feed?public=${encodeURIComponent(p.public_id)}#post-${p.id}`) });
+      const info = el('div', { class: 'search-result-info', style: { flex: 1 } });
+      if (p.title) {
+        const t = el('div', { class: 'search-result-name' });
+        for (const n of highlight(p.title, q)) t.appendChild(n);
+        info.appendChild(t);
+      }
+      const snip = el('div', { class: 'search-result-snippet' });
+      for (const n of highlight(p.snippet, q)) snip.appendChild(n);
+      info.appendChild(snip);
+      info.appendChild(el('div', { class: 'search-result-id' }, '· ' + (p.public_name || '')));
+      row.appendChild(info);
+      return row;
+    });
+    if (postSec) results.appendChild(postSec);
   };
+
   input.addEventListener('input', () => {
     clearTimeout(debounce);
     debounce = setTimeout(runSearch, 250);
@@ -361,7 +440,7 @@ function openSearchModal() {
     if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounce); runSearch(); }
   });
 
-  openModal('Найти игрока', [hint, input, results], async () => true, 'Закрыть');
+  openModal('Поиск', [hint, input, results], async () => true, 'Закрыть');
   setTimeout(() => input.focus(), 50);
 }
 
@@ -455,7 +534,8 @@ function ensureMobileNav() {
       el('span', { class: 'bn-label' }, item.label)
     );
     if (item.badge) {
-      const b = el('span', { class: 'bn-badge', id: 'bn-unread', style: { display: 'none' } }, '');
+      const badgeId = item.badge === 'notif' ? 'bn-notif' : 'bn-unread';
+      const b = el('span', { class: 'bn-badge', id: badgeId, style: { display: 'none' } }, '');
       link.querySelector('.bn-icon').appendChild(b);
     }
     bar.appendChild(link);
@@ -486,6 +566,7 @@ function navIconMap() {
     inventory: '<rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>',
     feed:      '<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>',
     mail:      '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/>',
+    bell:      '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
     user:      '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
     settings:  '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'
   };
@@ -511,20 +592,34 @@ function _oldNavIcon_unused(key) {
 
 async function refreshUnreadBadge() {
   try {
-    const r = await api.conversations();
-    const n = r?.unread_total || 0;
-    if (typeof _lastUnread === 'number' && n > _lastUnread) {
+    // Run both in parallel
+    const [convR, notifR] = await Promise.all([
+      api.conversations().catch(() => null),
+      api.request('/api/notifications/count').catch(() => null)
+    ]);
+    const nMsgs = convR?.unread_total || 0;
+    const nNotif = notifR?.unread || 0;
+    if (typeof _lastUnread === 'number' && (nMsgs + nNotif) > _lastUnread) {
       playNotifySound();
     }
-    _lastUnread = n;
+    _lastUnread = nMsgs + nNotif;
+    // Messages badge
     for (const id of ['nav-unread-badge', 'bn-unread']) {
       const badge = document.getElementById(id);
       if (!badge) continue;
-      if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = ''; }
+      if (nMsgs > 0) { badge.textContent = nMsgs > 99 ? '99+' : String(nMsgs); badge.style.display = ''; }
       else { badge.style.display = 'none'; }
     }
-    updateFaviconBadge(n);
-    updateTabTitle(n);
+    // Notifications badge (sidebar + bottom-nav)
+    for (const id of ['nav-notif-badge', 'bn-notif']) {
+      const badge = document.getElementById(id);
+      if (!badge) continue;
+      if (nNotif > 0) { badge.textContent = nNotif > 99 ? '99+' : String(nNotif); badge.style.display = ''; }
+      else { badge.style.display = 'none'; }
+    }
+    // Favicon / tab title with combined total
+    updateFaviconBadge(nMsgs + nNotif);
+    updateTabTitle(nMsgs + nNotif);
   } catch (_) { /* ignore */ }
 }
 let _lastUnread = null;
@@ -611,6 +706,7 @@ function renderSidebar(active, me) {
   const authedTop = [
     { href: '/dashboard', label: 'Дашборд',   key: 'dashboard', icon: 'home' },
     { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
+    { href: '/notifications', label: 'Уведомления', key: 'notifications', icon: 'bell', badge: 'notif' },
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
     { href: '/friends',   label: 'Друзья',     key: 'friends',   icon: 'users' },
     { href: '/communities', label: 'Сообщества', key: 'communities', icon: 'grid' },
@@ -642,6 +738,9 @@ function renderSidebar(active, me) {
       navIcon(item.icon), el('span', { class: 'nav-label' }, item.label));
     if (item.badge === 'unread') {
       link.appendChild(el('span', { class: 'nav-badge', id: 'nav-unread-badge', style: { display: 'none' } }, '0'));
+    }
+    if (item.badge === 'notif') {
+      link.appendChild(el('span', { class: 'nav-badge', id: 'nav-notif-badge', style: { display: 'none' } }, '0'));
     }
     nav.appendChild(link);
   }
@@ -3343,6 +3442,7 @@ async function pageLookup() {
   paintLookupFriends(steamid);
   paintLookupFaceit(faceitR);
   paintLookupLeetify(leetifyR);
+  paintLookupActivity(steamid);
   paintLookupInvKpis(invR, histR);
   paintLookupStatsKpis(statsR);
   paintLookupTables(statsR);
@@ -3747,6 +3847,40 @@ function paintReputation(steamid, repR, me) {
   root.appendChild(card);
 }
 
+// Render profile activity feed: user's posts + comments in chronological order
+async function paintLookupActivity(steamid) {
+  const root = $('#lk-activity');
+  if (!root) return;
+  root.innerHTML = '';
+  const r = await api.request(`/api/profile/${steamid}/activity`).catch(() => null);
+  if (!r?.ok || !r.items?.length) return; // hide block entirely if no activity
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Активность'));
+  const list = el('div', { class: 'lk-activity-list' });
+  for (const it of r.items) {
+    const row = el('a', { class: 'lk-activity-row', href: `/feed?public=${encodeURIComponent(it.public_id)}#post-${it.post_id}` });
+    // Icon
+    const icon = el('div', { class: 'lk-activity-icon ' + (it.kind === 'post' ? 'is-post' : 'is-comment') },
+      it.kind === 'post' ? '📝' : '💬');
+    row.appendChild(icon);
+    // Body
+    const body = el('div', { class: 'lk-activity-body' });
+    const head = el('div', { class: 'lk-activity-head' },
+      el('span', { class: 'lk-activity-action' }, it.kind === 'post' ? 'Написал пост' : 'Прокомментировал'),
+      el('span', { class: 'lk-activity-pub' }, ' в ' + (it.public_name || 'сообществе')),
+      el('span', { class: 'lk-activity-date' }, it.created_at ? ' · ' + relDate(it.created_at) : '')
+    );
+    body.appendChild(head);
+    if (it.kind === 'post' && it.title) body.appendChild(el('div', { class: 'lk-activity-title' }, it.title));
+    if (it.kind === 'comment' && it.post_title) body.appendChild(el('div', { class: 'lk-activity-context' }, '↳ к посту «' + it.post_title + '»'));
+    if (it.body) body.appendChild(el('div', { class: 'lk-activity-text' }, it.body));
+    row.appendChild(body);
+    list.appendChild(row);
+  }
+  card.appendChild(list);
+  root.appendChild(card);
+}
+
 function paintLookupLeetify(leetifyR) {
   const root = $('#lk-leetify');
   if (!root) return;
@@ -3874,6 +4008,17 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   const h = statsR?.summary?.headline || {};
 
   const card = el('div', { class: 'card prof-card' });
+
+  // Cover banner — shown above the profile card if user has set one
+  const coverUrl = profR?.cover_url;
+  if (coverUrl) {
+    const cover = el('div', { class: 'prof-cover' });
+    const im = el('img', { src: coverUrl, alt: '', loading: 'lazy' });
+    im.onerror = function () { cover.remove(); };
+    cover.appendChild(im);
+    card.appendChild(cover);
+  }
+
   card.appendChild(el('div', { class: 'card-eyebrow' }, 'Профиль игрока'));
 
   // Critical bans banner — only when there are bans
@@ -4279,6 +4424,8 @@ async function renderPublicPage(publicId, me) {
               if (res?.ok) { p.subscribed = res.subscribed; btn.textContent = p.subscribed ? 'Отписаться' : 'Подписаться'; btn.classList.toggle('btn-ghost', p.subscribed); }
               btn.disabled = false;
             } }, p.subscribed ? 'Отписаться' : 'Подписаться'),
+      p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
+        onclick: () => openPublicStatsModal(p) }, 'Статистика') : null,
       p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
         onclick: () => openEditPublicModal(p, () => renderPublicPage(publicId, me)) }, 'Редактировать') : null,
       p.is_owner ? el('button', { class: 'btn btn-ghost', type: 'button',
@@ -4875,6 +5022,94 @@ function paintFeedSide(r) {
 }
 
 // Modal: manage public co-owners / editors (owner only)
+// Modal: community owner stats — totals, week, daily growth chart, top posts
+function openPublicStatsModal(pub) {
+  const body = el('div', { class: 'stats-modal-body' });
+  body.innerHTML = '<div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загружаем статистику…</div>';
+  openModal(`Статистика · ${pub.name}`, [body], async () => true, 'Закрыть');
+
+  api.publicStats(pub.id).then(r => {
+    if (!r?.ok) { body.innerHTML = '<div class="search-empty">Не удалось загрузить</div>'; return; }
+    const s = r.stats;
+    body.innerHTML = '';
+
+    // Top-level totals as KPI cards
+    const totals = el('div', { class: 'stats-kpi-grid' },
+      kpiCard('👥 Подписчиков', s.totals.subscribers, `+${s.week.new_subscribers} за неделю`),
+      kpiCard('📝 Постов', s.totals.posts, `${s.week.posts} за неделю`),
+      kpiCard('❤️ Лайков', s.totals.likes, `${s.week.likes} за неделю`),
+      kpiCard('💬 Комментариев', s.totals.comments, `${s.week.comments} за неделю`),
+      kpiCard('👁 Просмотров', s.totals.views, `${s.week.views} за неделю`)
+    );
+    body.appendChild(totals);
+
+    // Daily growth — SVG sparkline (last 30 days new subs per day)
+    body.appendChild(el('div', { class: 'stats-section-h' }, 'Новые подписчики (30 дней)'));
+    body.appendChild(buildSparkline(s.daily_growth));
+
+    // Top posts by engagement
+    if (s.top_posts?.length) {
+      body.appendChild(el('div', { class: 'stats-section-h' }, 'Топ постов по вовлечённости'));
+      const list = el('div', { class: 'stats-top-list' });
+      for (const p of s.top_posts) {
+        const link = el('a', { class: 'stats-top-row', href: `/feed?public=${encodeURIComponent(pub.id)}#post-${p.id}` });
+        if (p.image) {
+          const im = el('div', { class: 'stats-top-img' });
+          im.appendChild(el('img', { src: p.image, alt: '' }));
+          link.appendChild(im);
+        }
+        const info = el('div', { class: 'stats-top-info' });
+        if (p.title) info.appendChild(el('div', { class: 'stats-top-title' }, p.title));
+        info.appendChild(el('div', { class: 'stats-top-preview' }, p.body_preview));
+        info.appendChild(el('div', { class: 'stats-top-stats' },
+          `❤️ ${p.likes}  💬 ${p.comments}  👁 ${p.views}`));
+        link.appendChild(info);
+        list.appendChild(link);
+      }
+      body.appendChild(list);
+    }
+  }).catch(() => {
+    body.innerHTML = '<div class="search-empty">Не удалось загрузить</div>';
+  });
+}
+
+function kpiCard(label, value, sub) {
+  return el('div', { class: 'stats-kpi' },
+    el('div', { class: 'stats-kpi-label' }, label),
+    el('div', { class: 'stats-kpi-value' }, String(value)),
+    el('div', { class: 'stats-kpi-sub' }, sub)
+  );
+}
+
+// SVG sparkline chart: array of {date, new_subscribers}
+function buildSparkline(series) {
+  const w = 500, h = 100, pad = 8;
+  const max = Math.max(1, ...series.map(p => p.new_subscribers));
+  const dx = (w - pad * 2) / Math.max(1, series.length - 1);
+  const points = series.map((p, i) => {
+    const x = pad + i * dx;
+    const y = h - pad - (p.new_subscribers / max) * (h - pad * 2);
+    return [x, y];
+  });
+  // Build path
+  const path = points.map((pt, i) => (i === 0 ? 'M' : 'L') + pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' ');
+  // Filled area under line
+  const areaPath = path + ` L ${(w - pad).toFixed(1)},${(h - pad).toFixed(1)} L ${pad},${(h - pad).toFixed(1)} Z`;
+  const wrap = el('div', { class: 'stats-spark-wrap' });
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" class="stats-spark">
+      <path d="${areaPath}" class="stats-spark-area"/>
+      <path d="${path}" class="stats-spark-line"/>
+      ${points.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2" class="stats-spark-dot"/>`).join('')}
+    </svg>
+    <div class="stats-spark-axis">
+      <span>${series[0]?.date?.slice(5) || ''}</span>
+      <span>${series[series.length - 1]?.date?.slice(5) || ''}</span>
+    </div>
+  `;
+  return wrap;
+}
+
 function openEditorsModal(pub) {
   const listBox = el('div', { class: 'editors-list' });
   const input = el('input', { class: 'modal-input', placeholder: 'SteamID, ссылка или ник Steam' });
@@ -6438,6 +6673,91 @@ async function decorateFriendPresence(root) {
 }
 
 // ============ page: communities ============
+async function pageNotifications() {
+  const me = await renderTopbar('notifications');
+  if (!me.logged_in) {
+    toast.warn('Войдите чтобы посмотреть уведомления');
+    setTimeout(() => location.replace('/'), 800);
+    return;
+  }
+  const body = $('#notif-body');
+  const r = await api.request('/api/notifications').catch(() => null);
+  body.innerHTML = '';
+  if (!r?.ok) {
+    body.appendChild(el('div', { class: 'card' }, 'Не удалось загрузить'));
+    return;
+  }
+  if (!r.notifications?.length) {
+    body.appendChild(el('div', { class: 'card feed-empty' },
+      el('div', { class: 'feed-empty-icon' }, '🔔'),
+      el('div', { class: 'feed-empty-title' }, 'Уведомлений пока нет'),
+      el('div', { class: 'feed-empty-desc' }, 'Здесь появятся реакции на ваши посты, новые подписчики и заявки в друзья.')
+    ));
+    return;
+  }
+  const list = el('div', { class: 'notif-list' });
+  for (const n of r.notifications) list.appendChild(buildNotificationRow(n));
+  body.appendChild(list);
+  // Now that we've delivered them, server marked them read — refresh badges
+  refreshUnreadBadge();
+}
+
+function buildNotificationRow(n) {
+  const actor = n.actor || {};
+  const data = n.data || {};
+  let icon = '🔔', text = '', href = '#';
+  if (n.kind === 'post_like') {
+    icon = '❤️';
+    text = 'лайкнул(а) ваш пост';
+    href = `/feed?public=${encodeURIComponent(data.public_id || '')}#post-${data.post_id || ''}`;
+  } else if (n.kind === 'post_comment') {
+    icon = '💬';
+    text = 'прокомментировал(а) ваш пост';
+    if (data.snippet) text += `: "${data.snippet.slice(0, 60)}${data.snippet.length > 60 ? '…' : ''}"`;
+    href = `/feed?public=${encodeURIComponent(data.public_id || '')}#post-${data.post_id || ''}`;
+  } else if (n.kind === 'subscribe') {
+    icon = '👥';
+    text = `подписался(ась) на ваше сообщество «${data.public_name || ''}»`;
+    href = `/feed?public=${encodeURIComponent(data.public_id || '')}`;
+  } else if (n.kind === 'friend_request') {
+    icon = '➕';
+    text = 'отправил(а) заявку в друзья';
+    href = '/friends';
+  } else if (n.kind === 'friend_accept') {
+    icon = '✓';
+    text = 'принял(а) вашу заявку в друзья';
+    href = `/lookup?steamid=${actor.steam_id || ''}`;
+  } else {
+    text = 'выполнил(а) действие';
+  }
+
+  const row = el('a', { class: 'notif-row' + (n.read ? '' : ' unread'), href });
+
+  const ava = el('div', { class: 'notif-ava' });
+  if (actor.avatar) {
+    const img = el('img', { src: actor.avatar, alt: '' });
+    img.onerror = function() { this.remove(); ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase(); };
+    ava.appendChild(img);
+  } else ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase();
+  row.appendChild(ava);
+
+  const body = el('div', { class: 'notif-body' });
+  const head = el('div', { class: 'notif-head' },
+    el('strong', { class: 'notif-actor' }, actor.name || actor.steam_id || 'Кто-то'),
+    actor.role ? roleBadge(actor.role) : null,
+    el('span', { class: 'notif-icon' }, ' ' + icon),
+    el('span', { class: 'notif-text' }, ' ' + text)
+  );
+  body.appendChild(head);
+  if (data.post_title) body.appendChild(el('div', { class: 'notif-context' }, '↳ ' + data.post_title));
+  body.appendChild(el('div', { class: 'notif-date' }, n.created_at ? relDate(n.created_at) : ''));
+  row.appendChild(body);
+
+  if (!n.read) row.appendChild(el('div', { class: 'notif-dot' }));
+
+  return row;
+}
+
 async function pageCommunities() {
   const me = await renderTopbar('communities');
   if (!me.logged_in) {
@@ -6782,6 +7102,17 @@ async function pageSettings() {
     )
   ));
 
+  // Profile cover — banner image shown on the player's profile page
+  // Initialize from settings; saved with the rest on Save click.
+  const coverField = imageUploadField('Обложка профиля', s.cover_url || '');
+  window.__coverField = coverField; // accessible from Save handler
+  prefs.appendChild(el('div', { class: 'field' },
+    el('label', { class: 'field-label' }, 'Внешний вид профиля'),
+    coverField.node,
+    el('div', { style: { fontSize: '11.5px', color: 'var(--mute)', marginTop: '4px' } },
+      'Картинка-шапка показывается сверху вашего профиля для других игроков. Рекомендуемый размер 1500×500 пикселей.')
+  ));
+
   prefs.appendChild(el('div', { class: 'flex gap-1 mt-2' },
     el('button', { class: 'btn btn-primary', id: 'set-save', type: 'button' }, 'Сохранить'),
     el('button', { class: 'btn btn-ghost', id: 'set-revert', type: 'button',
@@ -6838,7 +7169,8 @@ async function pageSettings() {
         language: $('#set-language').value,
         telegram_id: $('#set-telegram').value.trim() || null,
         faceit_nickname: $('#set-faceit').value.trim() || null,
-        show_activity: $('#set-show-activity').checked
+        show_activity: $('#set-show-activity').checked,
+        cover_url: window.__coverField?.getUrl() || null
       });
       if (r.ok) {
         Object.assign(s, r.settings);
@@ -6860,7 +7192,7 @@ document.addEventListener('DOMContentLoaded', () => {
   try { if (localStorage.getItem('sok:large-font') === '1') document.body.classList.add('large-font'); } catch (_) {}
   initCookieBanner();
   const page = document.body.dataset.page;
-  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities };
+  const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities, notifications: pageNotifications };
   const fn = router[page];
   if (fn) fn().catch(e => { console.error(e); toast.err('Ошибка: ' + (e.message || e)); });
 });

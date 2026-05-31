@@ -277,6 +277,18 @@ CREATE TABLE IF NOT EXISTS post_comments (
 );
 CREATE INDEX IF NOT EXISTS idx_comments_post ON post_comments(post_id, created_at);
 
+CREATE TABLE IF NOT EXISTS notifications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient_steam_id TEXT NOT NULL,
+  actor_steam_id     TEXT,
+  kind        TEXT NOT NULL,
+  data_json   TEXT,
+  created_at  TEXT NOT NULL,
+  read_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient_steam_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(recipient_steam_id, read_at);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -312,6 +324,9 @@ function openSqlite() {
       // SQLite ALTER doesn't allow NOT NULL DEFAULT in some versions of node:sqlite;
       // add as nullable and treat NULL as 1 in reads.
       db.exec('ALTER TABLE user_settings ADD COLUMN show_activity INTEGER DEFAULT 1');
+    }
+    if (!colNames.has('cover_url')) {
+      db.exec('ALTER TABLE user_settings ADD COLUMN cover_url TEXT');
     }
   } catch (_) { /* best-effort */ }
   try {
@@ -493,6 +508,70 @@ function searchUsers(query, limit = 20) {
     .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
     .slice(0, limit)
     .map(u => ({ steam_id: u.steam_id, persona_name: u.persona_name, avatar: u.avatar }));
+}
+
+function searchPosts(query, limit = 10) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q || q.length < 2) return [];
+  const like = `%${q}%`;
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT * FROM posts WHERE LOWER(title) LIKE ? OR LOWER(body) LIKE ?
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(like, like, limit);
+  }
+  return (readFallback().posts || [])
+    .filter(p => (p.title || '').toLowerCase().includes(q) || (p.body || '').toLowerCase().includes(q))
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    .slice(0, limit);
+}
+
+function searchPublics(query, limit = 10) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q || q.length < 2) return [];
+  const like = `%${q}%`;
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT * FROM publics WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ?
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(like, like, limit);
+  }
+  return (readFallback().publics || [])
+    .filter(p => (p.name || '').toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q))
+    .slice(0, limit);
+}
+
+// Posts authored by a user (for profile activity)
+function listPostsByAuthor(steamId, limit = 20) {
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT * FROM posts WHERE author_steam_id = ? ORDER BY created_at DESC LIMIT ?`
+    ).all(steamId, limit);
+  }
+  return (readFallback().posts || [])
+    .filter(p => p.author_steam_id === steamId)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    .slice(0, limit);
+}
+
+// Comments authored by a user, joined with post info (for profile activity)
+function listCommentsByAuthor(steamId, limit = 20) {
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT c.*, p.title AS post_title, p.public_id AS post_public_id
+       FROM post_comments c LEFT JOIN posts p ON p.id = c.post_id
+       WHERE c.author_steam_id = ? ORDER BY c.created_at DESC LIMIT ?`
+    ).all(steamId, limit);
+  }
+  const comments = Object.values(readFallback().post_comments || {})
+    .filter(c => c.author_steam_id === steamId)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    .slice(0, limit);
+  const posts = readFallback().posts || [];
+  return comments.map(c => {
+    const p = posts.find(x => x.id === c.post_id);
+    return { ...c, post_title: p?.title, post_public_id: p?.public_id };
+  });
 }
 
 // ----- sessions -----
@@ -696,7 +775,7 @@ function removeWatch(steamId, marketName) {
 function getSettings(steamId) {
   if (!steamId) return null;
   const empty = { steam_id: steamId, currency: 'RUB', language: 'ru',
-    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, updated_at: null };
+    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, updated_at: null };
   let row;
   if (useSqlite()) {
     row = openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId) || empty;
@@ -718,11 +797,12 @@ function setSettings(steamId, patch = {}) {
     faceit_nickname: patch.faceit_nickname !== undefined ? patch.faceit_nickname : cur.faceit_nickname,
     consent_at: patch.consent_at !== undefined ? patch.consent_at : cur.consent_at,
     show_activity: patch.show_activity !== undefined ? (patch.show_activity ? 1 : 0) : (cur.show_activity ?? 1),
+    cover_url: patch.cover_url !== undefined ? patch.cover_url : cur.cover_url,
     updated_at: nowIso()
   };
   if (useSqlite()) {
-    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, updated_at)
-      VALUES (?,?,?,?,?,?,?,?)
+    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(steam_id) DO UPDATE SET
         currency = excluded.currency,
         language = excluded.language,
@@ -730,8 +810,9 @@ function setSettings(steamId, patch = {}) {
         faceit_nickname = excluded.faceit_nickname,
         consent_at = excluded.consent_at,
         show_activity = excluded.show_activity,
+        cover_url = excluded.cover_url,
         updated_at = excluded.updated_at`)
-      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.updated_at);
+      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.updated_at);
   } else {
     const state = readFallback();
     state.user_settings[steamId] = next;
@@ -1234,6 +1315,111 @@ function countSubscribers(publicId) {
   }
   return Object.values(readFallback().subscriptions || {})
     .filter(s => s.public_id === publicId).length;
+}
+
+// Stats overview for a community: subscriber count, daily growth (last 30 days),
+// post count, total likes/comments/views, top posts by engagement.
+function getPublicStats(publicId) {
+  const now = Date.now();
+  const thirtyDaysAgoISO = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const sevenDaysAgoISO = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  let subs = [];
+  let posts = [];
+  let likes = [];
+  let comments = [];
+  let views = [];
+
+  if (useSqlite()) {
+    const d = openSqlite();
+    subs = d.prepare(`SELECT created_at FROM subscriptions WHERE public_id = ? ORDER BY created_at`).all(publicId);
+    posts = d.prepare(`SELECT id, title, body, created_at, image FROM posts WHERE public_id = ? ORDER BY created_at DESC`).all(publicId);
+    const postIds = posts.map(p => p.id);
+    if (postIds.length) {
+      const ph = postIds.map(() => '?').join(',');
+      likes = d.prepare(`SELECT post_id, COUNT(*) AS n FROM post_likes WHERE post_id IN (${ph}) GROUP BY post_id`).all(...postIds);
+      comments = d.prepare(`SELECT post_id, COUNT(*) AS n FROM post_comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...postIds);
+      views = d.prepare(`SELECT post_id, COUNT(*) AS n FROM post_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...postIds);
+    }
+  } else {
+    const state = readFallback();
+    subs = Object.values(state.subscriptions || {}).filter(s => s.public_id === publicId);
+    posts = (state.posts || []).filter(p => p.public_id === publicId);
+    const postIds = new Set(posts.map(p => p.id));
+    const groupBy = (arr, key) => {
+      const m = new Map();
+      for (const r of arr) if (postIds.has(r.post_id ?? r[key])) m.set(r.post_id ?? r[key], (m.get(r.post_id ?? r[key]) || 0) + 1);
+      return Array.from(m, ([post_id, n]) => ({ post_id, n }));
+    };
+    likes = groupBy(Object.values(state.post_likes || {}), 'post_id');
+    comments = groupBy(Object.values(state.post_comments || {}), 'post_id');
+    views = groupBy(Object.values(state.post_views || {}), 'post_id');
+  }
+
+  // Daily subscriber growth over last 30 days (YYYY-MM-DD → cumulative count)
+  const daily = {};
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(now - i * 24 * 60 * 60 * 1000);
+    const key = d.toISOString().slice(0, 10);
+    daily[key] = 0;
+  }
+  let totalSubs = 0;
+  for (const s of subs) {
+    totalSubs++;
+    if (s.created_at >= thirtyDaysAgoISO) {
+      const day = s.created_at.slice(0, 10);
+      if (day in daily) daily[day]++;
+    }
+  }
+  const dailySeries = Object.entries(daily).map(([date, count]) => ({ date, new_subscribers: count }));
+
+  // Build per-post stats map and totals
+  const likesByPost = new Map(likes.map(r => [r.post_id, r.n]));
+  const commentsByPost = new Map(comments.map(r => [r.post_id, r.n]));
+  const viewsByPost = new Map(views.map(r => [r.post_id, r.n]));
+
+  const enrichedPosts = posts.map(p => ({
+    id: p.id,
+    title: p.title,
+    body_preview: (p.body || '').slice(0, 80),
+    image: p.image || null,
+    created_at: p.created_at,
+    likes: likesByPost.get(p.id) || 0,
+    comments: commentsByPost.get(p.id) || 0,
+    views: viewsByPost.get(p.id) || 0,
+    score: (likesByPost.get(p.id) || 0) * 3 + (commentsByPost.get(p.id) || 0) * 2 + (viewsByPost.get(p.id) || 0) * 0.1
+  }));
+
+  const recentPosts = enrichedPosts.filter(p => p.created_at >= sevenDaysAgoISO);
+  const totalLikes = enrichedPosts.reduce((s, p) => s + p.likes, 0);
+  const totalComments = enrichedPosts.reduce((s, p) => s + p.comments, 0);
+  const totalViews = enrichedPosts.reduce((s, p) => s + p.views, 0);
+  const weekLikes = recentPosts.reduce((s, p) => s + p.likes, 0);
+  const weekComments = recentPosts.reduce((s, p) => s + p.comments, 0);
+  const weekViews = recentPosts.reduce((s, p) => s + p.views, 0);
+  const newSubs7d = subs.filter(s => s.created_at >= sevenDaysAgoISO).length;
+
+  // Top 5 posts by engagement score
+  const topPosts = enrichedPosts.slice().sort((a, b) => b.score - a.score).slice(0, 5);
+
+  return {
+    totals: {
+      subscribers: totalSubs,
+      posts: posts.length,
+      likes: totalLikes,
+      comments: totalComments,
+      views: totalViews
+    },
+    week: {
+      new_subscribers: newSubs7d,
+      posts: recentPosts.length,
+      likes: weekLikes,
+      comments: weekComments,
+      views: weekViews
+    },
+    daily_growth: dailySeries,
+    top_posts: topPosts
+  };
 }
 
 function subscribe(steamId, publicId) {
@@ -2026,6 +2212,82 @@ function adminStats() {
 }
 
 // ----- events (lightweight log) -----
+// Notifications — created when someone interacts with the user's content.
+// Self-notifications (actor === recipient) are silently dropped.
+function createNotification({ recipient, actor, kind, data }) {
+  if (!recipient || recipient === actor) return null; // never notify yourself
+  const created_at = nowIso();
+  const json = data ? JSON.stringify(data) : null;
+  if (useSqlite()) {
+    // De-dupe: same (recipient, actor, kind, data_json) within last 30 seconds → ignore (prevents spam)
+    const since = new Date(Date.now() - 30000).toISOString();
+    const dup = openSqlite().prepare(
+      `SELECT id FROM notifications
+       WHERE recipient_steam_id = ? AND actor_steam_id = ? AND kind = ?
+       AND IFNULL(data_json,'') = IFNULL(?,'') AND created_at > ?`
+    ).get(recipient, actor || null, kind, json, since);
+    if (dup) return null;
+    const info = openSqlite().prepare(
+      `INSERT INTO notifications (recipient_steam_id, actor_steam_id, kind, data_json, created_at) VALUES (?,?,?,?,?)`
+    ).run(recipient, actor || null, kind, json, created_at);
+    return { id: Number(info.lastInsertRowid), created_at };
+  }
+  const state = readFallback();
+  if (!state.notifications) state.notifications = [];
+  // De-dupe (same logic)
+  const cutoff = Date.now() - 30000;
+  const dup = state.notifications.find(n =>
+    n.recipient_steam_id === recipient && n.actor_steam_id === actor &&
+    n.kind === kind && (n.data_json || '') === (json || '') &&
+    Date.parse(n.created_at) > cutoff);
+  if (dup) return null;
+  const id = (state.notifications.reduce((m, n) => Math.max(m, n.id || 0), 0) || 0) + 1;
+  state.notifications.push({ id, recipient_steam_id: recipient, actor_steam_id: actor,
+    kind, data_json: json, created_at, read_at: null });
+  writeFallback(state);
+  return { id, created_at };
+}
+
+function listNotifications(recipient, limit = 50) {
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      `SELECT * FROM notifications WHERE recipient_steam_id = ?
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(recipient, limit);
+  }
+  return (readFallback().notifications || [])
+    .filter(n => n.recipient_steam_id === recipient)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    .slice(0, limit);
+}
+
+function countUnreadNotifications(recipient) {
+  if (useSqlite()) {
+    const r = openSqlite().prepare(
+      `SELECT COUNT(*) AS n FROM notifications WHERE recipient_steam_id = ? AND read_at IS NULL`
+    ).get(recipient);
+    return r?.n || 0;
+  }
+  return (readFallback().notifications || [])
+    .filter(n => n.recipient_steam_id === recipient && !n.read_at).length;
+}
+
+function markNotificationsRead(recipient) {
+  const now = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(
+      `UPDATE notifications SET read_at = ? WHERE recipient_steam_id = ? AND read_at IS NULL`
+    ).run(now, recipient);
+  } else {
+    const state = readFallback();
+    for (const n of (state.notifications || [])) {
+      if (n.recipient_steam_id === recipient && !n.read_at) n.read_at = now;
+    }
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
 function logEvent(kind, steamId = null, data = null) {
   if (useSqlite()) {
     openSqlite().prepare(`INSERT INTO events (ts, kind, steam_id, data_json) VALUES (?,?,?,?)`)
@@ -2067,7 +2329,7 @@ module.exports = {
   // common
   nowIso, uuid,
   // users
-  upsertUser, getUser, searchUsers, touchLastSeen, getLastSeen,
+  upsertUser, getUser, searchUsers, searchPosts, searchPublics, touchLastSeen, getLastSeen,
   // sessions
   createSession, getSession, deleteSession,
   // inventory
@@ -2084,7 +2346,7 @@ module.exports = {
   countRecentVotes, aggregateReputation, REP_CATEGORIES,
   // feed
   listPublics, getPublic, createPublic, updatePublic, countPublicsByOwner,
-  createPost, getPost, updatePost, listPosts, pinPost, unpinPost,
+  createPost, getPost, updatePost, listPosts, listPostsByAuthor, listCommentsByAuthor, pinPost, unpinPost,
   softDeleteMessage,
   setPostPoll, getPostPoll, voteOnPoll,
   getMessageReactions, toggleMessageReaction,
@@ -2092,7 +2354,7 @@ module.exports = {
   viewPost, countViews, attachPostStats,
   addComment, deleteComment, getComment, listComments, countComments,
   recommendFriends,
-  listSubscriptions, countSubscribers, subscribe, unsubscribe,
+  listSubscriptions, countSubscribers, getPublicStats, subscribe, unsubscribe,
   // friends / blocks
   friendStatus, sendFriendRequest, acceptFriendRequest, removeFriend,
   listFriends, areFriends, blockUser, unblockUser, listBlocks, isBlocked, eitherBlocked,
@@ -2107,5 +2369,6 @@ module.exports = {
   addPublicEditor, removePublicEditor, listPublicEditors, isPublicEditor,
   deletePost, deletePublic, setPublicVerified, adminStats,
   // events
+  createNotification, listNotifications, countUnreadNotifications, markNotificationsRead,
   logEvent, storageHealth
 };

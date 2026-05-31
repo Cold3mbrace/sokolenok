@@ -1412,6 +1412,44 @@ async function handleApi(req, res, pathname, query) {
     }
   }
 
+  // List my notifications. GET marks them all as read.
+  if (pathname === '/api/notifications' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const rows = db.listNotifications(me, 50);
+    // Hydrate with actor profile info
+    const out = [];
+    for (const n of rows) {
+      let actor = null;
+      if (n.actor_steam_id) {
+        try { actor = await fetchProfile(n.actor_steam_id); } catch (_) {}
+      }
+      let data = null;
+      if (n.data_json) { try { data = JSON.parse(n.data_json); } catch (_) {} }
+      out.push({
+        id: n.id, kind: n.kind, data,
+        actor: actor ? {
+          steam_id: n.actor_steam_id,
+          name: actor.personaname || n.actor_steam_id,
+          avatar: actor.avatar || null,
+          role: db.getUserRole(n.actor_steam_id)
+        } : (n.actor_steam_id ? { steam_id: n.actor_steam_id, name: n.actor_steam_id } : null),
+        created_at: n.created_at,
+        read: !!n.read_at
+      });
+    }
+    // Mark unread as read after delivering them
+    db.markNotificationsRead(me);
+    return sendJson(res, 200, { ok: true, notifications: out });
+  }
+
+  // Quick count for badge — no side effects
+  if (pathname === '/api/notifications/count' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 200, { ok: true, unread: 0 });
+    return sendJson(res, 200, { ok: true, unread: db.countUnreadNotifications(me) });
+  }
+
   if (pathname === '/api/me') {
     const steamid = getRequestSteamId(req);
     if (!steamid) return sendJson(res, 200, { logged_in: false, profile: null, settings: null });
@@ -1614,9 +1652,44 @@ async function handleApi(req, res, pathname, query) {
   // Search players by persona name (among users who logged in here at least once)
   if (pathname === '/api/search') {
     const q = (query.get('q') || '').trim();
-    if (q.length < 2) return sendJson(res, 200, { ok: true, results: [] });
-    const results = db.searchUsers(q, 20);
-    return sendJson(res, 200, { ok: true, results });
+    const kind = query.get('kind') || 'all';
+    if (q.length < 2) return sendJson(res, 200, { ok: true, users: [], posts: [], publics: [], results: [] });
+    const out = { ok: true };
+    if (kind === 'all' || kind === 'users') {
+      out.users = db.searchUsers(q, kind === 'users' ? 30 : 6);
+    }
+    if (kind === 'all' || kind === 'publics') {
+      const pubs = db.searchPublics(q, kind === 'publics' ? 30 : 6);
+      out.publics = pubs.map(p => ({
+        id: p.id, name: p.name, description: p.description, avatar: p.avatar,
+        verified: !!p.verified
+      }));
+    }
+    if (kind === 'all' || kind === 'posts') {
+      const posts = db.searchPosts(q, kind === 'posts' ? 30 : 6);
+      out.posts = posts.map(p => {
+        const pub = db.getPublic(p.public_id);
+        const lower = (p.body || '').toLowerCase();
+        const idx = lower.indexOf(q.toLowerCase());
+        let snippet = '';
+        if (idx >= 0) {
+          const start = Math.max(0, idx - 40);
+          const end = Math.min(p.body.length, idx + q.length + 60);
+          snippet = (start > 0 ? '…' : '') + p.body.slice(start, end) + (end < p.body.length ? '…' : '');
+        } else {
+          snippet = (p.body || '').slice(0, 120);
+        }
+        return {
+          id: p.id, title: p.title, snippet,
+          public_id: p.public_id,
+          public_name: pub?.name || p.public_id,
+          public_avatar: pub?.avatar || null,
+          created_at: p.created_at
+        };
+      });
+    }
+    out.results = out.users || [];
+    return sendJson(res, 200, out);
   }
 
   if (pathname === '/api/resolve') {
@@ -1662,13 +1735,48 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, presence: out });
   }
 
+  if (pathname.match(/^\/api\/profile\/\d{17}\/activity$/)) {
+    const steamid = pathname.split('/')[3];
+    const posts = db.listPostsByAuthor(steamid, 30);
+    const comments = db.listCommentsByAuthor(steamid, 30);
+    const items = [];
+    for (const p of posts) {
+      const pub = db.getPublic(p.public_id);
+      items.push({
+        kind: 'post',
+        post_id: p.id, public_id: p.public_id,
+        public_name: pub?.name || p.public_id,
+        public_avatar: pub?.avatar || null,
+        title: p.title, body: (p.body || '').slice(0, 240),
+        image: p.image, created_at: p.created_at
+      });
+    }
+    for (const c of comments) {
+      const pub = c.post_public_id ? db.getPublic(c.post_public_id) : null;
+      items.push({
+        kind: 'comment',
+        post_id: c.post_id, public_id: c.post_public_id,
+        public_name: pub?.name || c.post_public_id || '',
+        public_avatar: pub?.avatar || null,
+        post_title: c.post_title || null,
+        body: (c.body || '').slice(0, 240),
+        created_at: c.created_at
+      });
+    }
+    items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    return sendJson(res, 200, { ok: true, steamid, items: items.slice(0, 40) });
+  }
+
   if (pathname.startsWith('/api/profile/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length).split('/')[0] || '').trim();
     if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
     const profile = await fetchProfile(steamid);
     db.upsertUser(profile);
     const presence = buildPresence(steamid, profile);
-    return sendJson(res, 200, { ok: true, profile, presence });
+    // Attach cover_url from user_settings (per-user banner image, optional)
+    const userSettings = db.getSettings(steamid);
+    const cover_url = userSettings?.cover_url || null;
+    return sendJson(res, 200, { ok: true, profile, presence, cover_url });
   }
 
   if (pathname.startsWith('/api/inventory/history')) {
@@ -1934,12 +2042,31 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, publics, subscriptions: subs });
   }
 
+  // Public stats — only the owner (or editor/moderator) can see analytics
+  if (pathname.startsWith('/api/publics/') && pathname.endsWith('/stats')) {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const pid = decodeURIComponent(pathname.slice('/api/publics/'.length).split('/')[0] || '').trim();
+    const pub = db.getPublic(pid);
+    if (!pub) return sendJson(res, 404, { ok: false, error: 'not-found' });
+    const allowed = pub.owner_steam_id === me || db.isPublicEditor(pid, me) || canModerate(me);
+    if (!allowed) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    return sendJson(res, 200, { ok: true, stats: db.getPublicStats(pid) });
+  }
+
   if (pathname.startsWith('/api/publics/') && pathname.endsWith('/subscribe')) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const pid = decodeURIComponent(pathname.slice('/api/publics/'.length).split('/')[0] || '').trim();
-    if (!db.getPublic(pid)) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
-    if (req.method === 'POST') { db.subscribe(me, pid); return sendJson(res, 200, { ok: true, subscribed: true }); }
+    const pub = db.getPublic(pid);
+    if (!pub) return sendJson(res, 404, { ok: false, error: 'no-such-public' });
+    if (req.method === 'POST') {
+      db.subscribe(me, pid);
+      // Notify owner (skipped silently if me === owner)
+      db.createNotification({ recipient: pub.owner_steam_id, actor: me, kind: 'subscribe',
+        data: { public_id: pid, public_name: pub.name } });
+      return sendJson(res, 200, { ok: true, subscribed: true });
+    }
     if (req.method === 'DELETE') { db.unsubscribe(me, pid); return sendJson(res, 200, { ok: true, subscribed: false }); }
     return sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
   }
@@ -2068,7 +2195,13 @@ async function handleApi(req, res, pathname, query) {
     if (action === 'like') {
       if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
       if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
-      if (req.method === 'POST') { db.likePost(postId, me); return sendJson(res, 200, { ok: true, liked: true, likes: db.countLikes(postId) }); }
+      if (req.method === 'POST') {
+        db.likePost(postId, me);
+        // Notify author (de-dupes itself if liked/unliked quickly)
+        db.createNotification({ recipient: post.author_steam_id, actor: me, kind: 'post_like',
+          data: { post_id: post.id, public_id: post.public_id, post_title: post.title } });
+        return sendJson(res, 200, { ok: true, liked: true, likes: db.countLikes(postId) });
+      }
       if (req.method === 'DELETE') { db.unlikePost(postId, me); return sendJson(res, 200, { ok: true, liked: false, likes: db.countLikes(postId) }); }
     }
     // View (idempotent)
@@ -2099,6 +2232,8 @@ async function handleApi(req, res, pathname, query) {
         const c = db.addComment(postId, me, text);
         let p = null; try { p = await fetchProfile(me); } catch (_) {}
         db.logEvent('comment', me, { post_id: post.id });
+        db.createNotification({ recipient: post.author_steam_id, actor: me, kind: 'post_comment',
+          data: { post_id: post.id, public_id: post.public_id, post_title: post.title, snippet: text.slice(0, 80) } });
         return sendJson(res, 200, { ok: true, comment: {
           id: c.id, author_steam_id: me, body: c.body, created_at: c.created_at,
           author_name: p?.personaname || me, author_avatar: p?.avatar || null,
@@ -2396,12 +2531,14 @@ async function handleApi(req, res, pathname, query) {
       const r = db.sendFriendRequest(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       db.logEvent('friend-request', me, { other });
+      db.createNotification({ recipient: other, actor: me, kind: 'friend_request', data: {} });
       return sendJson(res, 200, { ok: true, status: db.friendStatus(me, other) });
     }
     if (req.method === 'POST' && action === 'accept') {
       const r = db.acceptFriendRequest(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       db.logEvent('friend-accept', me, { other });
+      db.createNotification({ recipient: other, actor: me, kind: 'friend_accept', data: {} });
       return sendJson(res, 200, { ok: true, status: 'friends' });
     }
     if (req.method === 'DELETE') {
@@ -2597,6 +2734,11 @@ async function handleApi(req, res, pathname, query) {
       if (body.show_activity !== undefined) {
         allowed.show_activity = body.show_activity ? 1 : 0;
       }
+      if (body.cover_url !== undefined) {
+        // Allow URLs from our uploads dir or full HTTPS URLs, max 500 chars
+        const raw = body.cover_url ? String(body.cover_url).trim().slice(0, 500) : '';
+        allowed.cover_url = raw || null;
+      }
       const next = db.setSettings(steamid, allowed);
       db.logEvent('settings-update', steamid, allowed);
       return sendJson(res, 200, { ok: true, settings: next });
@@ -2756,7 +2898,8 @@ function serveStatic(req, res, pathname) {
     '/admin': 'admin.html',
     '/me': 'me.html',
     '/friends': 'friends.html',
-    '/communities': 'communities.html'
+    '/communities': 'communities.html',
+    '/notifications': 'notifications.html'
   };
   const rel = routeMap[pathname] ? `/${routeMap[pathname]}` : pathname;
   const file = safeJoin(PUBLIC_DIR, rel);
