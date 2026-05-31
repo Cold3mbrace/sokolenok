@@ -123,7 +123,10 @@ const api = {
   updatePublic(id, data) { return this.request(`/api/publics/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }); },
   deletePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
   createPost(data) { return this.request('/api/posts', { method: 'POST', body: JSON.stringify(data) }); },
+  updatePost(id, data) { return this.request(`/api/posts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); },
   deletePost(id) { return this.request(`/api/posts/${id}`, { method: 'DELETE' }); },
+  votePoll(id, option) { return this.request(`/api/posts/${id}/vote`, { method: 'POST', body: JSON.stringify({ option }) }); },
+  reactToMessage(msgId, emoji) { return this.request(`/api/messages/reactions/${msgId}`, { method: 'POST', body: JSON.stringify({ emoji }) }); },
   likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
   unlikePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'DELETE' }); },
   viewPost(id) { return this.request(`/api/posts/${id}/view`, { method: 'POST' }); },
@@ -506,7 +509,6 @@ async function refreshUnreadBadge() {
   try {
     const r = await api.conversations();
     const n = r?.unread_total || 0;
-    // Play notification sound if unread count increased (but skip first run)
     if (typeof _lastUnread === 'number' && n > _lastUnread) {
       playNotifySound();
     }
@@ -517,9 +519,49 @@ async function refreshUnreadBadge() {
       if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = ''; }
       else { badge.style.display = 'none'; }
     }
+    updateFaviconBadge(n);
+    updateTabTitle(n);
   } catch (_) { /* ignore */ }
 }
 let _lastUnread = null;
+
+// Update browser tab title with unread count — visible when tab is in background
+let _origTitle = null;
+function updateTabTitle(n) {
+  if (_origTitle == null) _origTitle = document.title.replace(/^\(\d+\)\s|\u200B/g, '');
+  document.title = n > 0 ? `(${n > 99 ? '99+' : n}) ${_origTitle}` : _origTitle;
+}
+
+// Draw a red dot on top of the favicon — visible in browser tabs even when minimized
+let _faviconBase = null;
+function updateFaviconBadge(n) {
+  try {
+    const link = document.querySelector('link[rel="icon"]');
+    if (!link) return;
+    if (_faviconBase == null) _faviconBase = link.getAttribute('href');
+    if (n <= 0) { link.setAttribute('href', _faviconBase); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, 64, 64);
+      // Red dot bottom-right
+      ctx.beginPath();
+      ctx.arc(48, 48, 14, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff3b30';
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      try {
+        link.setAttribute('href', c.toDataURL('image/png'));
+      } catch (_) { /* CORS — leave default */ }
+    };
+    img.src = _faviconBase;
+  } catch (_) { /* ignore */ }
+}
 
 // Generated notification "tink" using Web Audio API — no audio file needed.
 // Note: browsers block autoplay until first user interaction; first ping may be silent.
@@ -4259,23 +4301,79 @@ async function renderPublicPage(publicId, me) {
           el('div', { class: 'feed-date' }, post.created_at ? relDate(post.created_at) : '')
         )
       ),
-      (p.is_owner || me.is_admin) ? el('button', { class: 'feed-del', type: 'button', title: 'Удалить',
-        onclick: async () => { if (confirm('Удалить пост?')) { await api.deletePost(post.id); toast.ok('Удалён'); renderPublicPage(publicId, me); } },
-        html: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' }) : null
+      (function () {
+        const canEdit = me?.steamid && post.author_steam_id === me.steamid;
+        const canDelete = p.is_owner || me.is_admin || canEdit;
+        if (!canEdit && !canDelete) return null;
+        const actions = el('div', { class: 'feed-actions' });
+        if (canEdit) {
+          actions.appendChild(el('button', { class: 'feed-edit', type: 'button', title: 'Редактировать',
+            onclick: () => openCreatePostModal({ id: post.public_id, name: p.name }, {
+              post_id: post.id, title: post.title, body: post.body, link: post.link, image: post.image, poll: post.poll
+            }),
+            html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' }));
+        }
+        if (canDelete) {
+          actions.appendChild(el('button', { class: 'feed-del', type: 'button', title: 'Удалить',
+            onclick: async () => { if (confirm('Удалить пост?')) { await api.deletePost(post.id); toast.ok('Удалён'); renderPublicPage(publicId, me); } },
+            html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' }));
+        }
+        return actions;
+      })()
     ));
     if (post.title) card.appendChild(el('div', { class: 'feed-item-title' }, post.title));
-    if (post.body) { const b = buildPostBody(post.body, false); if (b) card.appendChild(b); }
     if (post.image) {
       const img = el('img', { class: 'feed-item-img', src: post.image, alt: '', loading: 'lazy' });
       img.onerror = function() { this.remove(); };
       card.appendChild(img);
     }
+    if (post.body) { const b = buildPostBody(post.body, false); if (b) card.appendChild(b); }
+    if (post.poll) card.appendChild(buildPollCard(post.id, post.poll, me));
+    if (post.edited_at) card.appendChild(el('div', { class: 'feed-edited' }, '✎ изменено'));
     if (post.link) card.appendChild(el('a', { class: 'feed-item-link', href: post.link, target: '_blank', rel: 'noopener' }, 'Перейти по ссылке →'));
     const pf = buildPostFooter({ post_id: post.id, public_id: post.public_id, likes: post.likes, views: post.views, comments: post.comments, liked: post.liked }, me);
     if (pf) card.appendChild(pf);
     markPostViewed(post.id);
     list.appendChild(card);
   }
+}
+
+// Render a poll attached to a post — shows percentages, lets user vote (single choice)
+function buildPollCard(postId, poll, me) {
+  if (!poll || !Array.isArray(poll.options)) return null;
+  const card = el('div', { class: 'poll-card' });
+  if (poll.question) card.appendChild(el('div', { class: 'poll-question' }, poll.question));
+  const foot = el('div', { class: 'poll-foot' });
+  const render = (data) => {
+    card.querySelectorAll('.poll-option').forEach(n => n.remove());
+    const totalV = data.options.reduce((s, o) => s + (o.votes?.length || 0), 0);
+    let myV = -1;
+    if (me?.steamid) data.options.forEach((o, i) => { if ((o.votes || []).includes(me.steamid)) myV = i; });
+    data.options.forEach((o, i) => {
+      const count = o.votes?.length || 0;
+      const pct = totalV ? Math.round(count * 100 / totalV) : 0;
+      const row = el('button', { class: 'poll-option' + (myV === i ? ' voted' : ''), type: 'button',
+        onclick: async () => {
+          if (!me?.logged_in) { toast.warn('Войдите чтобы голосовать'); return; }
+          const r = await api.votePoll(postId, i).catch(() => ({ ok: false }));
+          if (r.ok && r.poll) render(r.poll);
+        }
+      },
+        el('div', { class: 'poll-option-fill', style: { width: pct + '%' } }),
+        el('div', { class: 'poll-option-content' },
+          el('span', { class: 'poll-option-text' }, o.text),
+          el('span', { class: 'poll-option-pct' }, totalV ? (pct + '% · ' + count) : '0')
+        )
+      );
+      card.insertBefore(row, foot);
+    });
+    foot.textContent = totalV
+      ? `${totalV} ${plural(totalV, ['голос', 'голоса', 'голосов'])}` + (myV >= 0 ? ' · вы проголосовали' : '')
+      : 'Будьте первым кто проголосует';
+  };
+  card.appendChild(foot);
+  render(poll);
+  return card;
 }
 
 // Build a post-body node with VK/Telegram-style "show more" for long content.
@@ -4363,26 +4461,90 @@ function buildPostFooter(item, me) {
 
   const footer = el('div', { class: 'post-footer' }, heart, commentBtn, shareBtn, eye);
 
-  // Comment panel (hidden initially)
+  // Two panels: a compact preview (always visible if comments exist) and a full panel (toggled)
+  const preview = el('div', { class: 'comments-preview', style: { display: 'none' } });
   const panel = el('div', { class: 'comments-panel', style: { display: 'none' } });
-  commentBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    if (panel.style.display === 'none') {
+
+  // Auto-load preview if there are any comments. Don't show spinner — silently fill.
+  const loadPreview = async () => {
+    if (!item.comments || item.comments < 1) { preview.style.display = 'none'; return; }
+    const r = await api.listComments(item.post_id).catch(() => ({ ok: false, comments: [] }));
+    if (!r.ok || !r.comments?.length) { preview.style.display = 'none'; return; }
+    // Also fix stale count from cached feed payload
+    commentBtn.querySelector('.post-act-n').textContent = r.comments.length;
+    renderCommentsPreview(preview, r.comments, item.post_id, me, () => {
+      // After user expands → switch to full panel
+      preview.style.display = 'none';
       panel.style.display = '';
-      await loadCommentsInto(panel, item.post_id, me, () => {
-        // Update count badge on add/delete
+      loadCommentsInto(panel, item.post_id, me, () => {
         const n = panel.querySelectorAll('.comment-row').length;
         commentBtn.querySelector('.post-act-n').textContent = n;
       });
-    } else {
+    });
+    preview.style.display = '';
+  };
+  // Defer load to avoid spamming /api/posts/N/comments for every post at once
+  requestIdleCallback ? requestIdleCallback(loadPreview, { timeout: 1500 }) : setTimeout(loadPreview, 300);
+
+  commentBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    // If full panel is open → close it (back to preview)
+    if (panel.style.display !== 'none') {
       panel.style.display = 'none';
+      loadPreview();
+      return;
     }
+    // Otherwise → open full panel
+    preview.style.display = 'none';
+    panel.style.display = '';
+    await loadCommentsInto(panel, item.post_id, me, () => {
+      const n = panel.querySelectorAll('.comment-row').length;
+      commentBtn.querySelector('.post-act-n').textContent = n;
+    });
   });
 
   const wrap = el('div');
   wrap.appendChild(footer);
+  wrap.appendChild(preview);
   wrap.appendChild(panel);
   return wrap;
+}
+
+// Render compact preview: last 3 comments + "Show all N" link.
+// Tapping the link triggers `onExpand()` to swap into full panel.
+function renderCommentsPreview(container, comments, postId, me, onExpand) {
+  container.innerHTML = '';
+  const total = comments.length;
+  const last3 = comments.slice(-3); // chronological, last 3
+  if (total > 3) {
+    container.appendChild(el('button', { class: 'comments-show-all', type: 'button',
+      onclick: (e) => { e.stopPropagation(); onExpand(); } },
+      `Показать все ${total} ` + plural(total, ['комментарий', 'комментария', 'комментариев'])));
+  }
+  for (const c of last3) {
+    const ava = el('div', { class: 'comment-ava' });
+    if (c.author_avatar) {
+      const img = el('img', { src: c.author_avatar, alt: '' });
+      img.onerror = function () { this.remove(); ava.textContent = (c.author_name || '?').slice(0, 1).toUpperCase(); };
+      ava.appendChild(img);
+    } else ava.textContent = (c.author_name || '?').slice(0, 1).toUpperCase();
+    container.appendChild(el('div', { class: 'comment-row' },
+      ava,
+      el('div', { class: 'comment-body' },
+        el('div', { class: 'comment-head' },
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          roleBadge(c.author_role),
+          el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
+        ),
+        el('div', { class: 'comment-text' }, c.body)
+      )
+    ));
+  }
+  // "Write a comment" link to expand full panel
+  if (me?.logged_in) {
+    container.appendChild(el('button', { class: 'comments-write-link', type: 'button',
+      onclick: (e) => { e.stopPropagation(); onExpand(); } }, 'Написать комментарий…'));
+  }
 }
 
 async function loadCommentsInto(panel, postId, me, onChange) {
@@ -4588,12 +4750,14 @@ function paintFeedList(r) {
     ));
 
     if (it.title) card.appendChild(el('div', { class: 'feed-item-title' }, it.title));
-    if (it.body) { const b = buildPostBody(it.body, it.kind === 'news'); if (b) card.appendChild(b); }
     if (it.image) {
       const img = el('img', { class: 'feed-item-img', src: it.image, alt: '', loading: 'lazy' });
       img.onerror = function() { this.remove(); };
       card.appendChild(img);
     }
+    if (it.body) { const b = buildPostBody(it.body, it.kind === 'news'); if (b) card.appendChild(b); }
+    if (it.poll) card.appendChild(buildPollCard(it.post_id, it.poll, window.__me));
+    if (it.edited_at) card.appendChild(el('div', { class: 'feed-edited' }, '✎ изменено'));
     if (it.link) {
       card.appendChild(el('a', { class: 'feed-item-link', href: it.link, target: '_blank', rel: 'noopener' },
         'Читать полностью ',
@@ -4747,25 +4911,111 @@ function openCreatePublicModal() {
   }, 'Создать', { guard: true });
 }
 
-// Modal: create a post in a public
-function openCreatePostModal(pub) {
+// Modal: create or edit a post.
+// If `existing` is provided → edit mode. Otherwise → create.
+function openCreatePostModal(pub, existing) {
+  const isEdit = !!existing;
   const titleInput = el('input', { class: 'modal-input', placeholder: 'Заголовок (необязательно)', maxlength: '200' });
   const bodyInput = el('textarea', { class: 'modal-input', rows: '5', placeholder: 'Текст поста…', maxlength: '5000' });
   const linkInput = el('input', { class: 'modal-input', placeholder: 'Ссылка (необязательно)', maxlength: '500' });
-  const img = imageUploadField('Картинка', '');
-  openModal(`Новый пост · ${pub.name}`, [
+  const img = imageUploadField('Картинка', existing?.image || '');
+  if (isEdit) {
+    titleInput.value = existing.title || '';
+    bodyInput.value = existing.body || '';
+    linkInput.value = existing.link || '';
+  }
+
+  // Poll builder
+  const pollBox = el('div', { class: 'poll-builder', style: { display: 'none' } });
+  let pollOpts = []; // array of {input element}
+  const renderPollOpts = () => {
+    const list = pollBox.querySelector('.poll-builder-opts');
+    if (!list) return;
+    list.innerHTML = '';
+    pollOpts.forEach((o, i) => {
+      const row = el('div', { class: 'poll-builder-row' },
+        o.input,
+        el('button', { class: 'btn btn-sm btn-ghost', type: 'button', onclick: () => {
+          if (pollOpts.length <= 2) { toast.warn('Минимум 2 варианта'); return; }
+          pollOpts.splice(i, 1); renderPollOpts();
+        }, html: '×' })
+      );
+      list.appendChild(row);
+    });
+  };
+  const addPollOpt = (value = '') => {
+    if (pollOpts.length >= 6) { toast.warn('Максимум 6 вариантов'); return; }
+    const inp = el('input', { class: 'modal-input', placeholder: `Вариант ${pollOpts.length + 1}`, maxlength: '80', value });
+    pollOpts.push({ input: inp });
+    renderPollOpts();
+  };
+  const pollQuestion = el('input', { class: 'modal-input', placeholder: 'Вопрос опроса', maxlength: '200' });
+  pollBox.appendChild(el('label', { class: 'modal-label' }, 'Опрос'));
+  pollBox.appendChild(pollQuestion);
+  pollBox.appendChild(el('div', { class: 'poll-builder-opts' }));
+  pollBox.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+    style: { marginTop: '6px' }, onclick: () => addPollOpt() }, '+ Вариант'));
+
+  // If existing has a poll, pre-fill
+  if (isEdit && existing.poll) {
+    pollBox.style.display = '';
+    pollQuestion.value = existing.poll.question || '';
+    for (const o of (existing.poll.options || [])) addPollOpt(o.text || '');
+  }
+
+  const togglePoll = el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+    style: { marginTop: '6px' }, onclick: () => {
+      if (pollBox.style.display === 'none') {
+        pollBox.style.display = '';
+        if (pollOpts.length === 0) { addPollOpt(); addPollOpt(); }
+        togglePoll.textContent = '− Убрать опрос';
+      } else {
+        pollBox.style.display = 'none';
+        pollOpts = []; pollQuestion.value = '';
+        renderPollOpts();
+        togglePoll.textContent = '+ Добавить опрос';
+      }
+    } }, isEdit && existing.poll ? '− Убрать опрос' : '+ Добавить опрос');
+
+  openModal(isEdit ? 'Редактировать пост' : `Новый пост · ${pub.name}`, [
     titleInput, bodyInput,
     el('label', { class: 'modal-label' }, 'Ссылка'), linkInput,
-    img.node
+    img.node,
+    togglePoll, pollBox
   ], async () => {
     const body = bodyInput.value.trim();
     const title = titleInput.value.trim();
     if (!body && !title) { toast.warn('Введите текст или заголовок'); return false; }
-    const res = await api.createPost({ public_id: pub.id, title, body, link: linkInput.value.trim(), image: img.getUrl() }).catch(() => ({ ok: false }));
-    if (res.ok) { toast.ok('Опубликовано'); location.reload(); return true; }
-    toast.err('Не удалось опубликовать');
-    return false;
-  }, 'Опубликовать', { guard: true });
+
+    // Build poll payload if present
+    let poll = null;
+    if (pollBox.style.display !== 'none' && pollOpts.length >= 2) {
+      const opts = pollOpts.map(o => o.input.value.trim()).filter(Boolean);
+      if (opts.length < 2) { toast.warn('Опрос: минимум 2 варианта с текстом'); return false; }
+      poll = { question: pollQuestion.value.trim(), options: opts.map(t => ({ text: t, votes: [] })) };
+    } else if (isEdit && existing.poll && pollBox.style.display === 'none') {
+      // Remove poll from existing post
+      poll = null;
+    }
+
+    const payload = { title, body, link: linkInput.value.trim(), image: img.getUrl() };
+    if (isEdit) {
+      // For edits, only send poll if it changed (or removed)
+      if (poll !== null) payload.poll = poll;
+      else if (existing.poll) payload.poll = null;
+      const res = await api.updatePost(existing.post_id || existing.id, payload).catch(() => ({ ok: false }));
+      if (res.ok) { toast.ok('Сохранено'); location.reload(); return true; }
+      toast.err('Не удалось сохранить');
+      return false;
+    } else {
+      payload.public_id = pub.id;
+      if (poll) payload.poll = poll;
+      const res = await api.createPost(payload).catch(() => ({ ok: false }));
+      if (res.ok) { toast.ok('Опубликовано'); location.reload(); return true; }
+      toast.err('Не удалось опубликовать');
+      return false;
+    }
+  }, isEdit ? 'Сохранить' : 'Опубликовать', { guard: !isEdit });
 }
 
 // Image upload field: button + hidden file input + preview. Returns { node, getUrl }.
@@ -4939,11 +5189,22 @@ function relDate(iso) {
 }
 
 // Show a small popup menu at (x,y) with Reply / Forward actions — triggered by long-press on mobile.
-function openMessageActionMenu(x, y, { onReply, onForward }) {
+function openMessageActionMenu(x, y, { onReply, onForward, onReact }) {
   document.querySelectorAll('.msgr-action-menu, .msgr-action-menu-backdrop').forEach(n => n.remove());
   const backdrop = el('div', { class: 'msgr-action-menu-backdrop' });
   const menu = el('div', { class: 'msgr-action-menu' });
   const close = () => { backdrop.remove(); menu.remove(); };
+
+  // Reactions row — quick emoji picker at the top
+  if (onReact) {
+    const reactRow = el('div', { class: 'msgr-action-react-row' });
+    for (const e of ['👍', '❤️', '😂', '😮', '😢', '🔥']) {
+      const b = el('button', { type: 'button', class: 'msgr-action-react-btn' }, e);
+      b.addEventListener('click', () => { close(); onReact(e); });
+      reactRow.appendChild(b);
+    }
+    menu.appendChild(reactRow);
+  }
 
   const replyBtn = el('button', { type: 'button',
     html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span>Ответить</span>'
@@ -5194,8 +5455,15 @@ async function pageMessages() {
         bubble.appendChild(el('div', { class: 'msgr-bubble-text' }, m.text));
       }
       bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
-      // Action buttons (reply, forward) — visible on hover/long-press
+      // Reactions chips (below bubble text). Filled by renderReactions helper.
+      const reactionsEl = el('div', { class: 'msgr-reactions' });
+      bubble.appendChild(reactionsEl);
+      renderReactionsInto(reactionsEl, m.id, m.reactions || {}, window.__me);
+      // Action buttons (reply, forward, react) — visible on hover (desktop) / always (mobile)
       const actions = el('div', { class: 'msgr-bubble-actions' },
+        el('button', { class: 'msgr-bubble-act', type: 'button', title: 'Реакция',
+          'data-act': 'react', 'data-mid': String(m.id || ''),
+          html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>' }),
         el('button', { class: 'msgr-bubble-act', type: 'button', title: 'Ответить',
           'data-act': 'reply', 'data-mid': String(m.id || ''),
           html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>' }),
@@ -5219,6 +5487,41 @@ async function pageMessages() {
   }
 
   // Render an inline attachment card (post / reply / forward)
+  // Render emoji reaction chips into a node — clickable to toggle own reaction
+  function renderReactionsInto(node, msgId, reactions, me) {
+    node.innerHTML = '';
+    const keys = Object.keys(reactions || {});
+    if (!keys.length) { node.style.display = 'none'; return; }
+    node.style.display = '';
+    for (const emoji of keys) {
+      const users = reactions[emoji] || [];
+      const mine = !!(me?.steamid && users.includes(me.steamid));
+      const chip = el('button', { class: 'msgr-react-chip' + (mine ? ' mine' : ''), type: 'button',
+        title: users.length + ' ' + plural(users.length, ['реакция', 'реакции', 'реакций'])
+      },
+        el('span', { class: 'msgr-react-emo' }, emoji),
+        el('span', { class: 'msgr-react-count' }, String(users.length))
+      );
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!me?.logged_in) { toast.warn('Войдите чтобы реагировать'); return; }
+        const r = await api.reactToMessage(msgId, emoji).catch(() => ({ ok: false }));
+        if (r.ok) renderReactionsInto(node, msgId, r.reactions, me);
+      });
+      node.appendChild(chip);
+    }
+  }
+
+  // External helper used by long-press menu: find the bubble's reactions slot and refresh it
+  function updateBubbleReactions(row, reactions) {
+    if (!row) return;
+    const slot = row.querySelector('.msgr-reactions');
+    const mid = parseInt(row.dataset.mid, 10);
+    if (slot && Number.isFinite(mid)) renderReactionsInto(slot, mid, reactions, window.__me);
+  }
+  // expose to closure
+  window.__updateBubbleReactions = updateBubbleReactions;
+
   function buildAttachmentCard(att) {
     if (!att) return null;
     if (att.missing) {
@@ -5367,6 +5670,17 @@ async function pageMessages() {
           const authorName = isMine ? 'вам' : o.name;
           if (act === 'reply') setReplyTo(mid, preview, authorName);
           else if (act === 'forward') openForwardPicker(mid);
+          else if (act === 'react') {
+            const rect = btn.getBoundingClientRect();
+            openMessageActionMenu(rect.left, rect.top, {
+              onReply: () => setReplyTo(mid, preview, authorName),
+              onForward: () => openForwardPicker(mid),
+              onReact: async (emoji) => {
+                const r = await api.reactToMessage(mid, emoji).catch(() => ({ ok: false }));
+                if (r.ok) window.__updateBubbleReactions?.(row, r.reactions);
+              }
+            });
+          }
         });
 
         // Long-press on bubble → action menu (mobile)
@@ -5390,7 +5704,11 @@ async function pageMessages() {
             const authorName = isMine ? 'вам' : o.name;
             openMessageActionMenu(pressX, pressY, {
               onReply: () => setReplyTo(mid, preview, authorName),
-              onForward: () => openForwardPicker(mid)
+              onForward: () => openForwardPicker(mid),
+              onReact: async (emoji) => {
+                const r = await api.reactToMessage(mid, emoji).catch(() => ({ ok: false }));
+                if (r.ok) window.__updateBubbleReactions?.(pressedRow, r.reactions);
+              }
             });
           }, 450);
         };
@@ -6268,6 +6586,26 @@ async function pageSettings() {
     )
   ));
 
+  // Accessibility: large font toggle (local-only, per-device)
+  const largeFontCheckbox = el('input', { type: 'checkbox', id: 'set-large-font' });
+  try { largeFontCheckbox.checked = localStorage.getItem('sok:large-font') === '1'; } catch (_) {}
+  largeFontCheckbox.addEventListener('change', () => {
+    const on = largeFontCheckbox.checked;
+    try { localStorage.setItem('sok:large-font', on ? '1' : '0'); } catch (_) {}
+    document.body.classList.toggle('large-font', on);
+    toast.ok(on ? 'Крупный шрифт включён' : 'Крупный шрифт выключен');
+  });
+  prefs.appendChild(el('div', { class: 'field' },
+    el('label', { class: 'field-label' }, 'Доступность'),
+    el('label', { class: 'check-row', style: { display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' } },
+      largeFontCheckbox,
+      el('span', null,
+        el('div', { style: { fontWeight: 600 } }, 'Крупный шрифт'),
+        el('div', { style: { fontSize: '11.5px', color: 'var(--mute)', marginTop: '2px' } },
+          'Увеличивает текст на сайте примерно на 20%. Помогает если зум недоступен. Настройка хранится локально, для этого устройства.'))
+    )
+  ));
+
   prefs.appendChild(el('div', { class: 'flex gap-1 mt-2' },
     el('button', { class: 'btn btn-primary', id: 'set-save', type: 'button' }, 'Сохранить'),
     el('button', { class: 'btn btn-ghost', id: 'set-revert', type: 'button',
@@ -6342,6 +6680,8 @@ async function pageSettings() {
 
 // ============ router (based on body[data-page]) ============
 document.addEventListener('DOMContentLoaded', () => {
+  // Restore accessibility preferences early (before paint)
+  try { if (localStorage.getItem('sok:large-font') === '1') document.body.classList.add('large-font'); } catch (_) {}
   initCookieBanner();
   const page = document.body.dataset.page;
   const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities };

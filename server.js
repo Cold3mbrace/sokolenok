@@ -1834,7 +1834,9 @@ async function handleApi(req, res, pathname, query) {
           body: p.body,
           link: p.link,
           image: p.image,
-          likes: p.likes, views: p.views, liked: p.liked,
+          likes: p.likes, views: p.views, comments: p.comments, liked: p.liked,
+          poll: p.poll_json ? (() => { try { return JSON.parse(p.poll_json); } catch (_) { return null; } })() : null,
+          edited_at: p.edited_at || null,
           created_at: p.created_at
         });
       }
@@ -1932,6 +1934,11 @@ async function handleApi(req, res, pathname, query) {
       const subs = me ? db.listSubscriptions(me) : [];
       const posts = db.listPosts({ publicIds: [pid], limit: 50 });
       db.attachPostStats(posts, me);
+      // Parse poll JSON for each post
+      for (const p of posts) {
+        if (p.poll_json) { try { p.poll = JSON.parse(p.poll_json); } catch (_) { p.poll = null; } }
+        delete p.poll_json;
+      }
       const isEditor = me === pub.owner_steam_id || db.isPublicEditor(pid, me);
       return sendJson(res, 200, { ok: true,
         public: { id: pub.id, name: pub.name, description: pub.description, avatar: pub.avatar, cover: pub.cover,
@@ -1975,6 +1982,17 @@ async function handleApi(req, res, pathname, query) {
     const image = String(body.image || '').trim().slice(0, 500) || null;
     if (!text && !title) return sendJson(res, 400, { ok: false, error: 'empty' });
     const post = db.createPost({ public_id, author_steam_id: me, title, body: text, link, image });
+    // Optional poll: { question, options: ["A","B",...] } — 2 to 6 options, each ≤80 chars
+    if (body.poll && Array.isArray(body.poll.options) && body.poll.options.length >= 2) {
+      const opts = body.poll.options.slice(0, 6).map(o => ({
+        text: String(o || '').trim().slice(0, 80),
+        votes: []
+      })).filter(o => o.text);
+      if (opts.length >= 2) {
+        const question = String(body.poll.question || '').trim().slice(0, 200);
+        db.setPostPoll(post.id, { question, options: opts, created_at: new Date().toISOString() });
+      }
+    }
     db.logEvent('post-create', me, { public_id, post_id: post.id });
     return sendJson(res, 200, { ok: true, post });
   }
@@ -2040,6 +2058,32 @@ async function handleApi(req, res, pathname, query) {
         return sendJson(res, 403, { ok: false, error: 'forbidden' });
       db.deleteComment(cid);
       return sendJson(res, 200, { ok: true });
+    }
+    // Edit post (PATCH/PUT) — only author or moderator
+    if ((req.method === 'PATCH' || req.method === 'PUT') && !action) {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      if (post.author_steam_id !== me && !canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      const body = await readJsonBody(req);
+      const patch = {};
+      if (body.title !== undefined) patch.title = body.title;
+      if (body.body !== undefined) patch.body = body.body;
+      if (body.link !== undefined) patch.link = body.link;
+      if (body.image !== undefined) patch.image = body.image;
+      const r = db.updatePost(postId, patch);
+      if (r.error) return sendJson(res, 404, { ok: false, error: r.error });
+      if (body.poll !== undefined) db.setPostPoll(postId, body.poll);
+      db.logEvent('post-edit', me, { postId });
+      return sendJson(res, 200, { ok: true, edited_at: r.edited_at });
+    }
+    // Poll vote: POST /api/posts/:id/vote  { option: N }
+    if (action === 'vote' && req.method === 'POST') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      const body = await readJsonBody(req);
+      const optionIdx = parseInt(body.option, 10);
+      if (!Number.isFinite(optionIdx)) return sendJson(res, 400, { ok: false, error: 'bad-option' });
+      const r = db.voteOnPoll(postId, me, optionIdx);
+      if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
+      return sendJson(res, 200, { ok: true, poll: r.poll });
     }
     // Delete
     if (req.method === 'DELETE' && !action) {
@@ -2354,6 +2398,26 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, conversations: enriched, unread_total: db.countUnread(me) });
   }
 
+  // Message reactions: POST /api/messages/reactions/:msgId  { emoji }
+  if (pathname.startsWith('/api/messages/reactions/') && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const msgId = parseInt(pathname.slice('/api/messages/reactions/'.length), 10);
+    if (!Number.isFinite(msgId)) return sendJson(res, 400, { ok: false, error: 'bad-id' });
+    const m = db.getMessage(msgId);
+    if (!m) return sendJson(res, 404, { ok: false, error: 'no-such-message' });
+    // Only participants can react
+    if (m.sender_steam_id !== me && m.recipient_steam_id !== me)
+      return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    const body = await readJsonBody(req);
+    // Whitelist: small set of emojis only, avoid arbitrary text
+    const allowed = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+    const emoji = String(body.emoji || '');
+    if (!allowed.includes(emoji)) return sendJson(res, 400, { ok: false, error: 'bad-emoji' });
+    const r = db.toggleMessageReaction(msgId, me, emoji);
+    return sendJson(res, 200, { ok: true, reactions: r.reactions });
+  }
+
   if (pathname.startsWith('/api/messages/')) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
@@ -2373,6 +2437,7 @@ async function handleApi(req, res, pathname, query) {
           id: m.id, from_me: m.sender_steam_id === me,
           text: decryptMessage(m.body_enc),
           attachment,
+          reactions: m.reactions_json ? (() => { try { return JSON.parse(m.reactions_json); } catch (_) { return {}; } })() : {},
           created_at: m.created_at,
           read: !!m.read_at
         });

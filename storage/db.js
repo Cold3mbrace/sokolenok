@@ -339,9 +339,15 @@ function openSqlite() {
   } catch (_) { /* best-effort */ }
   try {
     const cols = db.prepare("PRAGMA table_info(messages)").all();
-    if (!new Set(cols.map(c => c.name)).has('attachment_enc')) {
-      db.exec('ALTER TABLE messages ADD COLUMN attachment_enc TEXT');
-    }
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has('attachment_enc')) db.exec('ALTER TABLE messages ADD COLUMN attachment_enc TEXT');
+    if (!names.has('reactions_json')) db.exec('ALTER TABLE messages ADD COLUMN reactions_json TEXT');
+  } catch (_) { /* best-effort */ }
+  try {
+    const cols = db.prepare("PRAGMA table_info(posts)").all();
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has('edited_at')) db.exec('ALTER TABLE posts ADD COLUMN edited_at TEXT');
+    if (!names.has('poll_json')) db.exec('ALTER TABLE posts ADD COLUMN poll_json TEXT');
   } catch (_) { /* best-effort */ }
   return db;
 }
@@ -1767,6 +1773,98 @@ function isPublicEditor(publicId, steamId) {
   return !!(readFallback().public_editors || {})[`${publicId}:${steamId}`];
 }
 
+// Edit an existing post — only title/body/image/link can change, author/public are immutable
+function updatePost(id, patch = {}) {
+  const edited_at = nowIso();
+  if (useSqlite()) {
+    const cur = openSqlite().prepare(`SELECT * FROM posts WHERE id=?`).get(Number(id));
+    if (!cur) return { error: 'not-found' };
+    const next = {
+      title: patch.title !== undefined ? (String(patch.title || '').trim().slice(0, 200) || null) : cur.title,
+      body: patch.body !== undefined ? (String(patch.body || '').trim().slice(0, 8000) || cur.body) : cur.body,
+      link: patch.link !== undefined ? (String(patch.link || '').trim().slice(0, 500) || null) : cur.link,
+      image: patch.image !== undefined ? (String(patch.image || '').trim().slice(0, 500) || null) : cur.image
+    };
+    openSqlite().prepare(`UPDATE posts SET title=?, body=?, link=?, image=?, edited_at=? WHERE id=?`)
+      .run(next.title, next.body, next.link, next.image, edited_at, Number(id));
+    return { ok: true, edited_at };
+  }
+  const state = readFallback();
+  const p = (state.posts || []).find(x => x.id === Number(id));
+  if (!p) return { error: 'not-found' };
+  if (patch.title !== undefined) p.title = String(patch.title || '').trim().slice(0, 200) || null;
+  if (patch.body !== undefined) p.body = String(patch.body || '').trim().slice(0, 8000) || p.body;
+  if (patch.link !== undefined) p.link = String(patch.link || '').trim().slice(0, 500) || null;
+  if (patch.image !== undefined) p.image = String(patch.image || '').trim().slice(0, 500) || null;
+  p.edited_at = edited_at;
+  writeFallback(state);
+  return { ok: true, edited_at };
+}
+
+// Polls (stored as JSON on the post row): { question, options: [{text, votes: [steamId]}] }
+function setPostPoll(id, poll) {
+  const json = poll ? JSON.stringify(poll) : null;
+  if (useSqlite()) {
+    openSqlite().prepare(`UPDATE posts SET poll_json=? WHERE id=?`).run(json, Number(id));
+  } else {
+    const state = readFallback();
+    const p = (state.posts || []).find(x => x.id === Number(id));
+    if (p) { p.poll_json = json; writeFallback(state); }
+  }
+  return { ok: true };
+}
+
+function getPostPoll(id) {
+  let row = null;
+  if (useSqlite()) row = openSqlite().prepare(`SELECT poll_json FROM posts WHERE id=?`).get(Number(id));
+  else row = (readFallback().posts || []).find(x => x.id === Number(id));
+  if (!row?.poll_json) return null;
+  try { return JSON.parse(row.poll_json); } catch (_) { return null; }
+}
+
+// Toggle a vote (one option per user; second vote on same option removes it)
+function voteOnPoll(postId, steamId, optionIdx) {
+  const poll = getPostPoll(postId);
+  if (!poll || !Array.isArray(poll.options) || !poll.options[optionIdx]) return { error: 'bad-option' };
+  // Remove this user from all options first (single-choice)
+  for (const opt of poll.options) {
+    opt.votes = (opt.votes || []).filter(s => s !== steamId);
+  }
+  // Add to chosen option
+  poll.options[optionIdx].votes = poll.options[optionIdx].votes || [];
+  poll.options[optionIdx].votes.push(steamId);
+  setPostPoll(postId, poll);
+  return { ok: true, poll };
+}
+
+// Message reactions (stored as JSON on message row): { "👍": [sid, sid], "❤️": [sid] }
+function getMessageReactions(id) {
+  let row = null;
+  if (useSqlite()) row = openSqlite().prepare(`SELECT reactions_json FROM messages WHERE id=?`).get(Number(id));
+  else row = (readFallback().messages || []).find(x => x.id === Number(id));
+  if (!row?.reactions_json) return {};
+  try { return JSON.parse(row.reactions_json) || {}; } catch (_) { return {}; }
+}
+
+function toggleMessageReaction(messageId, steamId, emoji) {
+  const reactions = getMessageReactions(messageId);
+  const list = reactions[emoji] || [];
+  const idx = list.indexOf(steamId);
+  if (idx >= 0) list.splice(idx, 1);
+  else list.push(steamId);
+  if (list.length === 0) delete reactions[emoji];
+  else reactions[emoji] = list;
+  const json = Object.keys(reactions).length ? JSON.stringify(reactions) : null;
+  if (useSqlite()) {
+    openSqlite().prepare(`UPDATE messages SET reactions_json=? WHERE id=?`).run(json, Number(messageId));
+  } else {
+    const state = readFallback();
+    const m = (state.messages || []).find(x => x.id === Number(messageId));
+    if (m) { m.reactions_json = json; writeFallback(state); }
+  }
+  return { ok: true, reactions };
+}
+
 // Content deletion (admin)
 function deletePost(id) {
   if (useSqlite()) {
@@ -1898,7 +1996,9 @@ module.exports = {
   countRecentVotes, aggregateReputation, REP_CATEGORIES,
   // feed
   listPublics, getPublic, createPublic, updatePublic, countPublicsByOwner,
-  createPost, getPost, listPosts,
+  createPost, getPost, updatePost, listPosts,
+  setPostPoll, getPostPoll, voteOnPoll,
+  getMessageReactions, toggleMessageReaction,
   likePost, unlikePost, hasLiked, countLikes,
   viewPost, countViews, attachPostStats,
   addComment, deleteComment, getComment, listComments, countComments,

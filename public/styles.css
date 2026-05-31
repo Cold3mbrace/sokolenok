@@ -2372,7 +2372,7 @@ button { cursor: pointer; }
   /* Feed: stack, and put the "create public" / publics box ABOVE the post list */
   .feed-grid { display: flex !important; flex-direction: column; gap: 12px; }
   /* On mobile, hide the publics sidebar entirely — there's a dedicated /communities page */
-  #feed-side { display: none; }
+  #feed-side { display: none !important; }
   .feed-head { gap: 8px; }
   .feed-h1 { font-size: 18px; }
   .feed-tab { padding: 5px 11px; font-size: 12px; }
@@ -2751,14 +2751,14 @@ button.me-menu-item + .me-menu-item,
 .editor-name:hover { color: var(--g); }
 
 /* === FEED FIXES (post-mobile polish) === */
-/* Compact "create public" + publics card on mobile */
+/* Compact "create public" + publics card on mobile (these styles apply if/when
+   the sidebar is shown, but on mobile we hide #feed-side entirely above) */
 @media (max-width: 860px) {
   #feed-side .card { padding: 12px 14px; }
   #feed-side .card-eyebrow { margin-bottom: 8px; }
   .feed-pub-list { gap: 8px; }
   .feed-pub-desc { font-size: 11px; }
-  /* Make sidebar cards visually distinct from post cards (lower contrast) */
-  #feed-side { display: flex; flex-direction: column; gap: 8px; }
+  /* #feed-side stays display:none on mobile — handled by earlier rule. */
 }
 
 /* Long URLs in post body wrap instead of overflowing */
@@ -3121,6 +3121,19 @@ button.nav-link {
     height: 100vh;
     height: 100dvh; /* dynamic viewport — accounts for mobile browser chrome */
   }
+  /* Lock body scroll while thread is open so iOS doesn't bounce the whole page
+     when the user pulls past the end of the messages. */
+  body.msgr-thread-open {
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+    height: 100%;
+  }
+  /* Inner scroll container needs momentum + overscroll containment */
+  body.msgr-thread-open .msgr-thread-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
   /* Account for iOS status bar / notch — push the thread header below it */
   body.msgr-thread-open .msgr-thread-h {
     padding-top: calc(12px + env(safe-area-inset-top, 0px));
@@ -3234,3 +3247,113 @@ button.nav-link {
   font-size: 20px; line-height: 1; cursor: pointer; flex-shrink: 0;
 }
 .msgr-reply-x:hover { color: var(--text); }
+
+/* ============ ACCESSIBILITY: LARGE FONT ============ */
+/* Increases all text by ~20% — for users who need bigger text since pinch-zoom is disabled */
+body.large-font { font-size: 18px; }
+body.large-font .feed-item-body,
+body.large-font .feed-item-title,
+body.large-font .msgr-bubble-text,
+body.large-font .nav-label,
+body.large-font .comment-text { font-size: 1.1em; }
+body.large-font .feed-item-title { font-size: 1.2em; }
+body.large-font .post-act-n,
+body.large-font .post-act svg { transform: scale(1.1); }
+
+/* ============ COMMENTS PREVIEW (always visible under post) ============ */
+.comments-preview {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.comments-show-all {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 12px; font-weight: 600; color: var(--g);
+  text-align: left;
+}
+.comments-show-all:hover { text-decoration: underline; }
+.comments-write-link {
+  background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 8px 12px; cursor: pointer; font-family: inherit;
+  font-size: 13px; color: var(--mute); text-align: left;
+}
+.comments-write-link:hover { border-color: var(--g); color: var(--g); }
+
+/* ============ POLLS ============ */
+.poll-card {
+  margin-top: 10px; padding: 12px; background: var(--card-2);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.poll-question { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+.poll-option {
+  position: relative; display: block; width: 100%; margin-bottom: 6px;
+  padding: 9px 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r-sm); cursor: pointer; overflow: hidden;
+  font-family: inherit; text-align: left;
+  transition: border-color 0.15s;
+}
+.poll-option:hover { border-color: var(--g); }
+.poll-option.voted { border-color: var(--g); background: var(--g-soft); }
+.poll-option-fill {
+  position: absolute; top: 0; left: 0; height: 100%;
+  background: var(--g-soft); transition: width 0.3s ease;
+  z-index: 0;
+}
+.poll-option.voted .poll-option-fill { background: rgba(74, 222, 128, 0.22); }
+.poll-option-content {
+  position: relative; z-index: 1; display: flex; justify-content: space-between;
+  align-items: center; gap: 10px; font-size: 13px; color: var(--text);
+}
+.poll-option-pct { font-size: 12px; font-weight: 700; color: var(--g); flex-shrink: 0; }
+.poll-foot { font-size: 11.5px; color: var(--mute); margin-top: 8px; }
+
+/* Poll builder (in create-post modal) */
+.poll-builder {
+  border: 1px dashed var(--line); border-radius: var(--r-sm);
+  padding: 10px 12px; margin-top: 8px;
+}
+.poll-builder-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+.poll-builder-row .modal-input { flex: 1; }
+
+/* ============ FEED ACTIONS (edit + delete buttons) ============ */
+.feed-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.feed-edit, .feed-del {
+  width: 28px; height: 28px; border-radius: 50%; background: transparent;
+  border: 1px solid transparent; color: var(--mute); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.feed-edit:hover { color: var(--g); border-color: var(--g); }
+.feed-del:hover { color: var(--red, #ff5b6e); border-color: var(--red, #ff5b6e); }
+.feed-edited { font-size: 11px; color: var(--mute); margin-top: 4px; font-style: italic; }
+
+/* ============ MESSAGE REACTIONS ============ */
+.msgr-reactions {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
+}
+.msgr-react-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 999px; font-family: inherit; font-size: 12px;
+  cursor: pointer; transition: border-color 0.15s, background 0.15s;
+}
+.msgr-bubble-row.me .msgr-react-chip {
+  background: rgba(0, 0, 0, 0.15); border-color: rgba(0, 0, 0, 0.2); color: #061008;
+}
+.msgr-react-chip:hover { border-color: var(--g); }
+.msgr-react-chip.mine { background: var(--g-soft); border-color: var(--g); }
+.msgr-bubble-row.me .msgr-react-chip.mine { background: rgba(0, 0, 0, 0.25); border-color: rgba(0, 0, 0, 0.4); }
+.msgr-react-emo { font-size: 13px; }
+.msgr-react-count { font-weight: 700; color: var(--dim); }
+.msgr-bubble-row.me .msgr-react-count { color: #061008; }
+
+/* Reaction quick-picker row in action menu */
+.msgr-action-react-row {
+  display: flex; gap: 4px; padding: 6px;
+  border-bottom: 1px solid var(--line); margin-bottom: 4px;
+}
+.msgr-action-react-btn {
+  width: 34px; height: 34px; border-radius: 50%;
+  background: transparent; border: none; cursor: pointer;
+  font-size: 20px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, transform 0.1s;
+}
+.msgr-action-react-btn:hover { background: var(--card-2); transform: scale(1.15); }
