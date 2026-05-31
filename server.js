@@ -203,10 +203,18 @@ function clearSessionCookie(res) {
 }
 
 function getBaseUrl(req) {
-  if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/, '');
+  if (process.env.BASE_URL) {
+    // Sanity check: if BASE_URL is set without scheme, prepend https://
+    let b = process.env.BASE_URL.replace(/\/$/, '');
+    if (!/^https?:\/\//i.test(b)) b = 'https://' + b;
+    return b;
+  }
   const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
-  const proto = req.headers['x-forwarded-proto']
-    || (host.startsWith('localhost') || host.startsWith('127.') ? 'http' : 'https');
+  // Auto-detect scheme. Prefer X-Forwarded-Proto (set by nginx). Otherwise:
+  // localhost → http; anything else (real domains) → https.
+  // This is conservative: assumes you're not running production on bare http.
+  let proto = req.headers['x-forwarded-proto'];
+  if (!proto) proto = (host.startsWith('localhost') || host.startsWith('127.')) ? 'http' : 'https';
   return `${proto}://${host}`;
 }
 
@@ -1791,7 +1799,7 @@ async function handleApi(req, res, pathname, query) {
   // the user is subscribed to. Anonymous users see official news only.
   if (pathname === '/api/feed') {
     const me = getRequestSteamId(req);
-    const scope = query.get('scope') || 'all'; // 'all' | 'subs' | 'official'
+    const scope = query.get('scope') || 'all'; // 'all' | 'subs' | 'official' | 'hot'
     const items = [];
 
     // Official news as feed items
@@ -1818,10 +1826,20 @@ async function handleApi(req, res, pathname, query) {
       if (scope === 'subs') {
         publicIds = me ? db.listSubscriptions(me) : [];
       }
-      // scope 'all': include posts from all publics too (discovery)
-      const posts = db.listPosts({ publicIds: scope === 'subs' ? publicIds : null, limit: 50 });
+      // scope 'all' / 'hot': from all publics. For 'hot' we'll re-sort by engagement.
+      const posts = db.listPosts({ publicIds: scope === 'subs' ? publicIds : null, limit: scope === 'hot' ? 200 : 50 });
       db.attachPostStats(posts, me);
-      for (const p of posts) {
+      // For 'hot' scope: keep posts created in the last 7 days, score by engagement
+      let usePosts = posts;
+      if (scope === 'hot') {
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        usePosts = posts
+          .filter(p => (p.created_at || '') > weekAgo)
+          .map(p => ({ ...p, _score: (p.likes || 0) * 3 + (p.comments || 0) * 2 + (p.views || 0) * 0.1 }))
+          .sort((a, b) => b._score - a._score)
+          .slice(0, 30);
+      }
+      for (const p of usePosts) {
         const pub = db.getPublic(p.public_id);
         items.push({
           kind: 'post',
@@ -1834,17 +1852,56 @@ async function handleApi(req, res, pathname, query) {
           body: p.body,
           link: p.link,
           image: p.image,
+          images: p.images_json ? (() => { try { return JSON.parse(p.images_json); } catch (_) { return null; } })() : null,
+          author_steam_id: p.author_steam_id,
           likes: p.likes, views: p.views, comments: p.comments, liked: p.liked,
           poll: p.poll_json ? (() => { try { return JSON.parse(p.poll_json); } catch (_) { return null; } })() : null,
           edited_at: p.edited_at || null,
-          created_at: p.created_at
+          pinned_at: p.pinned_at || null,
+          created_at: p.created_at,
+          hot_score: scope === 'hot' ? Math.round(p._score) : undefined
         });
       }
     }
 
-    // Sort by date desc (nulls last)
-    items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    // Sort: for 'hot' keep server order (by score). For others — by date.
+    if (scope !== 'hot') items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     return sendJson(res, 200, { ok: true, scope, items: items.slice(0, 60) });
+  }
+
+  // Recommended publics — those subscribed to by my friends but not by me.
+  // Sorted by how many friends are subscribed (descending), then by total subscribers.
+  if (pathname === '/api/publics/recommend' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const mySubs = new Set(db.listSubscriptions(me));
+    const friends = db.listFriends(me).map(f => f.steam_id);
+    // Tally: { public_id: friend_count }
+    const tally = new Map();
+    for (const fid of friends) {
+      for (const pid of db.listSubscriptions(fid)) {
+        if (mySubs.has(pid)) continue; // already subscribed
+        tally.set(pid, (tally.get(pid) || 0) + 1);
+      }
+    }
+    // Hydrate publics with their full info + friend count
+    const all = db.listPublics();
+    const byId = new Map(all.map(p => [p.id, p]));
+    const recommendations = Array.from(tally.entries())
+      .map(([pid, friendCount]) => {
+        const p = byId.get(pid);
+        if (!p) return null;
+        return {
+          id: p.id, name: p.name, description: p.description, avatar: p.avatar,
+          verified: !!p.verified, owner: p.owner_steam_id,
+          friend_subscribers: friendCount,
+          total_subscribers: db.countSubscribers(p.id)
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.friend_subscribers - a.friend_subscribers || b.total_subscribers - a.total_subscribers)
+      .slice(0, 12);
+    return sendJson(res, 200, { ok: true, recommendations });
   }
 
   if (pathname === '/api/publics') {
@@ -1934,10 +1991,11 @@ async function handleApi(req, res, pathname, query) {
       const subs = me ? db.listSubscriptions(me) : [];
       const posts = db.listPosts({ publicIds: [pid], limit: 50 });
       db.attachPostStats(posts, me);
-      // Parse poll JSON for each post
+      // Parse poll + images JSON for each post
       for (const p of posts) {
         if (p.poll_json) { try { p.poll = JSON.parse(p.poll_json); } catch (_) { p.poll = null; } }
-        delete p.poll_json;
+        if (p.images_json) { try { p.images = JSON.parse(p.images_json); } catch (_) { p.images = null; } }
+        delete p.poll_json; delete p.images_json;
       }
       const isEditor = me === pub.owner_steam_id || db.isPublicEditor(pid, me);
       return sendJson(res, 200, { ok: true,
@@ -1980,8 +2038,9 @@ async function handleApi(req, res, pathname, query) {
     const text = String(body.body || '').trim().slice(0, 5000);
     const link = String(body.link || '').trim().slice(0, 500) || null;
     const image = String(body.image || '').trim().slice(0, 500) || null;
+    const images = Array.isArray(body.images) ? body.images.filter(s => typeof s === 'string' && s.trim()).slice(0, 6) : null;
     if (!text && !title) return sendJson(res, 400, { ok: false, error: 'empty' });
-    const post = db.createPost({ public_id, author_steam_id: me, title, body: text, link, image });
+    const post = db.createPost({ public_id, author_steam_id: me, title, body: text, link, image, images });
     // Optional poll: { question, options: ["A","B",...] } — 2 to 6 options, each ≤80 chars
     if (body.poll && Array.isArray(body.poll.options) && body.poll.options.length >= 2) {
       const opts = body.poll.options.slice(0, 6).map(o => ({
@@ -2069,6 +2128,7 @@ async function handleApi(req, res, pathname, query) {
       if (body.body !== undefined) patch.body = body.body;
       if (body.link !== undefined) patch.link = body.link;
       if (body.image !== undefined) patch.image = body.image;
+      if (body.images !== undefined) patch.images = body.images;
       const r = db.updatePost(postId, patch);
       if (r.error) return sendJson(res, 404, { ok: false, error: r.error });
       if (body.poll !== undefined) db.setPostPoll(postId, body.poll);
@@ -2084,6 +2144,25 @@ async function handleApi(req, res, pathname, query) {
       const r = db.voteOnPoll(postId, me, optionIdx);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       return sendJson(res, 200, { ok: true, poll: r.poll });
+    }
+    // Pin / unpin — only public owner/editor or moderators. One pin per public.
+    if (action === 'pin' && req.method === 'POST') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      const pub = db.getPublic(post.public_id);
+      const allowed = pub && (pub.owner_steam_id === me || db.isPublicEditor(post.public_id, me) || canModerate(me));
+      if (!allowed) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      db.pinPost(post.public_id, postId);
+      db.logEvent('post-pin', me, { postId, publicId: post.public_id });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (action === 'unpin' && req.method === 'POST') {
+      if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+      const pub = db.getPublic(post.public_id);
+      const allowed = pub && (pub.owner_steam_id === me || db.isPublicEditor(post.public_id, me) || canModerate(me));
+      if (!allowed) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+      db.unpinPost(postId);
+      db.logEvent('post-unpin', me, { postId });
+      return sendJson(res, 200, { ok: true });
     }
     // Delete
     if (req.method === 'DELETE' && !action) {
@@ -2373,16 +2452,20 @@ async function handleApi(req, res, pathname, query) {
       try { prof = await fetchProfile(c.steam_id); } catch (_) {}
       let preview = '';
       if (c.last) {
-        const text = decryptMessage(c.last.body_enc);
-        if (text) preview = text.slice(0, 80);
-        else if (c.last.attachment_enc) {
-          try {
-            const att = JSON.parse(decryptMessage(c.last.attachment_enc));
-            if (att.type === 'post') preview = '📎 Пост';
-            else if (att.type === 'forward') preview = '↪ Пересланное сообщение';
-            else if (att.type === 'reply') preview = '↩ Ответ';
-            else preview = '📎 Вложение';
-          } catch (_) { preview = '📎 Вложение'; }
+        if (c.last.deleted_at) {
+          preview = '🗑 сообщение удалено';
+        } else {
+          const text = decryptMessage(c.last.body_enc);
+          if (text) preview = text.slice(0, 80);
+          else if (c.last.attachment_enc) {
+            try {
+              const att = JSON.parse(decryptMessage(c.last.attachment_enc));
+              if (att.type === 'post') preview = '📎 Пост';
+              else if (att.type === 'forward') preview = '↪ Пересланное сообщение';
+              else if (att.type === 'reply') preview = '↩ Ответ';
+              else preview = '📎 Вложение';
+            } catch (_) { preview = '📎 Вложение'; }
+          }
         }
       }
       enriched.push({
@@ -2396,6 +2479,20 @@ async function handleApi(req, res, pathname, query) {
       });
     }
     return sendJson(res, 200, { ok: true, conversations: enriched, unread_total: db.countUnread(me) });
+  }
+
+  // Soft-delete a single message: DELETE /api/messages/msg/:msgId
+  // Only the sender (or moderators) can delete. Row is kept; text is hidden.
+  if (pathname.startsWith('/api/messages/msg/') && req.method === 'DELETE') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const msgId = parseInt(pathname.slice('/api/messages/msg/'.length), 10);
+    if (!Number.isFinite(msgId)) return sendJson(res, 400, { ok: false, error: 'bad-id' });
+    const m = db.getMessage(msgId);
+    if (!m) return sendJson(res, 404, { ok: false, error: 'no-such-message' });
+    if (m.sender_steam_id !== me && !canModerate(me)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    db.softDeleteMessage(msgId);
+    return sendJson(res, 200, { ok: true });
   }
 
   // Message reactions: POST /api/messages/reactions/:msgId  { emoji }
@@ -2428,16 +2525,18 @@ async function handleApi(req, res, pathname, query) {
       const rows = db.listMessages(me, other, 200);
       const messages = [];
       for (const m of rows) {
+        const isDeleted = !!m.deleted_at;
         let attachment = null;
-        if (m.attachment_enc) {
+        if (!isDeleted && m.attachment_enc) {
           try { attachment = JSON.parse(decryptMessage(m.attachment_enc)); } catch (_) {}
           if (attachment) attachment = await hydrateAttachment(attachment);
         }
         messages.push({
           id: m.id, from_me: m.sender_steam_id === me,
-          text: decryptMessage(m.body_enc),
+          text: isDeleted ? '' : decryptMessage(m.body_enc),
           attachment,
-          reactions: m.reactions_json ? (() => { try { return JSON.parse(m.reactions_json); } catch (_) { return {}; } })() : {},
+          reactions: !isDeleted && m.reactions_json ? (() => { try { return JSON.parse(m.reactions_json); } catch (_) { return {}; } })() : {},
+          deleted: isDeleted,
           created_at: m.created_at,
           read: !!m.read_at
         });
@@ -2535,6 +2634,35 @@ function serveStatic(req, res, pathname) {
   // OG meta-tag injection for richer link previews in Telegram/Discord/VK.
   // Replaces a <!--OG--> placeholder in the HTML with generated tags based on URL params.
   // No Accept-header filter — crawlers send various Accept values and we want to serve them OG too.
+  // /og-debug — diagnostic endpoint to help debug OG injection on production.
+  // Shows the base URL we resolved, the headers we got, and a sample OG block.
+  if (pathname === '/og-debug') {
+    const base = getBaseUrl(req);
+    const sample = renderOgTags({
+      title: 'Тестовый заголовок',
+      desc: 'Тестовое описание',
+      image: `${base}/assets/logo-full-dark.png`,
+      url: `${base}/og-debug`
+    });
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end([
+      `Base URL resolved: ${base}`,
+      `BASE_URL env var: ${process.env.BASE_URL || '(not set)'}`,
+      `Host header: ${req.headers.host || '(none)'}`,
+      `X-Forwarded-Host: ${req.headers['x-forwarded-host'] || '(none)'}`,
+      `X-Forwarded-Proto: ${req.headers['x-forwarded-proto'] || '(none)'}`,
+      `User-Agent: ${req.headers['user-agent'] || '(none)'}`,
+      '',
+      'Sample OG block that would be injected:',
+      sample,
+      '',
+      'Test commands:',
+      `curl -s '${base}/u/76561198197947702' | grep -E 'og:|twitter:'`,
+      `curl -s -I '${base}/u/76561198197947702'`,
+    ].join('\n'));
+    return;
+  }
+
   if (pathname === '/lookup' || pathname === '/feed') {
     const file = path.join(PUBLIC_DIR, pathname === '/lookup' ? 'lookup.html' : 'feed.html');
     const query = new URL(req.url, 'http://x').searchParams;

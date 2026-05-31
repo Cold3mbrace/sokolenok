@@ -3357,3 +3357,73 @@ body.large-font .post-act svg { transform: scale(1.1); }
   transition: background 0.15s, transform 0.1s;
 }
 .msgr-action-react-btn:hover { background: var(--card-2); transform: scale(1.15); }
+
+/* ============ POST IMAGES GRID (multi-image) ============ */
+.feed-img-grid {
+  display: grid; gap: 3px; margin-top: 12px;
+  border-radius: 8px; overflow: hidden;
+}
+.feed-img-grid-2 { grid-template-columns: 1fr 1fr; aspect-ratio: 16 / 9; }
+.feed-img-grid-3 { grid-template-columns: 2fr 1fr; aspect-ratio: 16 / 9; }
+.feed-img-grid-3 .feed-img-cell:first-child { grid-row: span 2; }
+.feed-img-grid-3 { grid-template-rows: 1fr 1fr; }
+.feed-img-grid-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; aspect-ratio: 1 / 1; }
+.feed-img-cell { position: relative; overflow: hidden; background: #000; }
+.feed-img-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.feed-img-more {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 22px; font-weight: 700;
+  pointer-events: none;
+}
+
+/* ============ MULTI-IMAGE UPLOAD (in post create/edit modal) ============ */
+.multi-upload-list {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin: 8px 0;
+}
+.multi-upload-item {
+  position: relative; width: 80px; height: 80px;
+  border-radius: var(--r-sm); overflow: hidden; background: #000;
+  border: 1px solid var(--line);
+}
+.multi-upload-item img { width: 100%; height: 100%; object-fit: cover; }
+.multi-upload-remove {
+  position: absolute; top: 4px; right: 4px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7); color: #fff;
+  border: none; cursor: pointer; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.multi-upload-remove:hover { background: var(--red, #ff5b6e); }
+
+/* ============ PIN: button + badge ============ */
+.feed-pin {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: transparent; border: 1px solid transparent;
+  color: var(--mute); cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.feed-pin:hover { color: var(--g); border-color: var(--g); }
+.feed-pin.pinned { color: var(--g); border-color: var(--g); background: var(--g-soft); }
+.feed-pinned-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 700; color: var(--g);
+  background: var(--g-soft); padding: 3px 9px; border-radius: 999px;
+  margin-top: 2px; align-self: flex-start; width: max-content;
+}
+
+/* ============ DELETED MESSAGE STATE ============ */
+.msgr-bubble-text.msgr-deleted {
+  font-style: italic; opacity: 0.7;
+}
+.msgr-action-danger { color: var(--red, #ff5b6e) !important; }
+.msgr-action-danger svg { color: inherit; }
+
+/* ============ COMMUNITY RECOMMENDATIONS ============ */
+.cm-recommend-h {
+  margin-top: 24px; margin-bottom: 12px;
+  font-size: 15px; font-weight: 700; color: var(--text);
+}
+.cm-recommend-info {
+  font-size: 11.5px; color: var(--g); margin-top: 4px;
+}

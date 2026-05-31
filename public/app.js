@@ -126,6 +126,10 @@ const api = {
   updatePost(id, data) { return this.request(`/api/posts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); },
   deletePost(id) { return this.request(`/api/posts/${id}`, { method: 'DELETE' }); },
   votePoll(id, option) { return this.request(`/api/posts/${id}/vote`, { method: 'POST', body: JSON.stringify({ option }) }); },
+  pinPost(id) { return this.request(`/api/posts/${id}/pin`, { method: 'POST' }); },
+  unpinPost(id) { return this.request(`/api/posts/${id}/unpin`, { method: 'POST' }); },
+  recommendCommunities() { return this.request('/api/publics/recommend', { method: 'GET' }); },
+  deleteMessage(id) { return this.request(`/api/messages/msg/${id}`, { method: 'DELETE' }); },
   reactToMessage(msgId, emoji) { return this.request(`/api/messages/reactions/${msgId}`, { method: 'POST', body: JSON.stringify({ emoji }) }); },
   likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
   unlikePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'DELETE' }); },
@@ -4304,12 +4308,27 @@ async function renderPublicPage(publicId, me) {
       (function () {
         const canEdit = me?.steamid && post.author_steam_id === me.steamid;
         const canDelete = p.is_owner || me.is_admin || canEdit;
-        if (!canEdit && !canDelete) return null;
+        const canPin = p.is_owner || me.is_admin;
+        if (!canEdit && !canDelete && !canPin) return null;
         const actions = el('div', { class: 'feed-actions' });
+        if (canPin) {
+          const isPinned = !!post.pinned_at;
+          actions.appendChild(el('button', {
+            class: 'feed-pin' + (isPinned ? ' pinned' : ''), type: 'button',
+            title: isPinned ? 'Открепить' : 'Закрепить наверху',
+            onclick: async () => {
+              const r = isPinned ? await api.unpinPost(post.id) : await api.pinPost(post.id);
+              if (r.ok) { toast.ok(isPinned ? 'Откреплено' : 'Закреплено'); renderPublicPage(publicId, me); }
+              else toast.err('Не удалось');
+            },
+            html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="' + (isPinned ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-1.7-2.5a2 2 0 0 1-.3-1V7H7v6.5a2 2 0 0 1-.3 1L5 17z"/></svg>'
+          }));
+        }
         if (canEdit) {
           actions.appendChild(el('button', { class: 'feed-edit', type: 'button', title: 'Редактировать',
             onclick: () => openCreatePostModal({ id: post.public_id, name: p.name }, {
-              post_id: post.id, title: post.title, body: post.body, link: post.link, image: post.image, poll: post.poll
+              post_id: post.id, title: post.title, body: post.body, link: post.link,
+              image: post.image, images: post.images, poll: post.poll
             }),
             html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' }));
         }
@@ -4321,12 +4340,11 @@ async function renderPublicPage(publicId, me) {
         return actions;
       })()
     ));
+    // "Pinned" badge above the title for pinned posts
+    if (post.pinned_at) card.appendChild(el('div', { class: 'feed-pinned-tag' }, '📌 Закреплено'));
     if (post.title) card.appendChild(el('div', { class: 'feed-item-title' }, post.title));
-    if (post.image) {
-      const img = el('img', { class: 'feed-item-img', src: post.image, alt: '', loading: 'lazy' });
-      img.onerror = function() { this.remove(); };
-      card.appendChild(img);
-    }
+    const imgsNode = buildPostImages(post);
+    if (imgsNode) card.appendChild(imgsNode);
     if (post.body) { const b = buildPostBody(post.body, false); if (b) card.appendChild(b); }
     if (post.poll) card.appendChild(buildPollCard(post.id, post.poll, me));
     if (post.edited_at) card.appendChild(el('div', { class: 'feed-edited' }, '✎ изменено'));
@@ -4336,6 +4354,30 @@ async function renderPublicPage(publicId, me) {
     markPostViewed(post.id);
     list.appendChild(card);
   }
+}
+
+// Render one or multiple post images. Single image full-width; multiple → grid.
+function buildPostImages(item) {
+  const arr = (item.images && item.images.length) ? item.images : (item.image ? [item.image] : []);
+  if (!arr.length) return null;
+  if (arr.length === 1) {
+    const img = el('img', { class: 'feed-item-img', src: arr[0], alt: '', loading: 'lazy' });
+    img.onerror = function () { this.remove(); };
+    return img;
+  }
+  // Multi-image grid (2 — side-by-side; 3 — 2+1; 4+ — 2-column grid)
+  const grid = el('div', { class: 'feed-img-grid feed-img-grid-' + Math.min(arr.length, 4) });
+  arr.slice(0, 6).forEach((src, i) => {
+    const cell = el('div', { class: 'feed-img-cell' });
+    const img = el('img', { src, alt: '', loading: 'lazy' });
+    img.onerror = function () { cell.remove(); };
+    cell.appendChild(img);
+    if (i === 5 && arr.length > 6) {
+      cell.appendChild(el('div', { class: 'feed-img-more' }, '+' + (arr.length - 6)));
+    }
+    grid.appendChild(cell);
+  });
+  return grid;
 }
 
 // Render a poll attached to a post — shows percentages, lets user vote (single choice)
@@ -4684,6 +4726,13 @@ function buildFeedEmpty(scope) {
       } }, 'Открыть «Все»'),
       el('a', { class: 'btn btn-ghost', href: '/communities' }, 'К сообществам')
     );
+  } else if (scope === 'hot') {
+    icon = '🔥';
+    title = 'В «Горячем» пусто';
+    desc = 'Здесь появятся самые обсуждаемые посты за последние 7 дней — те, у которых много лайков, комментариев и просмотров. Создайте интересный пост чтобы попасть в подборку.';
+    cta = el('div', { class: 'feed-empty-actions' },
+      el('a', { class: 'btn', href: '/communities' }, 'К сообществам')
+    );
   } else if (scope === 'official') {
     icon = '🎮';
     title = 'Официальных новостей пока нет';
@@ -4750,11 +4799,8 @@ function paintFeedList(r) {
     ));
 
     if (it.title) card.appendChild(el('div', { class: 'feed-item-title' }, it.title));
-    if (it.image) {
-      const img = el('img', { class: 'feed-item-img', src: it.image, alt: '', loading: 'lazy' });
-      img.onerror = function() { this.remove(); };
-      card.appendChild(img);
-    }
+    const imgsNode = buildPostImages(it);
+    if (imgsNode) card.appendChild(imgsNode);
     if (it.body) { const b = buildPostBody(it.body, it.kind === 'news'); if (b) card.appendChild(b); }
     if (it.poll) card.appendChild(buildPollCard(it.post_id, it.poll, window.__me));
     if (it.edited_at) card.appendChild(el('div', { class: 'feed-edited' }, '✎ изменено'));
@@ -4918,7 +4964,8 @@ function openCreatePostModal(pub, existing) {
   const titleInput = el('input', { class: 'modal-input', placeholder: 'Заголовок (необязательно)', maxlength: '200' });
   const bodyInput = el('textarea', { class: 'modal-input', rows: '5', placeholder: 'Текст поста…', maxlength: '5000' });
   const linkInput = el('input', { class: 'modal-input', placeholder: 'Ссылка (необязательно)', maxlength: '500' });
-  const img = imageUploadField('Картинка', existing?.image || '');
+  const initialImages = existing?.images?.length ? existing.images : (existing?.image ? [existing.image] : []);
+  const img = multiImageUploadField('Картинки (до 6)', initialImages);
   if (isEdit) {
     titleInput.value = existing.title || '';
     bodyInput.value = existing.body || '';
@@ -4998,7 +5045,12 @@ function openCreatePostModal(pub, existing) {
       poll = null;
     }
 
-    const payload = { title, body, link: linkInput.value.trim(), image: img.getUrl() };
+    const imageUrls = img.getUrls();
+    const payload = {
+      title, body, link: linkInput.value.trim(),
+      image: imageUrls[0] || null,
+      images: imageUrls
+    };
     if (isEdit) {
       // For edits, only send poll if it changed (or removed)
       if (poll !== null) payload.poll = poll;
@@ -5050,6 +5102,51 @@ function imageUploadField(label, initialUrl) {
   );
   renderPreview();
   return { node, getUrl: () => url };
+}
+
+// Multi-image upload — up to 6 images, with thumbnails + remove buttons
+function multiImageUploadField(label, initialUrls) {
+  let urls = Array.isArray(initialUrls) ? initialUrls.filter(Boolean).slice(0, 6) : [];
+  const list = el('div', { class: 'multi-upload-list' });
+  const fileInput = el('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, style: { display: 'none' } });
+  const addBtn = el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
+    onclick: () => { if (urls.length >= 6) { toast.warn('Максимум 6 картинок'); return; } fileInput.click(); }
+  }, '+ Добавить картинку');
+
+  const renderList = () => {
+    list.innerHTML = '';
+    urls.forEach((u, i) => {
+      const item = el('div', { class: 'multi-upload-item' },
+        el('img', { src: u, alt: '' }),
+        el('button', { class: 'multi-upload-remove', type: 'button', title: 'Убрать',
+          onclick: () => { urls.splice(i, 1); renderList(); }, html: '&times;' })
+      );
+      list.appendChild(item);
+    });
+    addBtn.style.opacity = urls.length >= 6 ? 0.5 : 1;
+  };
+
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return;
+    fileInput.value = '';
+    for (const f of files) {
+      if (urls.length >= 6) break;
+      if (f.size > 5 * 1024 * 1024) { toast.err(`${f.name}: больше 5 МБ`); continue; }
+      const r = await api.upload(f).catch(() => ({ ok: false }));
+      if (r.ok && r.url) urls.push(r.url);
+      else toast.err(r.error === 'too-large' ? `${f.name}: больше 5 МБ` : `${f.name}: ошибка`);
+    }
+    renderList();
+  });
+
+  const node = el('div', { class: 'upload-field' },
+    label ? el('label', { class: 'modal-label' }, label) : null,
+    list,
+    el('div', { class: 'upload-controls' }, addBtn)
+  );
+  renderList();
+  return { node, getUrls: () => urls.slice() };
 }
 
 // Generic modal helper
@@ -5189,7 +5286,7 @@ function relDate(iso) {
 }
 
 // Show a small popup menu at (x,y) with Reply / Forward actions — triggered by long-press on mobile.
-function openMessageActionMenu(x, y, { onReply, onForward, onReact }) {
+function openMessageActionMenu(x, y, { onReply, onForward, onReact, onDelete }) {
   document.querySelectorAll('.msgr-action-menu, .msgr-action-menu-backdrop').forEach(n => n.remove());
   const backdrop = el('div', { class: 'msgr-action-menu-backdrop' });
   const menu = el('div', { class: 'msgr-action-menu' });
@@ -5218,6 +5315,13 @@ function openMessageActionMenu(x, y, { onReply, onForward, onReact }) {
 
   menu.appendChild(replyBtn);
   menu.appendChild(forwardBtn);
+  if (onDelete) {
+    const deleteBtn = el('button', { type: 'button', class: 'msgr-action-danger',
+      html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>Удалить</span>'
+    });
+    deleteBtn.addEventListener('click', () => { close(); onDelete(); });
+    menu.appendChild(deleteBtn);
+  }
   backdrop.addEventListener('click', close);
   document.body.appendChild(backdrop);
   document.body.appendChild(menu);
@@ -5447,18 +5551,23 @@ async function pageMessages() {
       }
       // Bubble contents: optional attachment card → text → time
       const bubble = el('div', { class: 'msgr-bubble' });
-      if (m.attachment) {
-        const card = buildAttachmentCard(m.attachment);
-        if (card) bubble.appendChild(card);
+      if (m.deleted) {
+        bubble.appendChild(el('div', { class: 'msgr-bubble-text msgr-deleted' }, '🗑 Сообщение удалено'));
+        bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
+      } else {
+        if (m.attachment) {
+          const card = buildAttachmentCard(m.attachment);
+          if (card) bubble.appendChild(card);
+        }
+        if (m.text) {
+          bubble.appendChild(el('div', { class: 'msgr-bubble-text' }, m.text));
+        }
+        bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
+        // Reactions chips (below bubble text). Filled by renderReactions helper.
+        const reactionsEl = el('div', { class: 'msgr-reactions' });
+        bubble.appendChild(reactionsEl);
+        renderReactionsInto(reactionsEl, m.id, m.reactions || {}, window.__me);
       }
-      if (m.text) {
-        bubble.appendChild(el('div', { class: 'msgr-bubble-text' }, m.text));
-      }
-      bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
-      // Reactions chips (below bubble text). Filled by renderReactions helper.
-      const reactionsEl = el('div', { class: 'msgr-reactions' });
-      bubble.appendChild(reactionsEl);
-      renderReactionsInto(reactionsEl, m.id, m.reactions || {}, window.__me);
       // Action buttons (reply, forward, react) — visible on hover (desktop) / always (mobile)
       const actions = el('div', { class: 'msgr-bubble-actions' },
         el('button', { class: 'msgr-bubble-act', type: 'button', title: 'Реакция',
@@ -5678,7 +5787,18 @@ async function pageMessages() {
               onReact: async (emoji) => {
                 const r = await api.reactToMessage(mid, emoji).catch(() => ({ ok: false }));
                 if (r.ok) window.__updateBubbleReactions?.(row, r.reactions);
-              }
+              },
+              onDelete: isMine ? async () => {
+                if (!confirm('Удалить это сообщение?')) return;
+                const r = await api.deleteMessage(mid).catch(() => ({ ok: false }));
+                if (r.ok) {
+                  const bubble = row.querySelector('.msgr-bubble');
+                  if (bubble) {
+                    bubble.innerHTML = '';
+                    bubble.appendChild(el('div', { class: 'msgr-bubble-text msgr-deleted' }, '🗑 Сообщение удалено'));
+                  }
+                } else toast.err('Не удалось удалить');
+              } : null
             });
           }
         });
@@ -5708,7 +5828,18 @@ async function pageMessages() {
               onReact: async (emoji) => {
                 const r = await api.reactToMessage(mid, emoji).catch(() => ({ ok: false }));
                 if (r.ok) window.__updateBubbleReactions?.(pressedRow, r.reactions);
-              }
+              },
+              onDelete: isMine ? async () => {
+                if (!confirm('Удалить это сообщение?')) return;
+                const r = await api.deleteMessage(mid).catch(() => ({ ok: false }));
+                if (r.ok) {
+                  const bubble = pressedRow.querySelector('.msgr-bubble');
+                  if (bubble) {
+                    bubble.innerHTML = '';
+                    bubble.appendChild(el('div', { class: 'msgr-bubble-text msgr-deleted' }, '🗑 Сообщение удалено'));
+                  }
+                } else toast.err('Не удалось удалить');
+              } : null
             });
           }, 450);
         };
@@ -6336,11 +6467,19 @@ async function pageCommunities() {
       };
       const [t, s] = empties[state.tab];
       body.appendChild(emptyCard(t, s, '👥'));
-      return;
+    } else {
+      const grid = el('div', { class: 'cm-grid' });
+      for (const p of list) grid.appendChild(buildCommunityCard(p));
+      body.appendChild(grid);
     }
-    const grid = el('div', { class: 'cm-grid' });
-    for (const p of list) grid.appendChild(buildCommunityCard(p));
-    body.appendChild(grid);
+
+    // Recommendations: only on All tab, when no search active, and there are some
+    if (state.tab === 'all' && !q && state.recommendations?.length) {
+      body.appendChild(el('div', { class: 'cm-recommend-h' }, '👥 Подписки ваших друзей'));
+      const grid = el('div', { class: 'cm-grid' });
+      for (const r of state.recommendations) grid.appendChild(buildRecommendedCard(r));
+      body.appendChild(grid);
+    }
   };
 
   // Toolbar: "Create" button + search wiring
@@ -6369,6 +6508,43 @@ async function pageCommunities() {
   const r = await api.publics().catch(() => ({ ok: false, publics: [] }));
   state.publics = r.publics || [];
   render();
+  // Recommendations are best-effort, fetched in background
+  api.recommendCommunities().then(res => {
+    if (res?.ok) { state.recommendations = res.recommendations || []; render(); }
+  }).catch(() => {});
+}
+
+// Card variant for recommended community (shows how many friends are subscribed)
+function buildRecommendedCard(p) {
+  const subBtn = el('button', { class: 'btn btn-sm', type: 'button',
+    onclick: async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const btn = e.currentTarget; btn.disabled = true;
+      const r = await api.subscribePublic(p.id);
+      if (r?.ok) { btn.textContent = '✓'; btn.classList.add('btn-ghost'); }
+      btn.disabled = false;
+    }
+  }, 'Подписаться');
+
+  const ava = el('div', { class: 'cm-ava' + (p.verified ? ' official' : '') });
+  if (p.avatar) {
+    const img = el('img', { src: p.avatar, alt: '' });
+    img.onerror = function() { this.remove(); ava.textContent = (p.name || '?').slice(0, 1).toUpperCase(); };
+    ava.appendChild(img);
+  } else ava.textContent = (p.name || '?').slice(0, 1).toUpperCase();
+
+  return el('a', { class: 'cm-card', href: `/feed?public=${encodeURIComponent(p.id)}` },
+    ava,
+    el('div', { class: 'cm-info' },
+      el('div', { class: 'cm-name' }, p.name),
+      el('div', { class: 'cm-desc' }, p.description || ''),
+      el('div', { class: 'cm-recommend-info' },
+        `👤 ${p.friend_subscribers} ${plural(p.friend_subscribers, ['друг подписан', 'друга подписаны', 'друзей подписаны'])}` +
+        (p.total_subscribers ? ` · ${p.total_subscribers} всего` : '')
+      )
+    ),
+    subBtn
+  );
 }
 
 function buildCommunityCard(p) {

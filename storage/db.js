@@ -348,6 +348,14 @@ function openSqlite() {
     const names = new Set(cols.map(c => c.name));
     if (!names.has('edited_at')) db.exec('ALTER TABLE posts ADD COLUMN edited_at TEXT');
     if (!names.has('poll_json')) db.exec('ALTER TABLE posts ADD COLUMN poll_json TEXT');
+    if (!names.has('pinned_at')) db.exec('ALTER TABLE posts ADD COLUMN pinned_at TEXT');
+    if (!names.has('images_json')) db.exec('ALTER TABLE posts ADD COLUMN images_json TEXT');
+  } catch (_) { /* best-effort */ }
+  try {
+    const cols = db.prepare("PRAGMA table_info(messages)").all();
+    if (!new Set(cols.map(c => c.name)).has('deleted_at')) {
+      db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT');
+    }
   } catch (_) { /* best-effort */ }
   return db;
 }
@@ -991,18 +999,24 @@ function getPost(id) {
   return (readFallback().posts || []).find(p => p.id === Number(id)) || null;
 }
 
-function createPost({ public_id, author_steam_id, title, body, link, image }) {
+function createPost({ public_id, author_steam_id, title, body, link, image, images }) {
   const created_at = nowIso();
+  // Normalize: prefer `images` array; fall back to single `image`
+  let imageList = Array.isArray(images) ? images.filter(Boolean).slice(0, 6) : null;
+  if (!imageList && image) imageList = [image];
+  const primary = imageList?.[0] || null;
+  const imagesJson = imageList && imageList.length > 1 ? JSON.stringify(imageList) : null;
   if (useSqlite()) {
-    const info = openSqlite().prepare(`INSERT INTO posts (public_id, author_steam_id, title, body, link, image, created_at)
-      VALUES (?,?,?,?,?,?,?)`)
-      .run(public_id, author_steam_id, title || null, body, link || null, image || null, created_at);
-    return { id: Number(info.lastInsertRowid), public_id, author_steam_id, title, body, link, image, created_at };
+    const info = openSqlite().prepare(`INSERT INTO posts (public_id, author_steam_id, title, body, link, image, images_json, created_at)
+      VALUES (?,?,?,?,?,?,?,?)`)
+      .run(public_id, author_steam_id, title || null, body, link || null, primary, imagesJson, created_at);
+    return { id: Number(info.lastInsertRowid), public_id, author_steam_id, title, body, link, image: primary, images: imageList, created_at };
   }
   const state = readFallback();
   if (!state.posts) state.posts = [];
   const id = (state.posts.reduce((m, p) => Math.max(m, p.id || 0), 0) || 0) + 1;
-  const row = { id, public_id, author_steam_id, title: title || null, body, link: link || null, image: image || null, created_at };
+  const row = { id, public_id, author_steam_id, title: title || null, body, link: link || null,
+    image: primary, images_json: imagesJson, created_at };
   state.posts.push(row);
   writeFallback(state);
   return row;
@@ -1012,16 +1026,22 @@ function createPost({ public_id, author_steam_id, title, body, link, image }) {
 function listPosts({ publicIds = null, limit = 50 } = {}) {
   if (useSqlite()) {
     const d = openSqlite();
+    // Order: pinned-in-this-public first, then by recency. Pinned status is local to each public.
     if (publicIds && publicIds.length) {
       const ph = publicIds.map(() => '?').join(',');
-      return d.prepare(`SELECT * FROM posts WHERE public_id IN (${ph}) ORDER BY created_at DESC LIMIT ?`)
+      return d.prepare(`SELECT * FROM posts WHERE public_id IN (${ph})
+        ORDER BY (CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END), created_at DESC LIMIT ?`)
         .all(...publicIds, limit);
     }
     return d.prepare(`SELECT * FROM posts ORDER BY created_at DESC LIMIT ?`).all(limit);
   }
   let rows = (readFallback().posts || []).slice();
   if (publicIds && publicIds.length) rows = rows.filter(p => publicIds.includes(p.public_id));
-  rows.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  rows.sort((a, b) => {
+    const pa = a.pinned_at ? 0 : 1, pb = b.pinned_at ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    return (b.created_at || '').localeCompare(a.created_at || '');
+  });
   return rows.slice(0, limit);
 }
 
@@ -1205,6 +1225,15 @@ function listSubscriptions(steamId) {
   }
   return Object.values(readFallback().subscriptions || {})
     .filter(s => s.steam_id === steamId).map(s => s.public_id);
+}
+
+function countSubscribers(publicId) {
+  if (useSqlite()) {
+    const r = openSqlite().prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE public_id = ?`).get(publicId);
+    return r?.n || 0;
+  }
+  return Object.values(readFallback().subscriptions || {})
+    .filter(s => s.public_id === publicId).length;
 }
 
 function subscribe(steamId, publicId) {
@@ -1776,6 +1805,17 @@ function isPublicEditor(publicId, steamId) {
 // Edit an existing post — only title/body/image/link can change, author/public are immutable
 function updatePost(id, patch = {}) {
   const edited_at = nowIso();
+  // Normalize images patch
+  let imagesPatch = undefined; // undefined = no change; null = clear; array = set
+  if (patch.images !== undefined) {
+    if (Array.isArray(patch.images) && patch.images.length) {
+      imagesPatch = patch.images.filter(Boolean).slice(0, 6);
+    } else {
+      imagesPatch = null;
+    }
+  } else if (patch.image !== undefined) {
+    imagesPatch = patch.image ? [patch.image] : null;
+  }
   if (useSqlite()) {
     const cur = openSqlite().prepare(`SELECT * FROM posts WHERE id=?`).get(Number(id));
     if (!cur) return { error: 'not-found' };
@@ -1783,10 +1823,12 @@ function updatePost(id, patch = {}) {
       title: patch.title !== undefined ? (String(patch.title || '').trim().slice(0, 200) || null) : cur.title,
       body: patch.body !== undefined ? (String(patch.body || '').trim().slice(0, 8000) || cur.body) : cur.body,
       link: patch.link !== undefined ? (String(patch.link || '').trim().slice(0, 500) || null) : cur.link,
-      image: patch.image !== undefined ? (String(patch.image || '').trim().slice(0, 500) || null) : cur.image
+      image: imagesPatch === undefined ? cur.image : (imagesPatch ? imagesPatch[0] : null),
+      images_json: imagesPatch === undefined ? cur.images_json
+        : (imagesPatch && imagesPatch.length > 1 ? JSON.stringify(imagesPatch) : null)
     };
-    openSqlite().prepare(`UPDATE posts SET title=?, body=?, link=?, image=?, edited_at=? WHERE id=?`)
-      .run(next.title, next.body, next.link, next.image, edited_at, Number(id));
+    openSqlite().prepare(`UPDATE posts SET title=?, body=?, link=?, image=?, images_json=?, edited_at=? WHERE id=?`)
+      .run(next.title, next.body, next.link, next.image, next.images_json, edited_at, Number(id));
     return { ok: true, edited_at };
   }
   const state = readFallback();
@@ -1795,7 +1837,10 @@ function updatePost(id, patch = {}) {
   if (patch.title !== undefined) p.title = String(patch.title || '').trim().slice(0, 200) || null;
   if (patch.body !== undefined) p.body = String(patch.body || '').trim().slice(0, 8000) || p.body;
   if (patch.link !== undefined) p.link = String(patch.link || '').trim().slice(0, 500) || null;
-  if (patch.image !== undefined) p.image = String(patch.image || '').trim().slice(0, 500) || null;
+  if (imagesPatch !== undefined) {
+    p.image = imagesPatch ? imagesPatch[0] : null;
+    p.images_json = (imagesPatch && imagesPatch.length > 1) ? JSON.stringify(imagesPatch) : null;
+  }
   p.edited_at = edited_at;
   writeFallback(state);
   return { ok: true, edited_at };
@@ -1863,6 +1908,49 @@ function toggleMessageReaction(messageId, steamId, emoji) {
     if (m) { m.reactions_json = json; writeFallback(state); }
   }
   return { ok: true, reactions };
+}
+
+// Pin / unpin a post. One pinned post per public (newer pin replaces the old one).
+function pinPost(publicId, postId) {
+  const now = nowIso();
+  if (useSqlite()) {
+    const d = openSqlite();
+    // Unpin any currently-pinned post in this public
+    d.prepare(`UPDATE posts SET pinned_at = NULL WHERE public_id = ? AND pinned_at IS NOT NULL`).run(publicId);
+    d.prepare(`UPDATE posts SET pinned_at = ? WHERE id = ?`).run(now, Number(postId));
+  } else {
+    const state = readFallback();
+    for (const p of (state.posts || [])) {
+      if (p.public_id === publicId && p.pinned_at) p.pinned_at = null;
+      if (p.id === Number(postId)) p.pinned_at = now;
+    }
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+function unpinPost(postId) {
+  if (useSqlite()) {
+    openSqlite().prepare(`UPDATE posts SET pinned_at = NULL WHERE id = ?`).run(Number(postId));
+  } else {
+    const state = readFallback();
+    for (const p of (state.posts || [])) if (p.id === Number(postId)) p.pinned_at = null;
+    writeFallback(state);
+  }
+  return { ok: true };
+}
+
+// Soft-delete a single message — text becomes "(удалено)" but row remains so the conversation thread doesn't lose its order
+function softDeleteMessage(messageId) {
+  const now = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(`UPDATE messages SET deleted_at = ? WHERE id = ?`).run(now, Number(messageId));
+  } else {
+    const state = readFallback();
+    const m = (state.messages || []).find(x => x.id === Number(messageId));
+    if (m) { m.deleted_at = now; writeFallback(state); }
+  }
+  return { ok: true };
 }
 
 // Content deletion (admin)
@@ -1996,14 +2084,15 @@ module.exports = {
   countRecentVotes, aggregateReputation, REP_CATEGORIES,
   // feed
   listPublics, getPublic, createPublic, updatePublic, countPublicsByOwner,
-  createPost, getPost, updatePost, listPosts,
+  createPost, getPost, updatePost, listPosts, pinPost, unpinPost,
+  softDeleteMessage,
   setPostPoll, getPostPoll, voteOnPoll,
   getMessageReactions, toggleMessageReaction,
   likePost, unlikePost, hasLiked, countLikes,
   viewPost, countViews, attachPostStats,
   addComment, deleteComment, getComment, listComments, countComments,
   recommendFriends,
-  listSubscriptions, subscribe, unsubscribe,
+  listSubscriptions, countSubscribers, subscribe, unsubscribe,
   // friends / blocks
   friendStatus, sendFriendRequest, acceptFriendRequest, removeFriend,
   listFriends, areFriends, blockUser, unblockUser, listBlocks, isBlocked, eitherBlocked,
