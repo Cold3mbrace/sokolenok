@@ -257,17 +257,119 @@ async function renderTopbar(active = '') {
   if (me.logged_in && me.consented === false) showConsentGate();
   // Background polling for unread messages (stops on next page change naturally)
   ensureUnreadPolling();
+  // Realtime channel — push messages and notifications without polling
+  if (me.logged_in) ensureRealtime();
   return me;
 }
+
+// ============ realtime (WebSocket with auto-reconnect + polling fallback) ============
+// We keep a single connection per tab. Other modules subscribe via
+// window.addEventListener('sok:ws', e => ...) — e.detail is the parsed message.
+// window.__wsAlive is a boolean other code can check (e.g. message polling
+// skips its fetch when WS is delivering messages live).
+
+let _ws = null;
+let _wsReconnectTimer = null;
+let _wsReconnectAttempt = 0;
+let _wsClosedByUs = false;
+
+window.__wsAlive = false;
+
+function ensureRealtime() {
+  if (_ws && (_ws.readyState === 0 || _ws.readyState === 1)) return; // already connecting/open
+  if (_wsClosedByUs) return;
+  if (typeof WebSocket === 'undefined') return; // ancient browser → polling will handle it
+
+  const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws`;
+
+  try { _ws = new WebSocket(url); }
+  catch (_) { scheduleWsReconnect(); return; }
+
+  _ws.addEventListener('open', () => {
+    window.__wsAlive = true;
+    _wsReconnectAttempt = 0;
+    window.dispatchEvent(new CustomEvent('sok:ws:open'));
+  });
+
+  _ws.addEventListener('close', () => {
+    window.__wsAlive = false;
+    window.dispatchEvent(new CustomEvent('sok:ws:close'));
+    if (!_wsClosedByUs) scheduleWsReconnect();
+  });
+
+  _ws.addEventListener('error', () => {
+    // close event will follow; just mark unhealthy so polling can take over
+    window.__wsAlive = false;
+  });
+
+  _ws.addEventListener('message', (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch (_) { return; }
+    if (!m || !m.type) return;
+    window.dispatchEvent(new CustomEvent('sok:ws', { detail: m }));
+  });
+
+  // Application-level ping every 25s — keeps NAT/proxy from killing the idle socket
+  if (_ws._pingTimer) clearInterval(_ws._pingTimer);
+  _ws._pingTimer = setInterval(() => {
+    if (_ws && _ws.readyState === 1) {
+      try { _ws.send(JSON.stringify({ type: 'ping' })); } catch (_) {}
+    }
+  }, 25000);
+}
+
+function scheduleWsReconnect() {
+  if (_wsReconnectTimer) return;
+  // Exponential backoff capped at 30s: 1, 2, 4, 8, 16, 30, 30, …
+  const delay = Math.min(30000, 1000 * Math.pow(2, _wsReconnectAttempt));
+  _wsReconnectAttempt++;
+  _wsReconnectTimer = setTimeout(() => {
+    _wsReconnectTimer = null;
+    ensureRealtime();
+  }, delay);
+}
+
+// Resume on tab focus — most disconnects happen when the laptop sleeps
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !window.__wsAlive) {
+    _wsReconnectAttempt = 0;
+    if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+    ensureRealtime();
+  }
+});
+
+// Anything that bumps unread (new message arriving, new notification) → refresh badges.
+// Page-specific listeners (chat, /notifications) attach their own handlers on top.
+window.addEventListener('sok:ws', (ev) => {
+  const m = ev.detail;
+  if (!m) return;
+  if (m.type === 'message:new' || m.type === 'notification:new') {
+    // Tiny debounce: bunch of events arriving together → one fetch
+    if (window._wsBadgeBounce) clearTimeout(window._wsBadgeBounce);
+    window._wsBadgeBounce = setTimeout(() => {
+      window._wsBadgeBounce = null;
+      if (typeof refreshUnreadBadge === 'function') refreshUnreadBadge();
+    }, 150);
+  }
+});
 
 let _unreadTimer = null;
 function ensureUnreadPolling() {
   if (_unreadTimer) return;
-  _unreadTimer = setInterval(() => { refreshUnreadBadge(); }, 15000);
+  const startTimer = () => {
+    if (_unreadTimer) clearInterval(_unreadTimer);
+    // 15s base; when WS is healthy, back off to 60s (it's just a safety net then)
+    const interval = window.__wsAlive ? 60000 : 15000;
+    _unreadTimer = setInterval(() => { refreshUnreadBadge(); }, interval);
+  };
+  startTimer();
+  window.addEventListener('sok:ws:open', startTimer);
+  window.addEventListener('sok:ws:close', startTimer);
   // Pause polling when tab is hidden, resume when visible (battery + bandwidth saving)
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { if (_unreadTimer) { clearInterval(_unreadTimer); _unreadTimer = null; } }
-    else if (!_unreadTimer) { refreshUnreadBadge(); _unreadTimer = setInterval(() => { refreshUnreadBadge(); }, 15000); }
+    else if (!_unreadTimer) { refreshUnreadBadge(); startTimer(); }
   });
 }
 
@@ -6114,10 +6216,11 @@ async function pageMessages() {
   const toId = new URLSearchParams(location.search).get('to');
   if (toId && /^\d{17}$/.test(toId)) openThread(toId);
 
-  // Light polling: fetch the open thread and append ONLY new messages (no full repaint).
-  // 3s in active thread feels near-real-time without flooding the server.
-  state.pollTimer = setInterval(() => {
-    if (document.hidden) return; // pause when tab not visible
+  // Hybrid realtime: WebSocket pushes deliver new messages instantly; polling
+  // remains as a slow safety net (and as the only path when WS is blocked).
+  // Polling backs off to 15s while WS is healthy, returns to 3s if WS dies.
+  function tick() {
+    if (document.hidden) return;
     if (state.activeOther) {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
@@ -6126,7 +6229,46 @@ async function pageMessages() {
       loadThreadPresence(state.activeOther);
     }
     refreshUnreadBadge();
-  }, 3000);
+  }
+
+  function schedulePoll() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    const interval = window.__wsAlive ? 15000 : 3000;
+    state.pollTimer = setInterval(tick, interval);
+  }
+  schedulePoll();
+  window.addEventListener('sok:ws:open', schedulePoll);
+  window.addEventListener('sok:ws:close', schedulePoll);
+
+  // Instant refresh when a message arrives in the currently-open thread.
+  // For other threads, the global badge listener has already bumped the counter;
+  // the left rail will pick it up on its next render.
+  window.addEventListener('sok:ws', (ev) => {
+    const m = ev.detail;
+    if (!m) return;
+    if (m.type === 'message:new' && state.activeOther && m.message?.peer === state.activeOther) {
+      api.messages(state.activeOther).then(r => {
+        if (!r.ok) return;
+        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+      }).catch(() => {});
+    } else if (m.type === 'message:sent' && state.activeOther && m.message?.peer === state.activeOther) {
+      // Sent from another tab — keep this tab in sync
+      api.messages(state.activeOther).then(r => {
+        if (!r.ok) return;
+        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+      }).catch(() => {});
+    } else if (m.type === 'message:read' && state.activeOther === m.by) {
+      // The other party just read our messages — repaint to show read receipts
+      if ($('#msgr-thread-scroll')) {
+        api.messages(state.activeOther).then(r => {
+          if (r.ok) renderMessages(r.messages || []);
+        }).catch(() => {});
+      }
+    } else if (m.type === 'message:new') {
+      // Inbox refresh — left rail conversation list shows latest message preview
+      renderLeft().catch(() => {});
+    }
+  });
 }
 
 function avatarEl(src, name, cls) {

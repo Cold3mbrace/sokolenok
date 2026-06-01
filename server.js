@@ -35,9 +35,39 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const db = require('./storage/db');
+const wsHub = require('./lib/ws-hub');
+
+// Transparently push every new notification through WebSocket to its recipient.
+// We monkey-patch instead of editing each call-site (there are 5+ of them)
+// so any future code that adds notifications will also benefit automatically.
+const _origCreateNotification = db.createNotification;
+db.createNotification = function patchedCreateNotification(args) {
+  const result = _origCreateNotification.call(db, args);
+  // result === null means dedupe hit or self-notification — skip realtime too.
+  if (!result || !args || !args.recipient) return result;
+  try {
+    wsHub.sendTo(args.recipient, { type: 'notification:new', notification: {
+      id: result.id,
+      kind: args.kind,
+      actor: args.actor,
+      data: args.data || {},
+      created_at: result.created_at,
+      read_at: null
+    }});
+  } catch (_) { /* never let realtime kill the API */ }
+  return result;
+};
+
+// `ws` is loaded lazily so the server still boots if npm install hasn't run
+// yet — without it WS endpoints are simply unavailable and the frontend
+// falls back to polling (same behaviour as a proxy that blocks Upgrade).
+let WebSocketServer = null;
+try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
+  console.warn('[ws] "ws" module not installed — realtime disabled, polling fallback only. Run: npm install');
+}
 
 // ---------- config ----------
-const APP_VERSION = 'v44.0.0';
+const APP_VERSION = 'v45.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2679,6 +2709,8 @@ async function handleApi(req, res, pathname, query) {
         });
       }
       db.markRead(me, other);
+      // Tell the other party their messages were seen — UI can flip the "✓" to "✓✓".
+      wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
       let prof = null;
       try { prof = await fetchProfile(other); } catch (_) {}
       return sendJson(res, 200, { ok: true, other: {
@@ -2701,6 +2733,23 @@ async function handleApi(req, res, pathname, query) {
       const saved = db.insertMessage(me, other, enc, attEnc);
       db.logEvent('message-send', me, { to: other, attachment_type: attachment?.type });
       const hydratedAtt = attachment ? await hydrateAttachment(attachment) : null;
+
+      // Realtime push. Recipient sees the message instantly; sender's other
+      // tabs/devices also get it so they stay in sync.
+      let senderProfile = null;
+      try { senderProfile = await fetchProfile(me); } catch (_) {}
+      const senderName = senderProfile?.personaname || me;
+      const senderAvatar = senderProfile?.avatar || senderProfile?.avatarfull || null;
+
+      wsHub.sendTo(other, { type: 'message:new', message: {
+        id: saved.id, from_me: false, peer: me, peer_name: senderName, peer_avatar: senderAvatar,
+        text, attachment: hydratedAtt, created_at: saved.created_at, read: false
+      }});
+      wsHub.sendTo(me, { type: 'message:sent', message: {
+        id: saved.id, from_me: true, peer: other,
+        text, attachment: hydratedAtt, created_at: saved.created_at, read: false
+      }});
+
       return sendJson(res, 200, { ok: true, message: {
         id: saved.id, from_me: true, text, attachment: hydratedAtt, created_at: saved.created_at, read: false
       } });
@@ -2956,9 +3005,63 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ---------- WebSocket setup ----------
+// One WS endpoint, /ws. Authentication is by the same session cookie used
+// elsewhere — no extra token needed. Steam IDs in the URL are ignored;
+// the only source of truth is the cookie.
+if (WebSocketServer) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = '/';
+    try { pathname = new URL(req.url, 'http://x').pathname; } catch (_) {}
+    if (pathname !== '/ws') {
+      socket.destroy();
+      return;
+    }
+
+    const steamId = getRequestSteamId(req);
+    if (!steamId) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wsHub.attachPongHandler(ws);
+      wsHub.register(ws, steamId);
+      try { ws.send(JSON.stringify({ type: 'hello', steamid: steamId, ts: Date.now() })); } catch (_) {}
+
+      // Inbound messages are small control frames (ping, typing). All real
+      // mutations still go through the HTTP API — WS is one-way push for now,
+      // so we don't dispatch arbitrary client→server commands here.
+      ws.on('message', (raw) => {
+        let m;
+        try { m = JSON.parse(String(raw)); } catch (_) { return; }
+        if (!m || typeof m !== 'object') return;
+
+        if (m.type === 'ping') {
+          try { ws.send(JSON.stringify({ type: 'pong', ts: Date.now() })); } catch (_) {}
+          return;
+        }
+        if (m.type === 'typing' && m.to) {
+          // Forward typing notification to recipient(s). Validate `to` is a steamId-shape string.
+          const to = String(m.to);
+          if (/^\d{17}$/.test(to)) {
+            wsHub.sendTo(to, { type: 'typing', from: steamId, ts: Date.now() });
+          }
+        }
+      });
+    });
+  });
+
+  wsHub.startHeartbeat();
+}
+
 server.listen(PORT, () => {
   console.log(`SOKOLENOK / LUDIK ${APP_VERSION} → http://localhost:${PORT}`);
   console.log(`Storage backend: ${db.storageHealth().backend}`);
   console.log(`Steam API key:   ${STEAM_API_KEY ? 'configured' : 'NOT SET (XML fallback only, public endpoints will still work)'}`);
   console.log(`Faceit API key:  ${FACEIT_API_KEY ? 'configured' : 'NOT SET (Faceit endpoints will return ok:false)'}`);
+  console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
