@@ -1,4 +1,4 @@
-# Деплой SOKOLENOK / LUDIK на VPS
+# Деплой SOKOLENOK на VPS
 
 Полное руководство: от пустого сервера до работающего сайта по HTTPS.
 Стек: Docker + Docker Compose + nginx + Let's Encrypt. Приложение — на чистом Node 22 (без npm-зависимостей), хранилище — SQLite в Docker-volume.

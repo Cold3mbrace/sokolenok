@@ -1,4 +1,4 @@
-/* SOKOLENOK · LUDIK — design system 1:1 to mockups */
+/* SOKOLENOK — design system 1:1 to mockups */
 
 :root {
   --bg: #0a0d0c;
@@ -79,6 +79,12 @@ button { cursor: pointer; }
   min-width: 0;
   position: relative;
 }
+/* Social pages set their own max-width inline in HTML (e.g. 800-920px).
+   These pages just need to be centered horizontally — without overriding
+   that width or affecting dashboard/inventory which expect full bleed. */
+body[data-page="friends"]       .main,
+body[data-page="notifications"] .main,
+body[data-page="settings"]      .main { margin-left: auto; margin-right: auto; }
 
 /* ============ SIDEBAR ============ */
 .brand {

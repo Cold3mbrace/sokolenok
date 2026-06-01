@@ -1,5 +1,5 @@
 // server.js
-// SOKOLENOK / LUDIK v4.4 — clean rewrite.
+// SOKOLENOK v4.4 — clean rewrite.
 // Только Node.js stdlib. Никаких npm зависимостей.
 //
 // Endpoints:
@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v46.4.0';
+const APP_VERSION = 'v46.5.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -3062,7 +3062,7 @@ function serveStatic(req, res, pathname) {
           // Default OG tags for plain /lookup and /feed
           og = renderOgTags({
             title: pathname === '/lookup' ? 'Найти игрока — SOKOLENOK' : 'Лента CS2 — SOKOLENOK',
-            desc: 'SOKOLENOK / LUDIK — экосистема для игроков CS2: статистика, репутация, инвентарь и сообщество.',
+            desc: 'SOKOLENOK — экосистема для игроков CS2: статистика, репутация, инвентарь и сообщество.',
             image: defaultImage,
             url: `${base}${pathname}`
           });
@@ -3237,7 +3237,7 @@ if (WebSocketServer) {
 }
 
 server.listen(PORT, () => {
-  console.log(`SOKOLENOK / LUDIK ${APP_VERSION} → http://localhost:${PORT}`);
+  console.log(`SOKOLENOK ${APP_VERSION} → http://localhost:${PORT}`);
   console.log(`Storage backend: ${db.storageHealth().backend}`);
   console.log(`Steam API key:   ${STEAM_API_KEY ? 'configured' : 'NOT SET (XML fallback only, public endpoints will still work)'}`);
   console.log(`Faceit API key:  ${FACEIT_API_KEY ? 'configured' : 'NOT SET (Faceit endpoints will return ok:false)'}`);

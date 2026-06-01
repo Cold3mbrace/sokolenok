@@ -1,5 +1,5 @@
 // public/app.js
-// SOKOLENOK / LUDIK shared frontend logic.
+// SOKOLENOK shared frontend logic.
 // All API calls go through `api`, all DOM helpers through `$/$$`, toasts via `toast.*`.
 // Page-specific code lives in DOMContentLoaded handlers gated by page id.
 
@@ -1028,8 +1028,7 @@ function renderSidebar(active, me) {
   bar.appendChild(el('div', { class: 'brand' },
     el('a', { href: me.logged_in ? '/dashboard' : '/' },
       el('img', { src: '/assets/logo-full-dark.png', alt: 'SOKOLENOK', class: 'brand-logo' })
-    ),
-    el('span', { class: 'brand-tag' }, 'by LUDIK')
+    )
   ));
 
   // Main nav (top)
@@ -1122,7 +1121,7 @@ function renderSidebar(active, me) {
       el('a', { href: '/terms' }, 'Соглашение'),
       el('a', { href: '/rules' }, 'Правила')
     ),
-    '© 2026 LUDIK · SOKOLENOK.PRO'));
+    '© 2026 SOKOLENOK.PRO'));
 
   // Controls (lang) at the very bottom
   bar.appendChild(el('div', { class: 'side-controls' },

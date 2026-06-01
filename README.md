@@ -1,4 +1,4 @@
-# SOKOLENOK · LUDIK — v44.0.0
+# SOKOLENOK — v44.0.0
 
 Личный кабинет игрока CS2: Steam-логин, инвентарь с реальными ценами,
 статистика, новости. Без npm-зависимостей — только Node stdlib.
@@ -238,7 +238,7 @@ server {
 
 ```ini
 [Unit]
-Description=SOKOLENOK / LUDIK
+Description=SOKOLENOK
 After=network.target
 
 [Service]
@@ -289,4 +289,4 @@ WantedBy=multi-user.target
 ## Лицензия
 
 Внутренний проект. CS2 и Steam — товарные знаки Valve Corporation.
-SOKOLENOK / LUDIK не аффилирован с Valve.
+SOKOLENOK не аффилирован с Valve.
