@@ -258,9 +258,132 @@ async function renderTopbar(active = '') {
   // Background polling for unread messages (stops on next page change naturally)
   ensureUnreadPolling();
   // Realtime channel — push messages and notifications without polling
-  if (me.logged_in) ensureRealtime();
+  if (me.logged_in) {
+    ensureRealtime();
+    // Register service worker for Web Push (no-op if browser doesn't support it)
+    ensureServiceWorker();
+  }
   return me;
 }
+
+// ============ Service Worker / Web Push ============
+let _swRegistration = null;
+async function ensureServiceWorker() {
+  if (!('serviceWorker' in navigator)) return null;
+  if (_swRegistration) return _swRegistration;
+  try {
+    _swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    return _swRegistration;
+  } catch (e) {
+    console.warn('[sw] registration failed:', e?.message);
+    return null;
+  }
+}
+
+// Convert base64url-encoded VAPID public key to Uint8Array (PushManager wants raw)
+function urlBase64ToUint8Array(b64url) {
+  const padding = '='.repeat((4 - b64url.length % 4) % 4);
+  const base64 = (b64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const buf = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) buf[i] = rawData.charCodeAt(i);
+  return buf;
+}
+
+// Returns:
+//   'unsupported' — browser doesn't have Push API
+//   'denied'      — user blocked notifications system-wide
+//   'subscribed'  — already subscribed (and we re-sent the sub to be safe)
+//   'subscribed-new' — freshly subscribed
+//   'error'       — something else went wrong (e.g. VAPID misconfigured)
+async function enablePush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    return { ok: false, status: 'unsupported' };
+  }
+  // iOS Safari: must be installed as PWA (display-mode: standalone) to allow push
+  const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  if (isIos && !isStandalone) {
+    return { ok: false, status: 'ios-not-standalone' };
+  }
+
+  if (Notification.permission === 'denied') return { ok: false, status: 'denied' };
+
+  const reg = await ensureServiceWorker();
+  if (!reg) return { ok: false, status: 'error', error: 'sw-failed' };
+  // Wait for the SW to be active — needed for PushManager.subscribe
+  if (reg.installing || reg.waiting) {
+    await new Promise(resolve => {
+      const check = () => { if (reg.active) resolve(); };
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', () => { if (sw.state === 'activated') resolve(); });
+      });
+      // Fallback timeout
+      setTimeout(resolve, 3000);
+      check();
+    });
+  }
+
+  if (Notification.permission === 'default') {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return { ok: false, status: 'denied' };
+  }
+
+  // Get VAPID public key from server
+  const keyResp = await fetch('/api/push/key').then(r => r.json()).catch(() => null);
+  if (!keyResp?.ok || !keyResp.publicKey) {
+    return { ok: false, status: 'error', error: 'no-vapid-key' };
+  }
+  const applicationServerKey = urlBase64ToUint8Array(keyResp.publicKey);
+
+  let sub = await reg.pushManager.getSubscription();
+  let fresh = false;
+  if (!sub) {
+    try {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+      fresh = true;
+    } catch (e) {
+      return { ok: false, status: 'error', error: String(e?.message || e) };
+    }
+  }
+
+  // Send subscription to server (idempotent)
+  const subJson = sub.toJSON();
+  await fetch('/api/push/subscribe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscription: subJson })
+  }).catch(() => {});
+
+  return { ok: true, status: fresh ? 'subscribed-new' : 'subscribed' };
+}
+
+async function disablePush() {
+  if (!('serviceWorker' in navigator)) return { ok: false };
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return { ok: true };
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return { ok: true };
+  const endpoint = sub.endpoint;
+  try { await sub.unsubscribe(); } catch (_) {}
+  await fetch('/api/push/unsubscribe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint })
+  }).catch(() => {});
+  return { ok: true };
+}
+
+async function isPushEnabled() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return false;
+  const sub = await reg.pushManager.getSubscription();
+  return !!sub && Notification.permission === 'granted';
+}
+
+// Expose for /settings page
+window.__push = { enable: enablePush, disable: disablePush, isEnabled: isPushEnabled };
 
 // ============ realtime (WebSocket with auto-reconnect + polling fallback) ============
 // We keep a single connection per tab. Other modules subscribe via
@@ -7243,6 +7366,83 @@ async function pageSettings() {
           'Увеличивает текст на сайте примерно на 20%. Помогает если зум недоступен. Настройка хранится локально, для этого устройства.'))
     )
   ));
+
+  // Push notifications — per-device toggle. Server stores subscription per (user, endpoint).
+  const pushStatus = el('div', { style: { fontSize: '11.5px', color: 'var(--mute)', marginTop: '6px', minHeight: '14px' } });
+  const pushBtn = el('button', { class: 'btn btn-sm', type: 'button', id: 'set-push-toggle' }, 'Загрузка…');
+  const pushTestBtn = el('button', { class: 'btn btn-sm btn-ghost', type: 'button', id: 'set-push-test',
+    style: { marginLeft: '8px', display: 'none' } }, 'Прислать тест');
+
+  async function refreshPushUi() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      pushBtn.disabled = true; pushBtn.textContent = 'Не поддерживается';
+      pushStatus.textContent = 'Ваш браузер не умеет push-уведомления.';
+      return;
+    }
+    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    if (isIos && !isStandalone) {
+      pushBtn.disabled = true; pushBtn.textContent = 'Только в PWA';
+      pushStatus.innerHTML = '⚠️ На iPhone push работает только если добавить сайт на главный экран. Откройте Safari → нажмите «Поделиться» → «На экран Домой».';
+      return;
+    }
+    const enabled = await window.__push.isEnabled();
+    pushBtn.disabled = false;
+    pushBtn.textContent = enabled ? 'Выключить пуши' : 'Включить пуши';
+    pushBtn.className = enabled ? 'btn btn-sm btn-ghost' : 'btn btn-sm btn-primary';
+    pushTestBtn.style.display = enabled ? '' : 'none';
+    if (Notification.permission === 'denied') {
+      pushStatus.textContent = '⚠️ Уведомления заблокированы в браузере. Разрешите их в настройках сайта.';
+    } else if (enabled) {
+      pushStatus.textContent = 'Push-уведомления включены на этом устройстве. Вы будете получать сообщения и комменты даже при закрытом сайте.';
+    } else {
+      pushStatus.textContent = 'Получайте сообщения и комменты даже когда сайт закрыт. Можно выключить в любой момент.';
+    }
+  }
+
+  pushBtn.addEventListener('click', async () => {
+    pushBtn.disabled = true;
+    const wasEnabled = await window.__push.isEnabled();
+    if (wasEnabled) {
+      await window.__push.disable();
+      toast.ok('Push-уведомления выключены');
+    } else {
+      const r = await window.__push.enable();
+      if (r.ok) {
+        toast.ok('Push-уведомления включены!');
+      } else if (r.status === 'denied') {
+        toast.err('Уведомления заблокированы в браузере');
+      } else if (r.status === 'ios-not-standalone') {
+        toast.err('На iPhone — сначала добавьте сайт на главный экран');
+      } else if (r.status === 'unsupported') {
+        toast.err('Браузер не поддерживает пуши');
+      } else {
+        toast.err('Не удалось подключить (' + (r.error || r.status) + ')');
+      }
+    }
+    refreshPushUi();
+  });
+
+  pushTestBtn.addEventListener('click', async () => {
+    pushTestBtn.disabled = true;
+    try {
+      const r = await fetch('/api/push/test', { method: 'POST' }).then(r => r.json());
+      if (r.ok && r.delivered > 0) toast.ok('Тест отправлен — проверьте уведомления');
+      else if (r.ok) toast.warn('Сервер отправил, но ни одна подписка не доставлена. Возможно браузер только что отключил пуши.');
+      else toast.err('Не удалось отправить: ' + (r.error || ''));
+    } catch (_) {
+      toast.err('Сетевая ошибка');
+    } finally {
+      pushTestBtn.disabled = false;
+    }
+  });
+
+  prefs.appendChild(el('div', { class: 'field' },
+    el('label', { class: 'field-label' }, 'Push-уведомления'),
+    el('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' } }, pushBtn, pushTestBtn),
+    pushStatus
+  ));
+  refreshPushUi();
 
   // Profile cover — banner image shown on the player's profile page
   // Initialize from settings; saved with the rest on Save click.

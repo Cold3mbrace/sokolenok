@@ -289,6 +289,20 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient_steam_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(recipient_steam_id, read_at);
 
+-- Web Push subscriptions. One user can have many devices/browsers, each
+-- generates its own endpoint. We dedupe by endpoint (PRIMARY KEY) — same
+-- browser re-subscribing just refreshes its keys/timestamp.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint    TEXT PRIMARY KEY,
+  steam_id    TEXT NOT NULL,
+  p256dh      TEXT NOT NULL,
+  auth        TEXT NOT NULL,
+  user_agent  TEXT,
+  created_at  TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(steam_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -2325,6 +2339,63 @@ function storageHealth() {
   return { backend, counts, sqlite_file: SQLITE_FILE, json_file: JSON_FILE };
 }
 
+// ----- push subscriptions (Web Push) -----
+function savePushSubscription({ endpoint, steam_id, p256dh, auth, user_agent }) {
+  if (!endpoint || !steam_id || !p256dh || !auth) return null;
+  const created_at = nowIso();
+  if (useSqlite()) {
+    openSqlite().prepare(
+      `INSERT INTO push_subscriptions (endpoint, steam_id, p256dh, auth, user_agent, created_at, last_used_at)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT(endpoint) DO UPDATE SET
+         steam_id=excluded.steam_id, p256dh=excluded.p256dh, auth=excluded.auth,
+         user_agent=excluded.user_agent, last_used_at=excluded.last_used_at`
+    ).run(endpoint, steam_id, p256dh, auth, user_agent || null, created_at, created_at);
+    return { endpoint };
+  }
+  const state = readFallback();
+  if (!state.push_subscriptions) state.push_subscriptions = {};
+  state.push_subscriptions[endpoint] = { endpoint, steam_id, p256dh, auth, user_agent, created_at, last_used_at: created_at };
+  writeFallback(state);
+  return { endpoint };
+}
+
+function deletePushSubscription(endpoint) {
+  if (!endpoint) return false;
+  if (useSqlite()) {
+    const r = openSqlite().prepare(`DELETE FROM push_subscriptions WHERE endpoint = ?`).run(endpoint);
+    return r.changes > 0;
+  }
+  const state = readFallback();
+  if (!state.push_subscriptions || !state.push_subscriptions[endpoint]) return false;
+  delete state.push_subscriptions[endpoint];
+  writeFallback(state);
+  return true;
+}
+
+function listPushSubscriptions(steamId) {
+  if (!steamId) return [];
+  if (useSqlite()) {
+    return openSqlite().prepare(`SELECT * FROM push_subscriptions WHERE steam_id = ?`).all(steamId);
+  }
+  const state = readFallback();
+  return Object.values(state.push_subscriptions || {}).filter(s => s.steam_id === steamId);
+}
+
+function touchPushSubscription(endpoint) {
+  if (!endpoint) return;
+  const at = nowIso();
+  if (useSqlite()) {
+    try { openSqlite().prepare(`UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?`).run(at, endpoint); } catch (_) {}
+    return;
+  }
+  const state = readFallback();
+  if (state.push_subscriptions?.[endpoint]) {
+    state.push_subscriptions[endpoint].last_used_at = at;
+    writeFallback(state);
+  }
+}
+
 module.exports = {
   // common
   nowIso, uuid,
@@ -2370,5 +2441,7 @@ module.exports = {
   deletePost, deletePublic, setPublicVerified, adminStats,
   // events
   createNotification, listNotifications, countUnreadNotifications, markNotificationsRead,
+  // push subscriptions
+  savePushSubscription, deletePushSubscription, listPushSubscriptions, touchPushSubscription,
   logEvent, storageHealth
 };

@@ -40,11 +40,44 @@ const wsHub = require('./lib/ws-hub');
 // Transparently push every new notification through WebSocket to its recipient.
 // We monkey-patch instead of editing each call-site (there are 5+ of them)
 // so any future code that adds notifications will also benefit automatically.
+// Push notification to ALL devices subscribed by this user.
+// Removes subscriptions that the push service has rejected as gone (404/410)
+// so the table stays clean. Best-effort: never throws.
+async function pushToUser(steamId, payload) {
+  if (!steamId || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return 0;
+  const subs = db.listPushSubscriptions(steamId);
+  if (!subs.length) return 0;
+  const body = JSON.stringify(payload || {});
+  let delivered = 0;
+  await Promise.all(subs.map(async (sub) => {
+    const r = await webPush.sendPush({
+      endpoint: sub.endpoint,
+      keys: { p256dh: sub.p256dh, auth: sub.auth }
+    }, body, {
+      vapidPublic: VAPID_PUBLIC_KEY,
+      vapidPrivate: VAPID_PRIVATE_KEY,
+      contact: VAPID_CONTACT,
+      ttl: 86400,
+      urgency: 'normal'
+    });
+    if (r.ok) { delivered++; db.touchPushSubscription(sub.endpoint); return; }
+    // 404 = endpoint gone forever (browser unsubscribed); 410 = expired
+    if (r.status === 404 || r.status === 410) {
+      db.deletePushSubscription(sub.endpoint);
+    }
+    // Other failures (network, 4xx other than gone) just log — the sub stays,
+    // we'll retry on next event. Don't spam the log with every transient error.
+  }));
+  return delivered;
+}
+
 const _origCreateNotification = db.createNotification;
 db.createNotification = function patchedCreateNotification(args) {
   const result = _origCreateNotification.call(db, args);
   // result === null means dedupe hit or self-notification — skip realtime too.
   if (!result || !args || !args.recipient) return result;
+
+  // Realtime push to open tabs (instant in-app reaction)
   try {
     wsHub.sendTo(args.recipient, { type: 'notification:new', notification: {
       id: result.id,
@@ -55,8 +88,49 @@ db.createNotification = function patchedCreateNotification(args) {
       read_at: null
     }});
   } catch (_) { /* never let realtime kill the API */ }
+
+  // Web Push to OS notification tray (works even when tab/browser is closed).
+  // Only for kinds the user actually wants to see — lighten the spam:
+  //   post_comment  → "Иван оставил коммент к твоему посту"
+  //   message       → handled separately at insertMessage (carries text preview)
+  //   friend_request, friend_accept → engagement-worthy
+  // post_like and subscribe are intentionally NOT pushed — would be spammy.
+  const PUSHABLE = new Set(['post_comment', 'friend_request', 'friend_accept']);
+  if (PUSHABLE.has(args.kind)) {
+    // Don't await — fire-and-forget so the API call returns immediately
+    pushNotificationKind(args.recipient, args.kind, args.actor, args.data || {}).catch(() => {});
+  }
+
   return result;
 };
+
+// Build a human-friendly title/body for a notification kind, then push it.
+async function pushNotificationKind(recipient, kind, actorSteamId, data) {
+  let actorName = actorSteamId || 'Кто-то';
+  if (actorSteamId) {
+    try {
+      const u = db.getUser(actorSteamId);
+      if (u?.persona_name) actorName = u.persona_name;
+    } catch (_) {}
+  }
+  let title = 'SOKOLENOK';
+  let body = '';
+  let url = '/notifications';
+  if (kind === 'post_comment') {
+    title = `${actorName} прокомментировал`;
+    body = data.preview ? String(data.preview).slice(0, 120) : 'Открыть пост';
+    if (data.post_id) url = `/feed#post-${data.post_id}`;
+  } else if (kind === 'friend_request') {
+    title = `${actorName} хочет добавить в друзья`;
+    body = 'Открыть запрос';
+    url = '/friends';
+  } else if (kind === 'friend_accept') {
+    title = `${actorName} принял заявку в друзья`;
+    body = 'Теперь вы можете переписываться';
+    url = '/friends';
+  }
+  return pushToUser(recipient, { title, body, url, kind });
+}
 
 // `ws` is loaded lazily so the server still boots if npm install hasn't run
 // yet — without it WS endpoints are simply unavailable and the frontend
@@ -66,8 +140,45 @@ try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
   console.warn('[ws] "ws" module not installed — realtime disabled, polling fallback only. Run: npm install');
 }
 
+// Web Push (no npm deps, self-contained crypto)
+const webPush = require('./lib/web-push');
+
+// VAPID keys: prefer env vars, otherwise auto-generate on first boot and
+// persist them in DATA_DIR/vapid.json so the same keys survive restarts.
+// Changing keys later breaks all existing subscriptions (they're tied to the
+// app-server identity), so we never regenerate if a file already exists.
+let VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+let VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_CONTACT = process.env.VAPID_CONTACT || 'mailto:admin@sokolenok.pro';
+
+function ensureVapidKeys() {
+  if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) return;
+  const dataDir = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(__dirname, '.data');
+  const vapidFile = path.join(dataDir, 'vapid.json');
+  try {
+    if (fs.existsSync(vapidFile)) {
+      const j = JSON.parse(fs.readFileSync(vapidFile, 'utf8'));
+      VAPID_PUBLIC_KEY = j.publicKey;
+      VAPID_PRIVATE_KEY = j.privateKey;
+      return;
+    }
+  } catch (_) { /* fall through to generation */ }
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const k = webPush.generateVapidKeys();
+    fs.writeFileSync(vapidFile, JSON.stringify(k, null, 2));
+    fs.chmodSync(vapidFile, 0o600); // keys are secret
+    VAPID_PUBLIC_KEY = k.publicKey;
+    VAPID_PRIVATE_KEY = k.privateKey;
+    console.log('[push] generated new VAPID keys → ' + vapidFile);
+  } catch (e) {
+    console.warn('[push] failed to initialize VAPID keys:', e?.message);
+  }
+}
+ensureVapidKeys();
+
 // ---------- config ----------
-const APP_VERSION = 'v45.0.0';
+const APP_VERSION = 'v46.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -1480,6 +1591,53 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, unread: db.countUnreadNotifications(me) });
   }
 
+  // ---------- Web Push ----------
+  // Public VAPID key — frontend needs it to call PushManager.subscribe(). No auth required.
+  if (pathname === '/api/push/key' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, publicKey: VAPID_PUBLIC_KEY || null });
+  }
+  // Save / refresh this device's subscription
+  if (pathname === '/api/push/subscribe' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const body = await readJsonBody(req);
+    const sub = body && body.subscription;
+    if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+      return sendJson(res, 400, { ok: false, error: 'bad-subscription' });
+    }
+    db.savePushSubscription({
+      endpoint: String(sub.endpoint),
+      steam_id: me,
+      p256dh: String(sub.keys.p256dh),
+      auth: String(sub.keys.auth),
+      user_agent: String(req.headers['user-agent'] || '').slice(0, 255)
+    });
+    return sendJson(res, 200, { ok: true });
+  }
+  if (pathname === '/api/push/unsubscribe' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const body = await readJsonBody(req);
+    const endpoint = body?.endpoint;
+    if (!endpoint) return sendJson(res, 400, { ok: false, error: 'no-endpoint' });
+    db.deletePushSubscription(String(endpoint));
+    return sendJson(res, 200, { ok: true });
+  }
+  // Test push — send a sample notification to the calling user (debug / settings UI)
+  if (pathname === '/api/push/test' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+      return sendJson(res, 503, { ok: false, error: 'push-not-configured' });
+    }
+    const sent = await pushToUser(me, {
+      title: 'SOKOLENOK',
+      body: 'Тестовое push-уведомление — всё работает!',
+      url: '/dashboard'
+    });
+    return sendJson(res, 200, { ok: true, delivered: sent });
+  }
+
   if (pathname === '/api/me') {
     const steamid = getRequestSteamId(req);
     if (!steamid) return sendJson(res, 200, { logged_in: false, profile: null, settings: null });
@@ -2749,6 +2907,20 @@ async function handleApi(req, res, pathname, query) {
         id: saved.id, from_me: true, peer: other,
         text, attachment: hydratedAtt, created_at: saved.created_at, read: false
       }});
+
+      // Web Push to OS tray — only when recipient has no live WS connection
+      // (otherwise they'll see an in-app toast anyway). Fire-and-forget.
+      if (!wsHub.isOnline(other)) {
+        const preview = text ? text.slice(0, 140) : (attachment ? '[вложение]' : '');
+        pushToUser(other, {
+          title: senderName,
+          body: preview,
+          url: `/messages?to=${me}`,
+          kind: 'message',
+          peer: me,
+          avatar: senderAvatar
+        }).catch(() => {});
+      }
 
       return sendJson(res, 200, { ok: true, message: {
         id: saved.id, from_me: true, text, attachment: hydratedAtt, created_at: saved.created_at, read: false

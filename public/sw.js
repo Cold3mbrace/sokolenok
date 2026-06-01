@@ -1,0 +1,71 @@
+// public/sw.js — SOKOLENOK service worker.
+// Minimal: receive push, show notification, route click.
+
+const CACHE = 'sok-v1';
+
+self.addEventListener('install', (event) => {
+  // Activate immediately — we want push subscriptions to work right after first SW registration
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  // Claim all clients so push delivery starts working without a reload
+  event.waitUntil(self.clients.claim());
+});
+
+// Push delivery: data is the JSON we send from the server.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (_) {
+    try { data = { title: 'SOKOLENOK', body: event.data ? event.data.text() : '' }; }
+    catch (_) {}
+  }
+  const title = data.title || 'SOKOLENOK';
+  const options = {
+    body: data.body || '',
+    icon: data.icon || '/assets/logo-full-dark.png',
+    badge: '/assets/logo-full-dark.png',
+    data: { url: data.url || '/', kind: data.kind || null, peer: data.peer || null },
+    // Tag messages from the same peer so a second message replaces the first one
+    // in the tray instead of stacking. Notifications still appear, just collapsed.
+    tag: data.kind === 'message' && data.peer ? `msg:${data.peer}` : undefined,
+    renotify: data.kind === 'message',
+    requireInteraction: false
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Click: focus an existing tab pointing at the right URL, or open a new one.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // Prefer a tab already on our origin — navigate it
+    for (const c of all) {
+      try {
+        const u = new URL(c.url);
+        if (u.origin === self.location.origin) {
+          await c.focus();
+          // Only navigate if it's a different path — don't disrupt the chat the user might be reading
+          const want = new URL(targetUrl, self.location.origin);
+          if (u.pathname + u.search !== want.pathname + want.search) {
+            try { await c.navigate(want.href); } catch (_) {}
+          }
+          return;
+        }
+      } catch (_) {}
+    }
+    // No matching tab — open a new one
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(targetUrl);
+    }
+  })());
+});
+
+// When the user unsubscribes via OS / browser settings, we get this event.
+// We can't reach the server here (no cookie session), so the cleanup happens
+// server-side on the next push attempt (404/410 → delete).
+self.addEventListener('pushsubscriptionchange', (event) => {
+  // Future enhancement: re-subscribe with the new endpoint here and POST it back
+});
