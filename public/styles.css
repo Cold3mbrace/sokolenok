@@ -3578,3 +3578,43 @@ body.large-font .post-act svg { transform: scale(1.1); }
   width: 8px; height: 8px; border-radius: 50%; background: var(--g);
   align-self: center; flex-shrink: 0;
 }
+
+/* ============ Push opt-in banner ============ */
+.push-banner {
+  position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 24px);
+  z-index: 9000;
+  display: flex; align-items: center; gap: 14px;
+  background: var(--card, #0f1413); border: 1px solid var(--g, #4ade80);
+  border-radius: 14px; padding: 14px 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(74, 222, 128, 0.15);
+  max-width: 560px; width: calc(100% - 32px);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.push-banner.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.push-banner-icon {
+  font-size: 28px; flex-shrink: 0;
+  filter: drop-shadow(0 0 8px rgba(74, 222, 128, 0.4));
+}
+.push-banner-text { flex: 1; min-width: 0; }
+.push-banner-title { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+.push-banner-desc { font-size: 12px; color: var(--mute, #8b95a3); line-height: 1.4; }
+.push-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.push-banner-close {
+  position: absolute; top: 8px; right: 10px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: transparent; border: none; color: var(--mute, #8b95a3);
+  font-size: 18px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.push-banner-close:hover { color: var(--text, #fff); background: rgba(255,255,255,0.05); }
+@media (max-width: 640px) {
+  .push-banner {
+    flex-direction: column; align-items: stretch; text-align: left;
+    bottom: 80px; /* keep above mobile bottom nav */
+  }
+  .push-banner-icon { font-size: 24px; }
+  .push-banner-actions { justify-content: stretch; }
+  .push-banner-actions .btn { flex: 1; }
+}

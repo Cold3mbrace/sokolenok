@@ -262,8 +262,87 @@ async function renderTopbar(active = '') {
     ensureRealtime();
     // Register service worker for Web Push (no-op if browser doesn't support it)
     ensureServiceWorker();
+    // Show a non-intrusive banner inviting user to enable push notifications
+    // (only if not already enabled and not dismissed recently)
+    setTimeout(() => maybeShowPushOptIn(), 1500);
   }
   return me;
+}
+
+// ============ Push opt-in banner ============
+// Shows a friendly banner at the top of the page inviting the user to enable
+// push notifications. Suppressed when:
+//   - browser doesn't support push
+//   - permission is already granted (or denied — no point asking again)
+//   - user has dismissed within the last 7 days
+//   - on iOS Safari outside PWA mode (push impossible there)
+async function maybeShowPushOptIn() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    if (Notification.permission !== 'default') return; // granted → no need; denied → won't help
+
+    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    // On iOS outside PWA → silently skip (we show the same hint in /settings).
+    if (isIos && !isStandalone) return;
+
+    // Respect dismissal
+    const dismissedAt = Number(localStorage.getItem('sok:push-prompt-dismissed') || 0);
+    if (dismissedAt && Date.now() - dismissedAt < 7 * 24 * 3600 * 1000) return;
+    if (localStorage.getItem('sok:push-prompt-never') === '1') return;
+
+    // Maybe already subscribed but permission lost? Belt-and-suspenders.
+    const alreadyEnabled = await window.__push.isEnabled().catch(() => false);
+    if (alreadyEnabled) return;
+
+    showPushOptInBanner();
+  } catch (_) { /* don't let opt-in errors break the page */ }
+}
+
+function showPushOptInBanner() {
+  if (document.getElementById('push-optin-banner')) return;
+  const banner = el('div', { id: 'push-optin-banner', class: 'push-banner' },
+    el('div', { class: 'push-banner-icon' }, '🔔'),
+    el('div', { class: 'push-banner-text' },
+      el('div', { class: 'push-banner-title' }, 'Включить уведомления?'),
+      el('div', { class: 'push-banner-desc' }, 'Получайте сообщения и комменты к вашим постам даже когда сайт закрыт.')
+    ),
+    el('div', { class: 'push-banner-actions' },
+      el('button', { class: 'btn btn-primary', id: 'push-banner-yes' }, 'Включить'),
+      el('button', { class: 'btn btn-ghost btn-sm', id: 'push-banner-later' }, 'Позже')
+    ),
+    el('button', { class: 'push-banner-close', id: 'push-banner-close', title: 'Больше не показывать', 'aria-label': 'Закрыть' }, '×')
+  );
+  document.body.appendChild(banner);
+  // Animate in
+  requestAnimationFrame(() => banner.classList.add('show'));
+
+  const dismiss = (forever) => {
+    banner.classList.remove('show');
+    setTimeout(() => banner.remove(), 250);
+    if (forever) { try { localStorage.setItem('sok:push-prompt-never', '1'); } catch (_) {} }
+    else { try { localStorage.setItem('sok:push-prompt-dismissed', String(Date.now())); } catch (_) {} }
+  };
+
+  $('#push-banner-yes').addEventListener('click', async () => {
+    const btn = $('#push-banner-yes');
+    btn.disabled = true; btn.textContent = 'Подключаем…';
+    const r = await window.__push.enable();
+    if (r.ok) {
+      toast.ok('Уведомления включены');
+      banner.classList.remove('show');
+      setTimeout(() => banner.remove(), 250);
+      try { localStorage.removeItem('sok:push-prompt-dismissed'); } catch (_) {}
+    } else if (r.status === 'denied') {
+      toast.err('Уведомления заблокированы в браузере. Разрешите их в настройках сайта.');
+      dismiss(false);
+    } else {
+      toast.err('Не удалось включить: ' + (r.error || r.status));
+      btn.disabled = false; btn.textContent = 'Включить';
+    }
+  });
+  $('#push-banner-later').addEventListener('click', () => dismiss(false));
+  $('#push-banner-close').addEventListener('click', () => dismiss(true));
 }
 
 // ============ Service Worker / Web Push ============
@@ -7369,9 +7448,10 @@ async function pageSettings() {
 
   // Push notifications — per-device toggle. Server stores subscription per (user, endpoint).
   const pushStatus = el('div', { style: { fontSize: '11.5px', color: 'var(--mute)', marginTop: '6px', minHeight: '14px' } });
-  const pushBtn = el('button', { class: 'btn btn-sm', type: 'button', id: 'set-push-toggle' }, 'Загрузка…');
-  const pushTestBtn = el('button', { class: 'btn btn-sm btn-ghost', type: 'button', id: 'set-push-test',
-    style: { marginLeft: '8px', display: 'none' } }, 'Прислать тест');
+  const pushBtn = el('button', { class: 'btn', type: 'button', id: 'set-push-toggle',
+    style: { minWidth: '180px', padding: '12px 20px', fontWeight: '700' } }, 'Загрузка…');
+  const pushTestBtn = el('button', { class: 'btn btn-ghost', type: 'button', id: 'set-push-test',
+    style: { marginLeft: '8px', display: 'none', padding: '12px 18px' } }, 'Прислать тест');
 
   async function refreshPushUi() {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -7389,7 +7469,7 @@ async function pageSettings() {
     const enabled = await window.__push.isEnabled();
     pushBtn.disabled = false;
     pushBtn.textContent = enabled ? 'Выключить пуши' : 'Включить пуши';
-    pushBtn.className = enabled ? 'btn btn-sm btn-ghost' : 'btn btn-sm btn-primary';
+    pushBtn.className = enabled ? 'btn btn-ghost' : 'btn btn-primary';
     pushTestBtn.style.display = enabled ? '' : 'none';
     if (Notification.permission === 'denied') {
       pushStatus.textContent = '⚠️ Уведомления заблокированы в браузере. Разрешите их в настройках сайта.';

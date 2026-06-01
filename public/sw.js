@@ -1,7 +1,7 @@
 // public/sw.js — SOKOLENOK service worker.
 // Minimal: receive push, show notification, route click.
 
-const CACHE = 'sok-v1';
+const CACHE = 'sok-v2';
 
 self.addEventListener('install', (event) => {
   // Activate immediately — we want push subscriptions to work right after first SW registration
@@ -32,7 +32,38 @@ self.addEventListener('push', (event) => {
     renotify: data.kind === 'message',
     requireInteraction: false
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+
+  // Suppression rule: don't pop an OS notification if the user is *actively
+  // looking at the relevant content right now*. Specifically — for messages,
+  // suppress only when:
+  //   1) at least one tab on our origin is focused, AND
+  //   2) that focused tab is on /messages with ?to=<peer> or the chat is open
+  // For everything else (notifications, comments) — always show.
+  event.waitUntil((async () => {
+    try {
+      if (data.kind === 'message' && data.peer) {
+        const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const activeMatchingChat = all.find(c => {
+          if (c.visibilityState !== 'visible' || !c.focused) return false;
+          try {
+            const u = new URL(c.url);
+            if (u.pathname !== '/messages') return false;
+            // The chat page tracks the open thread in URL or via postMessage.
+            // Easy heuristic: ?to=<peer> in the URL.
+            return u.searchParams.get('to') === data.peer;
+          } catch (_) { return false; }
+        });
+        if (activeMatchingChat) {
+          // User is actively reading this chat — skip OS popup.
+          return;
+        }
+      }
+      await self.registration.showNotification(title, options);
+    } catch (_) {
+      // Last-resort: always try to show — better a duplicate than silence
+      try { await self.registration.showNotification(title, options); } catch (_) {}
+    }
+  })());
 });
 
 // Click: focus an existing tab pointing at the right URL, or open a new one.

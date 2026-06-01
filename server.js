@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v46.0.0';
+const APP_VERSION = 'v46.2.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2908,19 +2908,20 @@ async function handleApi(req, res, pathname, query) {
         text, attachment: hydratedAtt, created_at: saved.created_at, read: false
       }});
 
-      // Web Push to OS tray — only when recipient has no live WS connection
-      // (otherwise they'll see an in-app toast anyway). Fire-and-forget.
-      if (!wsHub.isOnline(other)) {
-        const preview = text ? text.slice(0, 140) : (attachment ? '[вложение]' : '');
-        pushToUser(other, {
-          title: senderName,
-          body: preview,
-          url: `/messages?to=${me}`,
-          kind: 'message',
-          peer: me,
-          avatar: senderAvatar
-        }).catch(() => {});
-      }
+      // Web Push to OS tray. Always sent — the service worker is smart enough
+      // to suppress the OS notification if the user has the chat already open
+      // and focused (see sw.js). Sending unconditionally is the only way to
+      // cover "tab open in background", "browser minimized", "phone locked",
+      // which all still report a live WebSocket connection.
+      const preview = text ? text.slice(0, 140) : (attachment ? '[вложение]' : '');
+      pushToUser(other, {
+        title: senderName,
+        body: preview,
+        url: `/messages?to=${me}`,
+        kind: 'message',
+        peer: me,
+        avatar: senderAvatar
+      }).catch(() => {});
 
       return sendJson(res, 200, { ok: true, message: {
         id: saved.id, from_me: true, text, attachment: hydratedAtt, created_at: saved.created_at, read: false
