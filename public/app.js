@@ -1009,6 +1009,7 @@ function renderSidebar(active, me) {
   // For logged-in users we split nav: top group + Settings pinned to the bottom
   const authedTop = [
     { href: '/dashboard', label: 'Дашборд',   key: 'dashboard', icon: 'home' },
+    { href: `/lookup?steamid=${me.steamid}`, label: 'Мой профиль', key: 'profile', icon: 'users' },
     { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
     { href: '/notifications', label: 'Уведомления', key: 'notifications', icon: 'bell', badge: 'notif' },
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
@@ -1429,6 +1430,17 @@ async function pageDashboard() {
   const subEl = $('#dash-sub');
   if (titleEl && me.profile?.personaname) {
     titleEl.textContent = `${me.profile.personaname} · матчи и аналитика`;
+  }
+  // "Open my public profile" — clearly separates the analytics dashboard
+  // (this page) from the social profile (/lookup) that other users see.
+  if (titleEl && !document.getElementById('dash-view-profile')) {
+    const btn = el('a', {
+      id: 'dash-view-profile',
+      href: `/lookup?steamid=${me.steamid}`,
+      class: 'btn btn-ghost btn-sm',
+      style: { marginLeft: '12px', verticalAlign: 'middle', fontSize: '12px' }
+    }, '👤 Открыть мою публичную страницу');
+    titleEl.appendChild(btn);
   }
   // Clear any leftover data-attr from old mode logic (no-op if absent)
   delete document.body.dataset.dashMode;
@@ -3808,11 +3820,23 @@ async function paintLookupSocial(steamid, profR) {
     return;
   }
 
-  // Can't friend yourself
+  // Own profile view — show owner controls instead of social actions.
+  // This is the page other users see, so it's also useful to view as the owner
+  // ("how do I look to others?"). The dashboard URL is now reserved for analytics.
   if (me.steamid === steamid) {
+    actions.appendChild(el('div', { class: 'lk-social-hint', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+      el('span', { html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' }),
+      'Это ваша публичная страница — как её видят другие'
+    ));
+    actions.appendChild(el('a', { class: 'btn', href: '/settings',
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Редактировать профиль'
+    }));
+    actions.appendChild(el('a', { class: 'btn btn-ghost', href: '/dashboard',
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Открыть дашборд'
+    }));
     actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
       onclick: () => openShareProfileModal(steamid, name, profR?.profile),
-      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>Поделиться своим профилем'
+      html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>Поделиться'
     }));
     card.appendChild(actions);
     root.appendChild(card);
@@ -6244,8 +6268,10 @@ async function pageMessages() {
     state.threadFriend = r.friend;
     renderMessages(r.messages || []);
 
-    // Composer (only if still friends)
-    if (r.friend) {
+    // Composer is shown if the user can write to this peer. Friends — always.
+    // Moderators/admins — to anyone, for support replies. Otherwise locked.
+    const canWrite = r.friend || !!(window.__me?.is_admin);
+    if (canWrite) {
       const draftKey = `sok:draft:${me?.steamid || 'a'}:${o.steam_id}`;
       const input = el('textarea', { class: 'msgr-input', rows: '1', placeholder: 'Сообщение…', maxlength: '2000' });
       try { input.value = localStorage.getItem(draftKey) || ''; } catch (_) {}
@@ -6406,7 +6432,9 @@ async function pageMessages() {
       });
     } else {
       right.appendChild(el('div', { class: 'msgr-composer-locked' },
-        'Вы не друзья — переписка недоступна. Добавьте игрока в друзья на странице профиля.'));
+        window.__me?.is_admin
+          ? 'Этот игрок недоступен для переписки.'
+          : 'Вы не друзья — переписка недоступна. Добавьте игрока в друзья на странице профиля.'));
     }
 
     // scroll to bottom on initial paint

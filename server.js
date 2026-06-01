@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v46.2.0';
+const APP_VERSION = 'v46.3.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2880,7 +2880,12 @@ async function handleApi(req, res, pathname, query) {
     if (req.method === 'POST') {
       if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
       if (db.eitherBlocked(me, other)) return sendJson(res, 403, { ok: false, error: 'blocked' });
-      if (!db.areFriends(me, other)) return sendJson(res, 403, { ok: false, error: 'not-friends' });
+      // Friends-only rule applies to regular users. Moderators and the
+      // superadmin can DM anyone — they're handling support, abuse reports,
+      // and ban appeals where there's no pre-existing friendship.
+      if (!canModerate(me) && !db.areFriends(me, other)) {
+        return sendJson(res, 403, { ok: false, error: 'not-friends' });
+      }
       const body = await readJsonBody(req);
       const text = String(body.text || '').trim();
       const attachment = body.attachment && typeof body.attachment === 'object' ? sanitizeAttachment(body.attachment) : null;

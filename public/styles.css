@@ -79,6 +79,26 @@ button { cursor: pointer; }
   min-width: 0;
   position: relative;
 }
+/* Central column per page. Narrow (feed-like) for social pages, wider for
+   data-heavy pages. Mobile keeps full width via the existing media queries. */
+body[data-page="feed"]          .main,
+body[data-page="lookup"]        .main,
+body[data-page="friends"]       .main,
+body[data-page="communities"]   .main,
+body[data-page="notifications"] .main,
+body[data-page="settings"]      .main,
+body[data-page="me"]            .main,
+body[data-page="messages"]      .main {
+  max-width: 760px; margin-left: auto; margin-right: auto;
+}
+body[data-page="dashboard"] .main,
+body[data-page="inventory"] .main,
+body[data-page="admin"]     .main {
+  max-width: 1040px; margin-left: auto; margin-right: auto;
+}
+@media (max-width: 880px) {
+  body[data-page] .main { max-width: 100%; }
+}
 
 /* ============ SIDEBAR ============ */
 .brand {
