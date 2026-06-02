@@ -6543,6 +6543,13 @@ async function pageMessages() {
           if (r.ok) renderMessages(r.messages || []);
         }).catch(() => {});
       }
+    } else if (m.type === 'message:reaction') {
+      // Reaction toggled — update just that bubble's chips in place.
+      // No full re-render: the row may be off-screen, we don't want jitter.
+      if (m.msg_id != null) {
+        const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.msg_id}"]`);
+        if (row) window.__updateBubbleReactions?.(row, m.reactions || {});
+      }
     } else if (m.type === 'message:new') {
       // Inbox refresh — left rail conversation list shows latest message preview
       renderLeft().catch(() => {});
