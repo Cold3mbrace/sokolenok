@@ -5236,20 +5236,44 @@ function paintFeedList(r) {
   root.innerHTML = '';
 
   const items = r?.items || [];
+
+  // Visible debug strip — ALWAYS shown for now while we hunt the mobile bug.
+  // Will be removed once feed is confirmed working on all devices.
+  const dbgLine = el('div', {
+    style: { fontSize: '10.5px', color: 'var(--mute)', padding: '6px 10px',
+             background: 'rgba(74,222,128,0.05)', borderRadius: '4px',
+             marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all' }
+  }, `feed: ok=${r?.ok} items=${items.length} ${r?._debug ? JSON.stringify(r._debug) : ''}`);
+  root.appendChild(dbgLine);
+
   if (!items.length) {
     root.appendChild(buildFeedEmpty(r?.scope || 'all'));
-    // Surface server-side counts so misbehaviour can be diagnosed without DevTools.
-    // Tiny grey line at the bottom of the empty card, nothing fancy.
-    if (r && r._debug) {
-      const d = r._debug;
-      root.appendChild(el('div', {
-        style: { fontSize: '10.5px', color: 'var(--mute)', textAlign: 'center', marginTop: '10px', opacity: '0.7' }
-      }, `dbg: authed=${d.authed} · scope=${d.scope} · news=${d.news_count} · posts=${d.posts_total} · returned=${d.returned}`));
-    }
     return;
   }
 
+  let renderedOk = 0;
+  let renderErrors = [];
   for (const it of items) {
+    try {
+      const card = renderOneFeedItem(it);
+      if (card) { root.appendChild(card); renderedOk++; }
+    } catch (e) {
+      renderErrors.push(`post#${it.post_id || '?'}: ${e?.message || e}`);
+    }
+  }
+
+  // If we got items but couldn't render any — show the error so user can screenshot it
+  if (renderedOk === 0 && renderErrors.length) {
+    root.appendChild(el('div', {
+      style: { padding: '12px', background: 'rgba(255,80,80,0.1)', border: '1px solid rgba(255,80,80,0.3)',
+               borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace', wordBreak: 'break-all', color: '#ffaaaa' }
+    }, 'RENDER ERROR: ' + renderErrors.slice(0, 3).join(' | ')));
+  } else if (renderErrors.length) {
+    console.warn('[feed] partial render errors:', renderErrors);
+  }
+}
+
+function renderOneFeedItem(it) {
     const card = el('div', { class: 'feed-item card' });
     // Header: public name + verified + date
     card.appendChild(el('div', { class: 'feed-item-h' },
@@ -5300,8 +5324,7 @@ function paintFeedList(r) {
       if (footer) card.appendChild(footer);
       markPostViewed(it.post_id);
     }
-    root.appendChild(card);
-  }
+    return card;
 }
 
 function paintFeedSide(r) {
