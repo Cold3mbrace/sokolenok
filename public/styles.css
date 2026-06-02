@@ -43,6 +43,23 @@ body {
   background: var(--bg);
   min-height: 100vh;
 }
+/* When the site is launched as a PWA from the iPhone home screen, the OS
+   status bar overlaps content unless we explicitly reserve space for it.
+   With apple-mobile-web-app-status-bar-style="black" iOS draws its own
+   status bar, but we also defensively pad the body to handle the
+   "black-translucent" case (older installed PWAs that haven't been
+   reinstalled yet won't pick up the new meta tag immediately).
+
+   EXCEPTION: the messages page is a full-screen layout that handles
+   safe-area itself (sticky thread header, fixed composer). Adding body
+   padding there double-pushes the header and shifts the composer too high. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  body:not([data-page="messages"]) {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+}
 body::before {
   content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background:
@@ -1766,16 +1783,28 @@ body[data-page="settings"]      .main { margin-left: auto; margin-right: auto; }
 }
 @media (max-width: 880px) {
   .layout { grid-template-columns: 1fr; }
-  .sidebar { position: relative; height: auto; flex-direction: row; padding: 12px 16px; align-items: center; overflow-x: auto; }
-  .sidebar .brand { padding: 0 14px 0 0; }
-  .brand-logo { width: 60px; }
+  .sidebar {
+    position: sticky; top: 0; z-index: 50;
+    height: auto; flex-direction: row;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 14px 8px;
+    align-items: center; overflow-x: auto;
+    background: var(--bg); backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .sidebar .brand { padding: 0 12px 0 0; }
+  .brand-logo { width: 48px; }
   .nav { flex-direction: row; gap: 4px; }
   .side-status, .side-copy, .side-controls { display: none; }
-  .main { padding: 18px 16px 40px; }
-  .page-title { font-size: 36px; }
+  .main { padding: 14px 14px 40px; }
+  .page-title { font-size: 28px; }
+  .page-sub { font-size: 13px; margin-bottom: 16px; }
   .kpis, .kpis.k4 { grid-template-columns: repeat(2, 1fr); }
   .three-col { grid-template-columns: 1fr; }
   .items-table .it-head, .items-table .it-row { grid-template-columns: 1fr; gap: 6px; padding: 14px; }
+  /* Compact KPI cards on mobile — they're huge by default */
+  .kpi { padding: 12px; }
+  .kpi .kpi-value { font-size: 22px; }
+  .kpi .kpi-label { font-size: 11px; }
 }
 
 /* ============ ANIMATIONS (premium feel) ============ */
@@ -2402,11 +2431,28 @@ body[data-page="settings"]      .main { margin-left: auto; margin-right: auto; }
 
 /* Messenger: single-pane on mobile */
 @media (max-width: 760px) {
-  .msgr { grid-template-columns: 1fr; }
+  .msgr {
+    grid-template-columns: 1fr;
+    width: 100%; max-width: 100%; min-width: 0;
+    overflow-x: hidden;
+  }
+  .msgr-left, .msgr-right { min-width: 0; max-width: 100%; }
+  .msgr-left-h { padding: 12px 14px 10px; }
+  .msgr-tabs { width: 100%; }
+  .msgr-tab { min-width: 0; padding: 8px 10px; font-size: 13px; }
   body.msgr-thread-open .msgr-left { display: none; }
   body:not(.msgr-thread-open) .msgr-right { display: none; }
   .main-messages { padding: 0; }
   body.has-bottom-nav .main-messages { padding-bottom: 0 !important; }
+  /* Instagram-style conversation row: just avatar + name + preview, hairline divider */
+  .msgr-convo {
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    background: transparent;
+  }
+  .msgr-convo:active { background: rgba(255,255,255,0.03); }
+  .msgr-convo.active { background: transparent; }
+  .msgr-avatar { width: 48px; height: 48px; }
 }
 
 /* Very small phones */
@@ -3140,12 +3186,16 @@ button.nav-link {
   }
   /* Account for iOS status bar / notch — push the thread header below it */
   body.msgr-thread-open .msgr-thread-h {
-    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    padding-top: calc(14px + env(safe-area-inset-top, 0px));
+    padding-bottom: 12px;
     position: sticky; top: 0; z-index: 5;
   }
-  /* Composer respects the bottom safe-area (home indicator on iPhones) */
+  /* Composer respects the bottom safe-area (home indicator on iPhones).
+     Extra padding to ensure the send button isn't pinned right at the
+     home-indicator line where iOS gestures can interfere with taps. */
   body.msgr-thread-open .msgr-composer {
-    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    padding-top: 10px;
   }
 }
 

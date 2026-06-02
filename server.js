@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v47.8.0';
+const APP_VERSION = 'v47.2.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2856,19 +2856,6 @@ async function handleApi(req, res, pathname, query) {
     const emoji = String(body.emoji || '');
     if (!allowed.includes(emoji)) return sendJson(res, 400, { ok: false, error: 'bad-emoji' });
     const r = db.toggleMessageReaction(msgId, me, emoji);
-    // Realtime: notify the other party so their UI updates without page reload
-    const otherSteamId = m.sender_steam_id === me ? m.recipient_steam_id : m.sender_steam_id;
-    wsHub.sendTo(otherSteamId, {
-      type: 'message:reaction',
-      msg_id: msgId,
-      reactions: r.reactions
-    });
-    // Also notify ME on other devices/tabs (so a reaction set on phone updates desktop)
-    wsHub.sendTo(me, {
-      type: 'message:reaction',
-      msg_id: msgId,
-      reactions: r.reactions
-    });
     return sendJson(res, 200, { ok: true, reactions: r.reactions });
   }
 

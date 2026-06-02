@@ -4699,19 +4699,9 @@ async function pageFeed() {
     if (list) list.innerHTML = '<div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем ленту…</div></div>';
     try {
       const r = await api.feed(state.scope);
-      // Defensive: surface raw shape on screen so we can diagnose without DevTools
-      window.__lastFeed = r;
       paintFeedList(r);
-    } catch (e) {
-      // Show the real error instead of silently showing empty state
-      const list2 = $('#feed-list');
-      if (list2) {
-        list2.innerHTML = '';
-        list2.appendChild(el('div', {
-          style: { padding: '12px', background: 'rgba(255,80,80,0.1)', border: '1px solid rgba(255,80,80,0.3)',
-                   borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace', wordBreak: 'break-all', color: '#ffaaaa' }
-        }, 'FETCH ERROR: ' + (e?.message || String(e))));
-      }
+    } catch (_) {
+      paintFeedList({ ok: false, items: [] });
     }
   };
 
@@ -5012,9 +5002,7 @@ function buildPostFooter(item, me) {
     });
     preview.style.display = '';
   };
-  // Defer load to avoid spamming /api/posts/N/comments for every post at once.
-  // Safari iOS doesn't have requestIdleCallback — accessing it as a bare name
-  // throws ReferenceError, so we must check via window.
+  // Defer load to avoid spamming /api/posts/N/comments for every post at once
   if (typeof window.requestIdleCallback === 'function') {
     window.requestIdleCallback(loadPreview, { timeout: 1500 });
   } else {
@@ -5252,44 +5240,20 @@ function paintFeedList(r) {
   root.innerHTML = '';
 
   const items = r?.items || [];
-
-  // Visible debug strip — ALWAYS shown for now while we hunt the mobile bug.
-  // Will be removed once feed is confirmed working on all devices.
-  const dbgLine = el('div', {
-    style: { fontSize: '10.5px', color: 'var(--mute)', padding: '6px 10px',
-             background: 'rgba(74,222,128,0.05)', borderRadius: '4px',
-             marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all' }
-  }, `feed: ok=${r?.ok} items=${items.length} ${r?._debug ? JSON.stringify(r._debug) : ''}`);
-  root.appendChild(dbgLine);
-
   if (!items.length) {
     root.appendChild(buildFeedEmpty(r?.scope || 'all'));
+    // Surface server-side counts so misbehaviour can be diagnosed without DevTools.
+    // Tiny grey line at the bottom of the empty card, nothing fancy.
+    if (r && r._debug) {
+      const d = r._debug;
+      root.appendChild(el('div', {
+        style: { fontSize: '10.5px', color: 'var(--mute)', textAlign: 'center', marginTop: '10px', opacity: '0.7' }
+      }, `dbg: authed=${d.authed} · scope=${d.scope} · news=${d.news_count} · posts=${d.posts_total} · returned=${d.returned}`));
+    }
     return;
   }
 
-  let renderedOk = 0;
-  let renderErrors = [];
   for (const it of items) {
-    try {
-      const card = renderOneFeedItem(it);
-      if (card) { root.appendChild(card); renderedOk++; }
-    } catch (e) {
-      renderErrors.push(`post#${it.post_id || '?'}: ${e?.message || e}`);
-    }
-  }
-
-  // If we got items but couldn't render any — show the error so user can screenshot it
-  if (renderedOk === 0 && renderErrors.length) {
-    root.appendChild(el('div', {
-      style: { padding: '12px', background: 'rgba(255,80,80,0.1)', border: '1px solid rgba(255,80,80,0.3)',
-               borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace', wordBreak: 'break-all', color: '#ffaaaa' }
-    }, 'RENDER ERROR: ' + renderErrors.slice(0, 3).join(' | ')));
-  } else if (renderErrors.length) {
-    console.warn('[feed] partial render errors:', renderErrors);
-  }
-}
-
-function renderOneFeedItem(it) {
     const card = el('div', { class: 'feed-item card' });
     // Header: public name + verified + date
     card.appendChild(el('div', { class: 'feed-item-h' },
@@ -5340,7 +5304,8 @@ function renderOneFeedItem(it) {
       if (footer) card.appendChild(footer);
       markPostViewed(it.post_id);
     }
-    return card;
+    root.appendChild(card);
+  }
 }
 
 function paintFeedSide(r) {
@@ -6542,13 +6507,6 @@ async function pageMessages() {
         api.messages(state.activeOther).then(r => {
           if (r.ok) renderMessages(r.messages || []);
         }).catch(() => {});
-      }
-    } else if (m.type === 'message:reaction') {
-      // Reaction toggled — update just that bubble's chips in place.
-      // No full re-render: the row may be off-screen, we don't want jitter.
-      if (m.msg_id != null) {
-        const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.msg_id}"]`);
-        if (row) window.__updateBubbleReactions?.(row, m.reactions || {});
       }
     } else if (m.type === 'message:new') {
       // Inbox refresh — left rail conversation list shows latest message preview
