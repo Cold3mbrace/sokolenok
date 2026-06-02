@@ -5012,8 +5012,14 @@ function buildPostFooter(item, me) {
     });
     preview.style.display = '';
   };
-  // Defer load to avoid spamming /api/posts/N/comments for every post at once
-  requestIdleCallback ? requestIdleCallback(loadPreview, { timeout: 1500 }) : setTimeout(loadPreview, 300);
+  // Defer load to avoid spamming /api/posts/N/comments for every post at once.
+  // Safari iOS doesn't have requestIdleCallback — accessing it as a bare name
+  // throws ReferenceError, so we must check via window.
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(loadPreview, { timeout: 1500 });
+  } else {
+    setTimeout(loadPreview, 300);
+  }
 
   commentBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
