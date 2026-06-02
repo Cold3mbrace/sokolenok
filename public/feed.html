@@ -26,6 +26,10 @@
     @media (max-width: 1000px) {
       .feed-grid { grid-template-columns: minmax(0, 640px); justify-content: center; }
     }
+    @media (max-width: 700px) {
+      .feed-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+      #feed-side { display: none; }
+    }
   </style>
 </head>
 <body data-page="feed">
