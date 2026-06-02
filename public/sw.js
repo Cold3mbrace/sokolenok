@@ -1,7 +1,7 @@
 // public/sw.js — SOKOLENOK service worker.
 // Minimal: receive push, show notification, route click.
 
-const CACHE = 'sok-v2';
+const CACHE = 'sok-v3';
 
 self.addEventListener('install', (event) => {
   // Activate immediately — we want push subscriptions to work right after first SW registration
@@ -23,8 +23,8 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'SOKOLENOK';
   const options = {
     body: data.body || '',
-    icon: data.icon || '/assets/logo-full-dark.png',
-    badge: '/assets/logo-full-dark.png',
+    icon: data.icon || '/assets/logo-icon.png',
+    badge: '/assets/logo-icon.png',
     data: { url: data.url || '/', kind: data.kind || null, peer: data.peer || null },
     // Tag messages from the same peer so a second message replaces the first one
     // in the tray instead of stacking. Notifications still appear, just collapsed.

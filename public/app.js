@@ -1430,15 +1430,18 @@ async function pageDashboard() {
   if (titleEl && me.profile?.personaname) {
     titleEl.textContent = `${me.profile.personaname} · матчи и аналитика`;
   }
-  // "Open my public profile" — clearly separates the analytics dashboard
-  // (this page) from the social profile (/lookup) that other users see.
+  // "Open my public profile" — compact icon-only button next to the title.
+  // The dashboard is for analytics; this is a quiet way to switch to the
+  // social-profile view without consuming visual weight.
   if (titleEl && !document.getElementById('dash-view-profile')) {
     const btn = el('a', {
       id: 'dash-view-profile',
       href: `/lookup?steamid=${me.steamid}`,
-      class: 'btn btn-ghost btn-sm',
-      style: { marginLeft: '12px', verticalAlign: 'middle', fontSize: '12px' }
-    }, '👤 Открыть мою публичную страницу');
+      class: 'dash-profile-link',
+      title: 'Открыть мою публичную страницу',
+      'aria-label': 'Открыть мою публичную страницу',
+      html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>'
+    });
     titleEl.appendChild(btn);
   }
   // Clear any leftover data-attr from old mode logic (no-op if absent)
@@ -5235,6 +5238,14 @@ function paintFeedList(r) {
   const items = r?.items || [];
   if (!items.length) {
     root.appendChild(buildFeedEmpty(r?.scope || 'all'));
+    // Surface server-side counts so misbehaviour can be diagnosed without DevTools.
+    // Tiny grey line at the bottom of the empty card, nothing fancy.
+    if (r && r._debug) {
+      const d = r._debug;
+      root.appendChild(el('div', {
+        style: { fontSize: '10.5px', color: 'var(--mute)', textAlign: 'center', marginTop: '10px', opacity: '0.7' }
+      }, `dbg: authed=${d.authed} · scope=${d.scope} · news=${d.news_count} · posts=${d.posts_total} · returned=${d.returned}`));
+    }
     return;
   }
 
@@ -5601,7 +5612,7 @@ function openCreatePostModal(pub, existing) {
     if (pollBox.style.display !== 'none' && pollOpts.length >= 2) {
       const opts = pollOpts.map(o => o.input.value.trim()).filter(Boolean);
       if (opts.length < 2) { toast.warn('Опрос: минимум 2 варианта с текстом'); return false; }
-      poll = { question: pollQuestion.value.trim(), options: opts.map(t => ({ text: t, votes: [] })) };
+      poll = { question: pollQuestion.value.trim(), options: opts };
     } else if (isEdit && existing.poll && pollBox.style.display === 'none') {
       // Remove poll from existing post
       poll = null;

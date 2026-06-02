@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v46.5.0';
+const APP_VERSION = 'v47.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2097,6 +2097,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     const scope = query.get('scope') || 'all'; // 'all' | 'subs' | 'official' | 'hot'
     const items = [];
+    const _debug = { authed: !!me, scope, news_count: 0, posts_count: 0, posts_total: 0 };
 
     // Official news as feed items
     if (scope === 'all' || scope === 'official') {
@@ -2114,6 +2115,7 @@ async function handleApi(req, res, pathname, query) {
           created_at: n.date || null   // already ISO string from fetchSteamNews
         });
       }
+      _debug.news_count = (news.items || []).length;
     }
 
     // User posts from subscribed publics (or all publics if scope=all and not logged in we skip)
@@ -2124,6 +2126,7 @@ async function handleApi(req, res, pathname, query) {
       }
       // scope 'all' / 'hot': from all publics. For 'hot' we'll re-sort by engagement.
       const posts = db.listPosts({ publicIds: scope === 'subs' ? publicIds : null, limit: scope === 'hot' ? 200 : 50 });
+      _debug.posts_total = posts.length;
       db.attachPostStats(posts, me);
       // For 'hot' scope: keep posts created in the last 7 days, score by engagement
       let usePosts = posts;
@@ -2151,7 +2154,22 @@ async function handleApi(req, res, pathname, query) {
           images: p.images_json ? (() => { try { return JSON.parse(p.images_json); } catch (_) { return null; } })() : null,
           author_steam_id: p.author_steam_id,
           likes: p.likes, views: p.views, comments: p.comments, liked: p.liked,
-          poll: p.poll_json ? (() => { try { return JSON.parse(p.poll_json); } catch (_) { return null; } })() : null,
+          poll: p.poll_json ? (() => {
+            try {
+              const pp = JSON.parse(p.poll_json);
+              if (pp && Array.isArray(pp.options)) {
+                pp.options = pp.options.map(o => {
+                  // Heal poll items that were saved as String({text,votes}) → "[object Object]".
+                  // We can't recover the original text, but at least show it as Variant N.
+                  if (!o || typeof o !== 'object') return { text: String(o || ''), votes: [] };
+                  let t = (typeof o.text === 'string') ? o.text : '';
+                  if (t === '[object Object]' || !t) t = '(вариант)';
+                  return { text: t, votes: Array.isArray(o.votes) ? o.votes : [] };
+                });
+              }
+              return pp;
+            } catch (_) { return null; }
+          })() : null,
           edited_at: p.edited_at || null,
           pinned_at: p.pinned_at || null,
           created_at: p.created_at,
@@ -2162,7 +2180,8 @@ async function handleApi(req, res, pathname, query) {
 
     // Sort: for 'hot' keep server order (by score). For others — by date.
     if (scope !== 'hot') items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-    return sendJson(res, 200, { ok: true, scope, items: items.slice(0, 60) });
+    _debug.returned = items.length;
+    return sendJson(res, 200, { ok: true, scope, items: items.slice(0, 60), _debug });
   }
 
   // Recommended publics — those subscribed to by my friends but not by me.
