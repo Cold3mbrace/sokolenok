@@ -43,22 +43,32 @@ body {
   background: var(--bg);
   min-height: 100vh;
 }
-/* When the site is launched as a PWA from the iPhone home screen, the OS
-   status bar overlaps content unless we explicitly reserve space for it.
-   With apple-mobile-web-app-status-bar-style="black" iOS draws its own
-   status bar, but we also defensively pad the body to handle the
-   "black-translucent" case (older installed PWAs that haven't been
-   reinstalled yet won't pick up the new meta tag immediately).
-
-   EXCEPTION: the messages page is a full-screen layout that handles
-   safe-area itself (sticky thread header, fixed composer). Adding body
-   padding there double-pushes the header and shifts the composer too high. */
+/* PWA mode (added to home screen on iPhone) — the iOS status bar overlaps
+   our content. Push everything down by the safe-area inset and fill that
+   space with a green "SOKOLENOK" branding strip so the notch zone isn't
+   awkwardly empty. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
-  body:not([data-page="messages"]) {
-    padding-top: env(safe-area-inset-top, 0px);
+  body {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 26px);
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
   }
+  body::after {
+    content: 'SOKOLENOK';
+    position: fixed; top: 0; left: 0; right: 0;
+    height: calc(env(safe-area-inset-top, 0px) + 26px);
+    padding-top: env(safe-area-inset-top, 0px);
+    background: var(--g, #4ade80);
+    color: #fff;
+    font-size: 12px; font-weight: 800; letter-spacing: 0.12em;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+    text-align: center;
+    pointer-events: none;
+  }
+  /* Messages page is full-screen — banner needs to sit ABOVE its chrome,
+     not get clipped by .msgr's overflow:hidden. The body padding already
+     pushes the messenger down, so just make sure the strip stays visible. */
 }
 body::before {
   content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
@@ -2286,14 +2296,15 @@ body[data-page="settings"]      .main { margin-left: auto; margin-right: auto; }
 .msgr-empty-sub { font-size: 13px; max-width: 320px; line-height: 1.5; }
 
 .msgr-thread-h {
-  display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
   border-bottom: 1px solid var(--line); background: var(--card);
+  min-height: 56px;
 }
-.msgr-thread-h .msgr-avatar { width: 40px; height: 40px; font-size: 14px; }
-.msgr-thread-h-info { flex: 1; min-width: 0; }
-.msgr-thread-name { font-size: 15px; font-weight: 700; color: var(--text); text-decoration: none; }
+.msgr-thread-h .msgr-avatar { width: 36px; height: 36px; font-size: 13px; flex-shrink: 0; }
+.msgr-thread-h-info { flex: 1; min-width: 0; line-height: 1.25; }
+.msgr-thread-name { font-size: 15px; font-weight: 600; color: var(--text); text-decoration: none; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msgr-thread-name:hover { color: var(--g); }
-.msgr-thread-actions { display: flex; gap: 6px; }
+.msgr-thread-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
 .msgr-thread-scroll {
   flex: 1; overflow-y: auto; min-height: 0; padding: 18px;
@@ -3184,10 +3195,11 @@ button.nav-link {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
-  /* Account for iOS status bar / notch — push the thread header below it */
+  /* Mobile thread header — banner above handles safe-area now, just stick
+     header to top of the messenger column for scroll behaviour */
   body.msgr-thread-open .msgr-thread-h {
-    padding-top: calc(14px + env(safe-area-inset-top, 0px));
-    padding-bottom: 12px;
+    padding-top: 10px;
+    padding-bottom: 10px;
     position: sticky; top: 0; z-index: 5;
   }
   /* Composer respects the bottom safe-area (home indicator on iPhones).

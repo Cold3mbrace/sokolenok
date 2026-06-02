@@ -2856,6 +2856,10 @@ async function handleApi(req, res, pathname, query) {
     const emoji = String(body.emoji || '');
     if (!allowed.includes(emoji)) return sendJson(res, 400, { ok: false, error: 'bad-emoji' });
     const r = db.toggleMessageReaction(msgId, me, emoji);
+    // Real-time: tell the other party (and my other tabs) about the change
+    const otherSteamId = m.sender_steam_id === me ? m.recipient_steam_id : m.sender_steam_id;
+    wsHub.sendTo(otherSteamId, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });
+    wsHub.sendTo(me, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });
     return sendJson(res, 200, { ok: true, reactions: r.reactions });
   }
 
