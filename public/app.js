@@ -4699,9 +4699,19 @@ async function pageFeed() {
     if (list) list.innerHTML = '<div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем ленту…</div></div>';
     try {
       const r = await api.feed(state.scope);
+      // Defensive: surface raw shape on screen so we can diagnose without DevTools
+      window.__lastFeed = r;
       paintFeedList(r);
-    } catch (_) {
-      paintFeedList({ ok: false, items: [] });
+    } catch (e) {
+      // Show the real error instead of silently showing empty state
+      const list2 = $('#feed-list');
+      if (list2) {
+        list2.innerHTML = '';
+        list2.appendChild(el('div', {
+          style: { padding: '12px', background: 'rgba(255,80,80,0.1)', border: '1px solid rgba(255,80,80,0.3)',
+                   borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace', wordBreak: 'break-all', color: '#ffaaaa' }
+        }, 'FETCH ERROR: ' + (e?.message || String(e))));
+      }
     }
   };
 
