@@ -3733,3 +3733,26 @@ body.large-font .post-act svg { transform: scale(1.1); }
     100% { opacity: 0; pointer-events: none; }
   }
 }
+
+/* Auth methods block in /settings: list of bound login providers + actions. */
+.auth-methods-list { display: flex; flex-direction: column; gap: 8px; }
+.auth-method-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--card-2, rgba(255,255,255,0.02));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.auth-method-ico {
+  width: 36px; height: 36px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.auth-method-ico.steam { background: rgba(102, 192, 244, 0.12); color: #66c0f4; }
+.auth-method-ico.telegram { background: rgba(84, 169, 235, 0.12); color: #54a9eb; }
+.auth-method-info { flex: 1; min-width: 0; }
+.auth-method-name { font-size: 14px; font-weight: 600; }
+.auth-method-sub { font-weight: 400; color: var(--mute); }
+.auth-method-meta { font-size: 11.5px; color: var(--mute); margin-top: 2px; }
+.auth-method-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.auth-method-adds { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.3.0';
+const APP_VERSION = 'v48.4.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -1502,6 +1502,34 @@ async function handleSteamOpenId(req, res, parsedUrl) {
     } catch (_) { /* fail open */ }
 
     const profile = await fetchProfile(steamid);
+
+    // BINDING MODE: if the user is already logged in (e.g. as a Telegram-only
+    // user) and now passes Steam OpenID — they're attaching Steam to their
+    // existing account, not creating a new one. Refuse if this SteamID is
+    // already bound to a DIFFERENT user (would silently steal someone's stats).
+    const currentUserId = getRequestSteamId(req);
+    if (currentUserId && currentUserId !== steamid) {
+      const existing = db.findAuthMethod('steam', steamid);
+      if (existing && existing.steam_id !== currentUserId) {
+        return redirect(res, '/settings?auth=steam-already-bound');
+      }
+      // Bind Steam to the existing account
+      db.upsertAuthMethod({
+        steam_id: currentUserId, provider: 'steam', external_id: steamid,
+        external_name: profile.personaname || null,
+        external_avatar: profile.avatar || profile.avatarfull || null,
+        verified: true
+      });
+      // Cache the Steam profile under the user's existing internal ID so that
+      // /lookup and dashboard show Steam stats. We DON'T rename the user row
+      // (their persona stays the Telegram-derived one unless they choose to
+      // sync). Instead we cache the Steam profile in a side table.
+      // Simplest: upsert under the SteamID too so fetchProfile works.
+      db.upsertUser(profile);
+      db.logEvent('bind-steam', currentUserId, { steamid });
+      return redirect(res, '/settings?auth=steam-bound');
+    }
+
     db.upsertUser(profile);
     // Record the Steam login as an auth method too, so this user can later
     // bind extra providers (Telegram) and we have a uniform view of identities.
@@ -1553,6 +1581,23 @@ async function handleSteamOpenId(req, res, parsedUrl) {
     const tgLastName = got.last_name || null;
     const tgPhoto = got.photo_url || null;
     const displayName = [tgFirstName, tgLastName].filter(Boolean).join(' ') || tgUsername || `tg:${tgId}`;
+
+    // BINDING MODE: if the user is already logged in, this Telegram identity
+    // is being attached to their existing account (not creating a new one).
+    const currentUserId = getRequestSteamId(req);
+    if (currentUserId) {
+      const existing = db.findAuthMethod('telegram', tgId);
+      if (existing && existing.steam_id !== currentUserId) {
+        return redirect(res, '/settings?auth=tg-already-bound');
+      }
+      db.upsertAuthMethod({
+        steam_id: currentUserId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+      db.logEvent('bind-telegram', currentUserId, { tg_id: tgId, tg_username: tgUsername });
+      return redirect(res, '/settings?auth=tg-bound');
+    }
 
     // Is this Telegram already bound to a user?
     let userId;
@@ -1639,6 +1684,22 @@ async function handleApi(req, res, pathname, query) {
       created_at: r.created_at
     }));
     return sendJson(res, 200, { ok: true, methods: rows });
+  }
+
+  // Unbind a provider (Telegram or Steam). Refuses if it's the last method —
+  // would orphan the account.
+  if (pathname === '/api/auth/unbind' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const body = await readJsonBody(req);
+    const provider = String(body?.provider || '');
+    if (provider !== 'steam' && provider !== 'telegram') {
+      return sendJson(res, 400, { ok: false, error: 'bad-provider' });
+    }
+    const ok = db.removeAuthMethod(me, provider);
+    if (!ok) return sendJson(res, 400, { ok: false, error: 'last-method' });
+    db.logEvent('unbind', me, { provider });
+    return sendJson(res, 200, { ok: true });
   }
 
   // ---------- file upload (images) ----------
