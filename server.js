@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v47.2.0';
+const APP_VERSION = 'v48.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2856,7 +2856,8 @@ async function handleApi(req, res, pathname, query) {
     const emoji = String(body.emoji || '');
     if (!allowed.includes(emoji)) return sendJson(res, 400, { ok: false, error: 'bad-emoji' });
     const r = db.toggleMessageReaction(msgId, me, emoji);
-    // Real-time: tell the other party (and my other tabs) about the change
+    // Real-time push: tell the other party (and my other tabs/devices) so
+    // their UI updates the reaction chips without needing a page reload.
     const otherSteamId = m.sender_steam_id === me ? m.recipient_steam_id : m.sender_steam_id;
     wsHub.sendTo(otherSteamId, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });
     wsHub.sendTo(me, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });

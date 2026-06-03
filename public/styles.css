@@ -43,10 +43,10 @@ body {
   background: var(--bg);
   min-height: 100vh;
 }
-/* PWA mode (added to home screen on iPhone) — the iOS status bar overlaps
-   our content. Push everything down by the safe-area inset and fill that
-   space with a green "SOKOLENOK" branding strip so the notch zone isn't
-   awkwardly empty. */
+/* PWA mode (site added to iPhone home screen). The iOS status bar overlaps
+   our content otherwise, and the notch area looks empty/awkward. We push
+   everything down by the safe-area inset and fill that space with a green
+   SOKOLENOK branding strip — turns a problem into a feature. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
   body {
     padding-top: calc(env(safe-area-inset-top, 0px) + 26px);
@@ -66,9 +66,6 @@ body {
     text-align: center;
     pointer-events: none;
   }
-  /* Messages page is full-screen — banner needs to sit ABOVE its chrome,
-     not get clipped by .msgr's overflow:hidden. The body padding already
-     pushes the messenger down, so just make sure the strip stays visible. */
 }
 body::before {
   content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
@@ -3195,8 +3192,9 @@ button.nav-link {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
-  /* Mobile thread header — banner above handles safe-area now, just stick
-     header to top of the messenger column for scroll behaviour */
+  /* Mobile thread header — the SOKOLENOK banner above handles the iOS notch
+     safe-area now (see body::after in PWA mode), so the header just needs to
+     stick to the top of the messenger column. */
   body.msgr-thread-open .msgr-thread-h {
     padding-top: 10px;
     padding-bottom: 10px;

@@ -5003,6 +5003,9 @@ function buildPostFooter(item, me) {
     preview.style.display = '';
   };
   // Defer load to avoid spamming /api/posts/N/comments for every post at once
+  // Defer load to avoid spamming /api/posts/N/comments for every post at once.
+  // Safari iOS doesn't have requestIdleCallback — accessing it as a bare name
+  // throws ReferenceError, so we must check via window.
   if (typeof window.requestIdleCallback === 'function') {
     window.requestIdleCallback(loadPreview, { timeout: 1500 });
   } else {
@@ -6509,7 +6512,9 @@ async function pageMessages() {
         }).catch(() => {});
       }
     } else if (m.type === 'message:reaction') {
-      // Reaction toggled — update just that bubble's chips in place
+      // Reaction toggled by other party — update just that one bubble's
+      // chips in place. No full thread re-render: avoids scroll jitter
+      // and keeps reactions snappy.
       if (m.msg_id != null) {
         const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.msg_id}"]`);
         if (row) window.__updateBubbleReactions?.(row, m.reactions || {});
