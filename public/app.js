@@ -1301,6 +1301,54 @@ async function pageIndex() {
   // The widget is loaded lazily because it pulls a script from telegram.org;
   // we don't want to slow down the page when the user has no intent to log in.
   mountTelegramLoginButton();
+
+  // Live feed preview — shows guests there's actually activity in the community.
+  // Loads top 6 recent items from /api/feed?scope=all (works without auth).
+  // If feed is empty (fresh install / network issue), the section hides itself.
+  mountRecentFeedPreview();
+}
+
+async function mountRecentFeedPreview() {
+  const root = document.getElementById('recent-feed-list');
+  const section = document.getElementById('recent-feed');
+  if (!root || !section) return;
+  try {
+    const r = await fetch('/api/feed?scope=all').then(r => r.json());
+    const items = (r?.items || []).filter(i => i.kind === 'post').slice(0, 6);
+    if (!items.length) {
+      section.style.display = 'none';
+      return;
+    }
+    root.innerHTML = '';
+    for (const it of items) {
+      const card = el('a', { class: 'lp-feed-card', href: '/feed' });
+      // Header: public name + date
+      card.appendChild(el('div', { class: 'lp-feed-card-h' },
+        el('div', { class: 'lp-feed-pub-avatar' + (it.public_id === 'official' ? ' official' : '') },
+          it.public_avatar
+            ? el('img', { src: it.public_avatar, alt: '' })
+            : (it.public_name || '?').slice(0, 1).toUpperCase()
+        ),
+        el('div', { class: 'lp-feed-pub-meta' },
+          el('div', { class: 'lp-feed-pub-name' }, it.public_name || ''),
+          el('div', { class: 'lp-feed-pub-date' }, it.created_at ? relDate(it.created_at) : '')
+        )
+      ));
+      if (it.title) card.appendChild(el('div', { class: 'lp-feed-card-title' }, it.title));
+      if (it.image) card.appendChild(el('img', { class: 'lp-feed-card-img', src: it.image, alt: '', loading: 'lazy' }));
+      if (it.body) {
+        const txt = String(it.body).replace(/<[^>]+>/g, '').slice(0, 180);
+        card.appendChild(el('div', { class: 'lp-feed-card-body' }, txt + (it.body.length > 180 ? '…' : '')));
+      }
+      const stats = el('div', { class: 'lp-feed-card-stats' });
+      if (it.likes != null) stats.appendChild(el('span', null, `❤ ${it.likes}`));
+      if (it.comments != null) stats.appendChild(el('span', null, `💬 ${it.comments}`));
+      if (stats.children.length) card.appendChild(stats);
+      root.appendChild(card);
+    }
+  } catch (_) {
+    section.style.display = 'none';
+  }
 }
 
 // Inserts the Telegram Login Widget into a container with id #tg-login-mount

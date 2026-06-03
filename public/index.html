@@ -29,36 +29,35 @@
       <div class="eyebrow"><span class="dot"></span>Официальные данные Steam</div>
 
       <div class="hero">
-        <!-- LEFT: title + cta + lookup -->
+        <!-- LEFT: title + lookup form + compact login -->
         <div>
-          <h1>Единый кабинет<br>игрока <span class="green">CS2</span></h1>
+          <h1>SOKOLENOK</h1>
+          <p class="hero-tagline">Соцсеть игроков <span class="green">CS2</span></p>
           <p class="hero-sub">
-            Профиль, инвентарь, цены, статистика и новости —<br>
-            вся важная информация в одном месте.<br>
-            <span class="accent">Честные данные.</span> Без лишнего.
+            Профиль, статистика, инвентарь, репутация.<br>
+            Общайся с игроками, проверяй противников по Steam ID.
           </p>
 
-          <a href="/auth/steam" class="steam-btn" onclick="if(window.SOK&&window.SOK.steamLogin){return window.SOK.steamLogin(event);}">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Zm-4.46 18.06-1.47-.6a2.56 2.56 0 0 0 1.34 1.34 2.58 2.58 0 0 0 3.36-1.38 2.55 2.55 0 0 0 0-1.95 2.55 2.55 0 0 0-1.38-1.4 2.6 2.6 0 0 0-1.94-.04L7 14.62a1.93 1.93 0 0 1 2.51 1.05 1.94 1.94 0 0 1-1.97 2.39Zm12-5.7a3.03 3.03 0 1 1 0-6.07 3.03 3.03 0 0 1 0 6.07Zm0-.75a2.28 2.28 0 1 0 0-4.56 2.28 2.28 0 0 0 0 4.56Z"/>
-            </svg>
-            <span class="label">Войти через Steam</span>
-            <svg class="arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-            </svg>
-          </a>
-
-          <div id="tg-login-mount" class="tg-login-mount"></div>
-
-          <div class="or-divider">или</div>
-
-          <form id="lookupForm" autocomplete="off">
+          <form id="lookupForm" autocomplete="off" class="hero-lookup">
             <div class="lookup-row">
-              <input id="lookupInput" class="input" placeholder="Введите ссылку на профиль Steam или Steam ID" required>
-              <button type="submit" class="btn btn-primary">Открыть профиль</button>
+              <input id="lookupInput" class="input" placeholder="Steam ID или ссылка на профиль" required>
+              <button type="submit" class="btn btn-primary">Проверить</button>
             </div>
-            <div class="lookup-hint">Пример: https://steamcommunity.com/id/vanity или 76561199000000000</div>
+            <div class="lookup-hint">Пример: steamcommunity.com/id/vanity или 76561199000000000</div>
           </form>
+
+          <div class="or-divider">или войди и пиши посты, общайся</div>
+
+          <div class="hero-login-row">
+            <a href="/auth/steam" class="steam-btn compact" onclick="if(window.SOK&&window.SOK.steamLogin){return window.SOK.steamLogin(event);}">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Zm-4.46 18.06-1.47-.6a2.56 2.56 0 0 0 1.34 1.34 2.58 2.58 0 0 0 3.36-1.38 2.55 2.55 0 0 0 0-1.95 2.55 2.55 0 0 0-1.38-1.4 2.6 2.6 0 0 0-1.94-.04L7 14.62a1.93 1.93 0 0 1 2.51 1.05 1.94 1.94 0 0 1-1.97 2.39Zm12-5.7a3.03 3.03 0 1 1 0-6.07 3.03 3.03 0 0 1 0 6.07Zm0-.75a2.28 2.28 0 1 0 0-4.56 2.28 2.28 0 0 0 0 4.56Z"/>
+              </svg>
+              <span class="label">Через Steam</span>
+            </a>
+
+            <div id="tg-login-mount" class="tg-login-mount"></div>
+          </div>
         </div>
 
         <!-- RIGHT: 2x2 grid of demo widget cards -->
@@ -240,6 +239,23 @@
           </div>
         </div>
       </div>
+
+      <!-- ===== Live community feed — see activity before signing up ===== -->
+      <section id="recent-feed" class="lp-section lp-feed-section">
+        <div class="lp-feed-head">
+          <div>
+            <div class="eyebrow"><span class="dot pulse"></span>Сейчас в сообществе</div>
+            <h2 class="lp-h2">Свежие посты от игроков</h2>
+          </div>
+          <a href="/feed" class="btn btn-ghost btn-sm" id="recent-feed-all">Вся лента →</a>
+        </div>
+        <div id="recent-feed-list" class="lp-feed-list">
+          <!-- skeletons while loading; replaced by app.js -->
+          <div class="lp-feed-skel"></div>
+          <div class="lp-feed-skel"></div>
+          <div class="lp-feed-skel"></div>
+        </div>
+      </section>
 
       <!-- ===== Landing content sections (anchor targets for sidebar nav) ===== -->
       <section id="about" class="lp-section">

@@ -3756,3 +3756,109 @@ body.large-font .post-act svg { transform: scale(1.1); }
 .auth-method-meta { font-size: 11.5px; color: var(--mute); margin-top: 2px; }
 .auth-method-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .auth-method-adds { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+/* === Landing redesign (v48.5) === */
+/* Tagline under h1 — smaller, accent green */
+.hero-tagline {
+  font-size: 26px; font-weight: 700; letter-spacing: -0.01em;
+  margin: 6px 0 14px; color: var(--text);
+}
+.hero-tagline .green { color: var(--g); }
+.hero-lookup { margin-top: 18px; }
+/* Compact login row — Steam + Telegram side by side */
+.hero-login-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+.steam-btn.compact {
+  height: 40px; padding: 0 16px;
+  font-size: 14px; font-weight: 600;
+  gap: 8px;
+}
+.steam-btn.compact svg.arrow { display: none; }
+.hero-login-row .tg-login-mount { margin: 0; min-height: 40px; }
+.or-divider {
+  margin: 18px 0 10px;
+  font-size: 12px; color: var(--mute);
+  letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 10px;
+}
+.or-divider::before, .or-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+
+/* Live feed preview section — shows guests there's activity */
+.lp-feed-section { padding-top: 12px; }
+.lp-feed-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.lp-feed-head .lp-h2 { margin-top: 4px; }
+.dot.pulse {
+  animation: pulse-green 2s ease-in-out infinite;
+}
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(74, 222, 128, 0); }
+}
+.lp-feed-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.lp-feed-skel {
+  background: var(--card, #14181a); border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 180px;
+  animation: skel-pulse 1.4s ease-in-out infinite;
+}
+@keyframes skel-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.8; }
+}
+.lp-feed-card {
+  display: block; color: inherit; text-decoration: none;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px;
+  transition: transform 0.15s, border-color 0.15s;
+}
+.lp-feed-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--g);
+}
+.lp-feed-card-h { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.lp-feed-pub-avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--card-2, rgba(255,255,255,0.04));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; color: var(--mute);
+  flex-shrink: 0; overflow: hidden;
+}
+.lp-feed-pub-avatar.official {
+  background: rgba(74, 222, 128, 0.15); color: var(--g);
+}
+.lp-feed-pub-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.lp-feed-pub-name { font-size: 13px; font-weight: 600; line-height: 1.2; }
+.lp-feed-pub-date { font-size: 11px; color: var(--mute); margin-top: 2px; }
+.lp-feed-card-title {
+  font-size: 14.5px; font-weight: 700; margin-bottom: 6px;
+  line-height: 1.3;
+}
+.lp-feed-card-img {
+  display: block; width: 100%; max-height: 160px; object-fit: cover;
+  border-radius: 6px; margin: 8px 0;
+}
+.lp-feed-card-body {
+  font-size: 12.5px; line-height: 1.45; color: var(--dim);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lp-feed-card-stats {
+  display: flex; gap: 14px; margin-top: 10px;
+  font-size: 11.5px; color: var(--mute);
+}
+
+@media (max-width: 880px) {
+  .hero-tagline { font-size: 22px; }
+  .lp-feed-head { flex-direction: column; align-items: stretch; }
+  .lp-feed-head .btn { align-self: flex-start; }
+}
