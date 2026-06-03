@@ -3698,13 +3698,38 @@ body.large-font .post-act svg { transform: scale(1.1); }
   .dash-profile-link svg { width: 14px; height: 14px; }
 }
 
-/* Telegram login widget mount — the actual Telegram blue button is injected
-   by telegram.org's script. We just need to give it room and centre it
-   under the Steam button. */
+/* Telegram login widget mount. Shows an instant placeholder that looks like
+   Telegram's blue button, then telegram.org's script injects an iframe next
+   to it — at which point we hide the placeholder via :has(). */
 .tg-login-mount {
   margin-top: 12px;
   min-height: 48px;
   display: flex;
   justify-content: flex-start;
+  align-items: center;
 }
 .tg-login-mount iframe { border: 0 !important; }
+.tg-login-placeholder {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #54a9eb; color: #fff;
+  height: 40px; padding: 0 18px;
+  border-radius: 8px;
+  font-size: 14px; font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  letter-spacing: 0.01em;
+  user-select: none; cursor: default;
+  transition: opacity 0.2s ease;
+}
+.tg-login-placeholder-icon { display: inline-flex; }
+/* When the real Telegram iframe lands in the same container, hide the placeholder */
+.tg-login-mount:has(iframe) .tg-login-placeholder { display: none; }
+/* Fallback for very old browsers without :has() — fade after 4s */
+@supports not selector(:has(*)) {
+  .tg-login-mount .tg-login-placeholder {
+    animation: tg-placeholder-fade 4s forwards;
+  }
+  @keyframes tg-placeholder-fade {
+    0%, 90% { opacity: 1; }
+    100% { opacity: 0; pointer-events: none; }
+  }
+}

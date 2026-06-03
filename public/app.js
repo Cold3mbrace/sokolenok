@@ -1306,15 +1306,22 @@ async function pageIndex() {
 async function mountTelegramLoginButton() {
   const mount = document.getElementById('tg-login-mount');
   if (!mount) return;
+  // Show a placeholder button immediately so the user sees "Войти через Telegram"
+  // before telegram.org's widget script loads (usually 0.5-1.5s). When the real
+  // widget renders its iframe, the placeholder is hidden by CSS (it has a sibling).
+  mount.appendChild(el('div', { class: 'tg-login-placeholder' },
+    el('span', {
+      class: 'tg-login-placeholder-icon',
+      html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>'
+    }),
+    el('span', null, 'Войти через Telegram')
+  ));
   try {
     const cfg = await fetch('/api/auth/config').then(r => r.json()).catch(() => null);
     if (!cfg?.ok || !cfg.telegram || !cfg.telegram_bot) {
-      // Telegram login not configured server-side — silently skip.
       mount.remove();
       return;
     }
-    // Telegram widget = an <script> tag with data-* attributes that gets
-    // replaced in-place by an iframe with their blue button.
     const s = document.createElement('script');
     s.async = true;
     s.src = 'https://telegram.org/js/telegram-widget.js?22';
