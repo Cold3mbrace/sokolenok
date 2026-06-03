@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.1.0';
+const APP_VERSION = 'v48.2.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2304,7 +2304,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const mySubs = new Set(db.listSubscriptions(me));
-    const friends = db.listFriends(me).map(f => f.steam_id);
+    const friends = (db.listFriends(me).friends || []).map(f => f.steam_id);
     // Tally: { public_id: friend_count }
     const tally = new Map();
     for (const fid of friends) {

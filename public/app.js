@@ -1274,14 +1274,58 @@ async function pageIndex() {
 
   // Show auth=failed banner if redirected here from failed login
   const params = new URLSearchParams(location.search);
-  if (params.get('auth') === 'failed' || params.get('auth') === 'invalid') {
+  const authErr = params.get('auth');
+  if (authErr) {
+    const msgMap = {
+      'failed': 'Steam не подтвердил OpenID. Попробуй ещё раз.',
+      'invalid': 'Steam отверг подпись. Попробуй ещё раз.',
+      'tg-not-configured': 'Telegram-вход временно недоступен.',
+      'tg-bad-callback': 'Telegram прислал некорректные данные. Попробуй ещё раз.',
+      'tg-bad-signature': 'Не удалось проверить подпись Telegram. Попробуй ещё раз.',
+      'tg-stale': 'Истёк срок действия ссылки от Telegram. Войди заново.'
+    };
+    const msg = msgMap[authErr] || 'Не удалось войти. Попробуй ещё раз.';
     const banner = el('div', { class: 'alert alert-error' },
       el('div', null,
         el('strong', null, 'Вход не удался'),
-        el('div', { class: 'text-sm mt-1' }, 'Steam не подтвердил OpenID. Попробуй ещё раз.')
+        el('div', { class: 'text-sm mt-1' }, msg)
       ));
     const target = $('.hero');
     if (target) target.parentNode.insertBefore(banner, target);
+  }
+
+  // Telegram login button — mounted next to the Steam login on the landing.
+  // The widget is loaded lazily because it pulls a script from telegram.org;
+  // we don't want to slow down the page when the user has no intent to log in.
+  mountTelegramLoginButton();
+}
+
+// Inserts the Telegram Login Widget into a container with id #tg-login-mount
+// on the landing page. The widget renders Telegram's own blue button; on
+// success it redirects to /auth/telegram/callback?... with the signed payload.
+async function mountTelegramLoginButton() {
+  const mount = document.getElementById('tg-login-mount');
+  if (!mount) return;
+  try {
+    const cfg = await fetch('/api/auth/config').then(r => r.json()).catch(() => null);
+    if (!cfg?.ok || !cfg.telegram || !cfg.telegram_bot) {
+      // Telegram login not configured server-side — silently skip.
+      mount.remove();
+      return;
+    }
+    // Telegram widget = an <script> tag with data-* attributes that gets
+    // replaced in-place by an iframe with their blue button.
+    const s = document.createElement('script');
+    s.async = true;
+    s.src = 'https://telegram.org/js/telegram-widget.js?22';
+    s.setAttribute('data-telegram-login', cfg.telegram_bot);
+    s.setAttribute('data-size', 'large');
+    s.setAttribute('data-radius', '8');
+    s.setAttribute('data-auth-url', `${location.origin}/auth/telegram/callback`);
+    s.setAttribute('data-request-access', 'write');
+    mount.appendChild(s);
+  } catch (_) {
+    mount.remove();
   }
 }
 

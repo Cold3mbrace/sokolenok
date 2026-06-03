@@ -3697,3 +3697,14 @@ body.large-font .post-act svg { transform: scale(1.1); }
   .dash-profile-link { width: 28px; height: 28px; margin-left: 8px; }
   .dash-profile-link svg { width: 14px; height: 14px; }
 }
+
+/* Telegram login widget mount — the actual Telegram blue button is injected
+   by telegram.org's script. We just need to give it room and centre it
+   under the Steam button. */
+.tg-login-mount {
+  margin-top: 12px;
+  min-height: 48px;
+  display: flex;
+  justify-content: flex-start;
+}
+.tg-login-mount iframe { border: 0 !important; }
