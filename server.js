@@ -178,7 +178,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.0.0';
+const APP_VERSION = 'v48.1.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -187,6 +187,8 @@ const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || ''; // e.g. "sokolenok_login_bot" — used by frontend widget
 // Mark session cookie Secure over HTTPS. Explicit COOKIE_SECURE=1/0 wins; otherwise
 // inferred from an https:// BASE_URL.
 const COOKIE_SECURE = process.env.COOKIE_SECURE != null
@@ -1501,9 +1503,95 @@ async function handleSteamOpenId(req, res, parsedUrl) {
 
     const profile = await fetchProfile(steamid);
     db.upsertUser(profile);
+    // Record the Steam login as an auth method too, so this user can later
+    // bind extra providers (Telegram) and we have a uniform view of identities.
+    db.upsertAuthMethod({
+      steam_id: steamid,
+      provider: 'steam',
+      external_id: steamid,
+      external_name: profile.personaname || null,
+      external_avatar: profile.avatar || profile.avatarfull || null,
+      verified: true
+    });
     const { token } = db.createSession(steamid);
     setSessionCookie(res, token);
-    db.logEvent('login', steamid, { source: profile.source });
+    db.logEvent('login', steamid, { source: profile.source, provider: 'steam' });
+    return redirect(res, '/dashboard');
+  }
+  if (parsedUrl.pathname === '/auth/telegram/callback') {
+    // Telegram Login Widget posts hash + user fields here via GET. We must
+    // verify the HMAC-SHA256 signature against our bot token — without this
+    // anyone could forge a Telegram identity by faking query params.
+    // https://core.telegram.org/widgets/login#checking-authorization
+    if (!TELEGRAM_BOT_TOKEN) {
+      return redirect(res, '/?auth=tg-not-configured');
+    }
+    const q = parsedUrl.searchParams;
+    const got = {};
+    for (const [k, v] of q) got[k] = v;
+    const hash = got.hash;
+    delete got.hash;
+    if (!hash || !got.id) return redirect(res, '/?auth=tg-bad-callback');
+
+    // Build data-check-string: keys alphabetically sorted, joined as "k=v\n…"
+    const dataCheckString = Object.keys(got).sort().map(k => `${k}=${got[k]}`).join('\n');
+    const secretKey = crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
+    const expectedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    if (expectedHash !== hash) {
+      return redirect(res, '/?auth=tg-bad-signature');
+    }
+    // Reject stale auth_date (> 1 day): the Telegram widget result is
+    // single-use, no replays of week-old signed bundles.
+    const authDate = parseInt(got.auth_date || '0', 10);
+    if (!Number.isFinite(authDate) || (Date.now() / 1000 - authDate) > 86400) {
+      return redirect(res, '/?auth=tg-stale');
+    }
+
+    const tgId = String(got.id);
+    const tgUsername = got.username || null;
+    const tgFirstName = got.first_name || null;
+    const tgLastName = got.last_name || null;
+    const tgPhoto = got.photo_url || null;
+    const displayName = [tgFirstName, tgLastName].filter(Boolean).join(' ') || tgUsername || `tg:${tgId}`;
+
+    // Is this Telegram already bound to a user?
+    let userId;
+    const existing = db.findAuthMethod('telegram', tgId);
+    if (existing) {
+      // Returning user — log them in to their existing account
+      userId = existing.steam_id;
+      db.upsertAuthMethod({
+        steam_id: userId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+    } else {
+      // Brand new — create a synthetic user record. Note we still write into
+      // the `users` table because every other table (posts, friends, …)
+      // references users.steam_id; using a "tg:<id>" prefix lets us tell
+      // synthetic IDs from real SteamIDs cleanly.
+      userId = `tg:${tgId}`;
+      const now = db.nowIso();
+      const syntheticProfile = {
+        steam_id: userId,
+        personaname: displayName,
+        avatar: tgPhoto,
+        avatarfull: tgPhoto,
+        steam_url: null,
+        visibility: 'public',
+        source: 'telegram'
+      };
+      db.upsertUser(syntheticProfile);
+      db.upsertAuthMethod({
+        steam_id: userId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+      db.logEvent('register', userId, { provider: 'telegram', tg_username: tgUsername });
+    }
+    const { token } = db.createSession(userId);
+    setSessionCookie(res, token);
+    db.logEvent('login', userId, { provider: 'telegram' });
     return redirect(res, '/dashboard');
   }
   if (parsedUrl.pathname === '/auth/logout') {
@@ -1525,6 +1613,32 @@ async function handleApi(req, res, pathname, query) {
       has_steam_api_key: Boolean(STEAM_API_KEY),
       storage: db.storageHealth()
     });
+  }
+
+  // Public auth config — tells the frontend which login methods are
+  // available and what params they need (e.g. Telegram bot username for the widget).
+  if (pathname === '/api/auth/config') {
+    return sendJson(res, 200, {
+      ok: true,
+      steam: true,
+      telegram: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME),
+      telegram_bot: TELEGRAM_BOT_USERNAME || null
+    });
+  }
+
+  // List auth methods bound to the current user (for /settings UI).
+  if (pathname === '/api/auth/methods' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const rows = db.listAuthMethods(me).map(r => ({
+      provider: r.provider,
+      external_id: r.external_id,
+      external_username: r.external_username,
+      external_name: r.external_name,
+      external_avatar: r.external_avatar,
+      created_at: r.created_at
+    }));
+    return sendJson(res, 200, { ok: true, methods: rows });
   }
 
   // ---------- file upload (images) ----------
@@ -3265,5 +3379,6 @@ server.listen(PORT, () => {
   console.log(`Storage backend: ${db.storageHealth().backend}`);
   console.log(`Steam API key:   ${STEAM_API_KEY ? 'configured' : 'NOT SET (XML fallback only, public endpoints will still work)'}`);
   console.log(`Faceit API key:  ${FACEIT_API_KEY ? 'configured' : 'NOT SET (Faceit endpoints will return ok:false)'}`);
+  console.log(`Telegram bot:    ${TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_BOT_USERNAME || 'username NOT SET'})` : 'NOT SET (Telegram login disabled)'}`);
   console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
