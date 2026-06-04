@@ -6308,7 +6308,27 @@ async function pageMessages() {
     return;
   }
 
-  const state = { tab: 'chats', activeOther: null, pollTimer: null };
+  const readMsgPageCache = (key, maxAgeMs = 45000) => {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(`sok:msg:${key}`) || 'null');
+      if (!cached || Date.now() - cached.ts > maxAgeMs) return null;
+      return cached.value;
+    } catch (_) { return null; }
+  };
+  const writeMsgPageCache = (key, value) => {
+    try { sessionStorage.setItem(`sok:msg:${key}`, JSON.stringify({ ts: Date.now(), value })); } catch (_) {}
+  };
+
+  const state = {
+    tab: 'chats',
+    activeOther: null,
+    pollTimer: null,
+    convos: readMsgPageCache('convos'),
+    friendsData: readMsgPageCache('friends'),
+    threadCache: new Map(),
+    threadFetchToken: 0,
+    lastLeftRefresh: 0
+  };
 
   // Tabs
   const tabs = $('#msgr-tabs');
@@ -6327,19 +6347,31 @@ async function pageMessages() {
   async function renderLeft(opts = {}) {
     const list = $('#msgr-list');
     if (!list) return;
-    // Show spinner only on first paint or explicit force; silent refresh keeps content
-    const isFirst = !state.leftRendered;
+    const cached = state.tab === 'chats' ? state.convos : state.friendsData;
+    if (cached && !opts.force) {
+      if (state.tab === 'chats') renderChatList(cached);
+      else renderFriendList(cached);
+      state.leftRendered = true;
+      if (opts.localOnly) return;
+    }
+    // Show spinner only when there is nothing useful to show yet.
+    const isFirst = !state.leftRendered && !cached;
     if (isFirst && !opts.silent) {
       list.innerHTML = '<div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загрузка…</div>';
     }
     if (state.tab === 'chats') {
       const r = await api.conversations().catch(() => ({ ok: false, conversations: [] }));
-      renderChatList(r.conversations || []);
+      state.convos = r.conversations || [];
+      writeMsgPageCache('convos', state.convos);
+      renderChatList(state.convos);
     } else {
       const r = await api.friends().catch(() => ({ ok: false, friends: [], incoming: [], outgoing: [] }));
-      renderFriendList(r);
+      state.friendsData = r;
+      writeMsgPageCache('friends', state.friendsData);
+      renderFriendList(state.friendsData);
     }
     state.leftRendered = true;
+    state.lastLeftRefresh = Date.now();
   }
 
   function renderChatList(convos) {
@@ -6431,19 +6463,35 @@ async function pageMessages() {
   }
 
   async function openThread(other) {
+    if (state.activeOther === other && $('#msgr-thread-scroll')) return;
     state.activeOther = other;
     state.lastMsgId = 0;
     state.lastDate = null;
     state.threadLoaded = false;
+    state.replyToId = null;
     document.body.classList.add('msgr-thread-open'); // mobile: show thread, hide list
-    renderLeft(); // refresh active highlight
+    renderLeft({ localOnly: true }); // refresh active highlight without hitting the network
     const right = $('#msgr-right');
-    right.innerHTML = '<div class="loading-inline" style="padding:40px;justify-content:center"><div class="spinner"></div></div>';
+    const cached = state.threadCache.get(other);
+    if (cached) {
+      paintThread(cached, { fromCache: true });
+    } else {
+      right.innerHTML = '<div class="loading-inline" style="padding:40px;justify-content:center"><div class="spinner"></div></div>';
+    }
+    const token = ++state.threadFetchToken;
     const r = await api.messages(other).catch(() => ({ ok: false }));
+    if (token !== state.threadFetchToken || state.activeOther !== other) return;
     if (!r.ok) { right.innerHTML = '<div class="msgr-empty"><div class="msgr-empty-title">Не удалось загрузить</div></div>'; return; }
-    paintThread(r);
+    state.threadCache.set(other, r);
+    if (cached && $('#msgr-thread-scroll')) {
+      renderMessages(r.messages || []);
+      state.threadFriend = r.friend;
+    } else {
+      paintThread(r);
+    }
     refreshUnreadBadge(); // opening marks read
     loadThreadPresence(other);
+    if (Date.now() - state.lastLeftRefresh > 4000) renderLeft({ silent: true, force: true }).catch(() => {});
   }
 
   async function loadThreadPresence(steamId) {
@@ -6467,14 +6515,22 @@ async function pageMessages() {
     node.appendChild(document.createTextNode(' ' + lbl));
   }
 
+  function cacheActiveThreadResponse(r) {
+    if (!r?.ok || !state.activeOther) return;
+    state.threadCache.set(state.activeOther, r);
+  }
+
   // Append only messages we haven't drawn yet (by id), inserting date separators as needed.
   function messageTimeNode(m) {
     const node = el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : '');
     if (m.from_me) {
       node.appendChild(el('span', {
         class: 'msgr-receipt ' + (m.read ? 'seen' : 'sent'),
-        title: m.read ? 'Просмотрено' : 'Отправлено'
-      }, m.read ? '✓✓' : '✓'));
+        title: m.read ? 'Прочитано' : 'Отправлено'
+      },
+        el('span', { class: 'msgr-receipt-checks' }, m.read ? '✓✓' : '✓'),
+        el('span', { class: 'msgr-receipt-label' }, m.read ? 'Прочитано' : 'Отправлено')
+      ));
     }
     return node;
   }
@@ -6484,18 +6540,24 @@ async function pageMessages() {
     const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.id}"]`);
     const receipt = row?.querySelector('.msgr-receipt');
     if (!receipt) return;
-    receipt.textContent = '✓✓';
+    const checks = receipt.querySelector('.msgr-receipt-checks');
+    const label = receipt.querySelector('.msgr-receipt-label');
+    if (checks) checks.textContent = '✓✓';
+    if (label) label.textContent = 'Прочитано';
     receipt.classList.remove('sent');
     receipt.classList.add('seen');
-    receipt.title = 'Просмотрено';
+    receipt.title = 'Прочитано';
   }
 
   function markOutgoingSeen() {
     document.querySelectorAll('.msgr-bubble-row.me .msgr-receipt').forEach(r => {
-      r.textContent = '✓✓';
+      const checks = r.querySelector('.msgr-receipt-checks');
+      const label = r.querySelector('.msgr-receipt-label');
+      if (checks) checks.textContent = '✓✓';
+      if (label) label.textContent = 'Прочитано';
       r.classList.remove('sent');
       r.classList.add('seen');
-      r.title = 'Просмотрено';
+      r.title = 'Прочитано';
     });
   }
 
@@ -6709,7 +6771,13 @@ async function pageMessages() {
         const res = await api.sendMessage(o.steam_id, text, attachment).catch(() => ({ ok: false }));
         if (res.ok && res.message) {
           renderMessages([res.message]);
-          renderLeft({ silent: true });
+          const cachedThread = state.threadCache.get(o.steam_id);
+          if (cachedThread) {
+            cachedThread.messages = [...(cachedThread.messages || []), res.message];
+            state.threadCache.set(o.steam_id, cachedThread);
+          }
+          state.convos = null;
+          renderLeft({ silent: true, force: true });
         } else {
           toast.err(res.error === 'not-friends' ? 'Вы больше не друзья' : res.error === 'blocked' ? 'Недоступно' : 'Не отправлено');
           input.value = text; persistDraft();
@@ -6858,6 +6926,7 @@ async function pageMessages() {
     if (state.activeOther) {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
+        cacheActiveThreadResponse(r);
         if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
       }).catch(() => {});
       loadThreadPresence(state.activeOther);
@@ -6867,7 +6936,7 @@ async function pageMessages() {
 
   function schedulePoll() {
     if (state.pollTimer) clearInterval(state.pollTimer);
-    const interval = window.__wsAlive ? 15000 : 3000;
+    const interval = window.__wsAlive ? 25000 : 8000;
     state.pollTimer = setInterval(tick, interval);
   }
   schedulePoll();
@@ -6883,12 +6952,14 @@ async function pageMessages() {
     if (m.type === 'message:new' && state.activeOther && m.message?.peer === state.activeOther) {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
+        cacheActiveThreadResponse(r);
         if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
       }).catch(() => {});
     } else if (m.type === 'message:sent' && state.activeOther && m.message?.peer === state.activeOther) {
       // Sent from another tab — keep this tab in sync
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
+        cacheActiveThreadResponse(r);
         if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
       }).catch(() => {});
     } else if (m.type === 'message:read' && state.activeOther === m.by) {
@@ -6896,7 +6967,10 @@ async function pageMessages() {
       // The other party just read our messages — repaint to show read receipts
       if ($('#msgr-thread-scroll')) {
         api.messages(state.activeOther).then(r => {
-          if (r.ok) renderMessages(r.messages || []);
+          if (r.ok) {
+            cacheActiveThreadResponse(r);
+            renderMessages(r.messages || []);
+          }
         }).catch(() => {});
       }
     } else if (m.type === 'message:reaction') {
@@ -6909,7 +6983,7 @@ async function pageMessages() {
       }
     } else if (m.type === 'message:new') {
       // Inbox refresh — left rail conversation list shows latest message preview
-      renderLeft().catch(() => {});
+      renderLeft({ silent: true, force: true }).catch(() => {});
     }
   });
 }

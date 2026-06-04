@@ -3205,9 +3205,11 @@ async function handleApi(req, res, pathname, query) {
           read: !!m.read_at
         });
       }
-      db.markRead(me, other);
-      // Tell the other party their messages were seen — UI can flip the "✓" to "✓✓".
-      wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
+      const readResult = db.markRead(me, other);
+      // Tell the other party only when unread messages actually became read.
+      if (readResult.changed > 0) {
+        wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
+      }
       const prof = await profileForSiteUser(other, { refreshSteam: isSteamId(other) }).catch(() => null);
       return sendJson(res, 200, { ok: true, other: {
         steam_id: other, name: prof?.personaname || other,

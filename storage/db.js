@@ -1703,17 +1703,22 @@ function getMessage(id) {
 // Mark messages from `other` to `me` as read
 function markRead(me, other) {
   const now = nowIso();
+  let changed = 0;
   if (useSqlite()) {
-    openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
+    const info = openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
       .run(now, me, other);
+    changed = Number(info?.changes || 0);
   } else {
     const state = readFallback();
     for (const m of state.messages || []) {
-      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) m.read_at = now;
+      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) {
+        m.read_at = now;
+        changed++;
+      }
     }
-    writeFallback(state);
+    if (changed) writeFallback(state);
   }
-  return { ok: true };
+  return { ok: true, changed };
 }
 
 // Build the list of conversations for a user, with last message + unread count

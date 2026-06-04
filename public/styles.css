@@ -4219,9 +4219,23 @@ body.large-font .post-act svg { transform: scale(1.1); }
   font-size: 11px;
   letter-spacing: 0;
   color: var(--mute);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
 }
+.msgr-bubble-row.me .msgr-receipt { color: rgba(6, 16, 8, 0.58); }
 .msgr-receipt.seen {
   color: var(--g);
+}
+.msgr-bubble-row.me .msgr-receipt.seen { color: #0f7a35; }
+.msgr-receipt-checks {
+  letter-spacing: -0.08em;
+  font-weight: 900;
+}
+.msgr-receipt-label {
+  font-size: 10px;
+  font-weight: 700;
 }
 
 /* v49.1: mobile stability pass */
