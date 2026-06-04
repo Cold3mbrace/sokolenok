@@ -169,6 +169,7 @@ const api = {
   addComment(id, body) { return this.request(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }); },
   deleteComment(postId, commentId) { return this.request(`/api/posts/${postId}/comments/${commentId}`, { method: 'DELETE' }); },
   recommendFriends() { return this.request('/api/friends/recommend'); },
+  steamFriendsOnSite() { return this.request('/api/friends/steam'); },
   presence(ids) { return this.request('/api/presence', { method: 'POST', body: JSON.stringify({ ids }) }); },
   async upload(file) {
     const fd = new FormData();
@@ -1232,11 +1233,51 @@ function renderSocialTopbar(me) {
   const search = el('form', { class: 'top-search', role: 'search' },
     el('span', { class: 'top-search-ico', html:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' }),
-    el('input', { class: 'top-search-input', type: 'search', autocomplete: 'off', placeholder: 'Найти игрока' })
+    el('input', { class: 'top-search-input', type: 'search', autocomplete: 'off', placeholder: 'Найти игрока' }),
+    el('div', { class: 'top-search-results', hidden: 'hidden' })
   );
+  const searchInput = search.querySelector('.top-search-input');
+  const searchResults = search.querySelector('.top-search-results');
+  const hideSearchResults = () => { searchResults.hidden = true; searchResults.innerHTML = ''; };
+  const openUserResult = (sid) => { if (sid) location.assign(`/lookup?steamid=${encId(sid)}`); };
+  const drawSearchResults = (users, q) => {
+    searchResults.innerHTML = '';
+    if (!q || q.length < 2) { hideSearchResults(); return; }
+    if (!users.length) {
+      searchResults.appendChild(el('div', { class: 'top-search-empty' }, 'Ничего не найдено'));
+      searchResults.hidden = false;
+      return;
+    }
+    for (const u of users.slice(0, 6)) {
+      const sid = u.steam_id || u.steamid;
+      const row = el('button', { class: 'top-search-row', type: 'button',
+        onclick: () => openUserResult(sid) });
+      const ava = el('span', { class: 'top-search-ava' });
+      if (u.avatar) {
+        const img = el('img', { src: u.avatar, alt: '' });
+        img.onerror = function() { this.remove(); ava.textContent = (u.persona_name || u.name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else ava.textContent = (u.persona_name || u.name || '?').slice(0, 1).toUpperCase();
+      row.appendChild(ava);
+      row.appendChild(el('span', { class: 'top-search-meta' },
+        el('strong', null, u.persona_name || u.name || sid),
+        el('small', null, /^tg:\d+$/.test(String(sid || '')) ? 'Telegram' : String(sid || '').slice(-8))
+      ));
+      searchResults.appendChild(row);
+    }
+    searchResults.hidden = false;
+  };
+  const liveSearch = debounce(async () => {
+    const q = searchInput.value.trim();
+    if (q.length < 2) { hideSearchResults(); return; }
+    const r = await api.request(`/api/search?kind=users&q=${encodeURIComponent(q)}`).catch(() => null);
+    drawSearchResults(r?.users || [], q);
+  }, 220);
+  searchInput.addEventListener('input', liveSearch);
+  searchInput.addEventListener('focus', () => { if (searchResults.children.length) searchResults.hidden = false; });
   search.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const q = search.querySelector('input').value.trim();
+    const q = searchInput.value.trim();
     if (!q) return;
     const direct = await api.resolveAny(q).catch(() => null);
     if (direct) { location.assign(`/lookup?steamid=${encId(direct)}`); return; }
@@ -1244,6 +1285,9 @@ function renderSocialTopbar(me) {
     const user = found?.users?.[0];
     if (user?.steam_id) location.assign(`/lookup?steamid=${encId(user.steam_id)}`);
     else toast.warn('Игрок не найден');
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.top-search')) hideSearchResults();
   });
   bar.appendChild(search);
 
@@ -7239,6 +7283,7 @@ async function pageFriends() {
   const body = $('#friends-body');
   let cur = 'friends';
   mountFriendsFinder(body, () => load(cur));
+  mountSteamFriendsSuggestions(body, () => load(cur));
 
   const load = async (tab) => {
     cur = tab;
@@ -7338,6 +7383,44 @@ function mountFriendsFinder(anchor, refresh) {
     for (const u of users.slice(0, 8)) await renderUser(u);
     decorateFriendPresence(results);
   });
+}
+
+async function mountSteamFriendsSuggestions(anchor, refresh) {
+  if (!anchor || document.getElementById('steam-friends-suggest')) return;
+  if (!isSteamId(window.__me?.steamid)) return;
+  const r = await api.steamFriendsOnSite().catch(() => null);
+  const arr = r?.ok ? (r.friends || []) : [];
+  if (!arr.length) return;
+  const card = el('div', { class: 'card steam-friends-suggest', id: 'steam-friends-suggest' },
+    el('div', { class: 'steam-friends-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'Steam-друзья на SOKOLENOK'),
+        el('div', { class: 'steam-friends-sub' }, 'Эти люди уже есть на сайте, но ещё не в друзьях здесь.')
+      )
+    )
+  );
+  for (const f of arr.slice(0, 8)) {
+    const actions = el('div', { class: 'friend-row-actions' },
+      el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async (e) => {
+          const btn = e.currentTarget; btn.disabled = true;
+          const res = await api.friendRequest(f.steam_id).catch(() => ({ ok: false }));
+          if (res.ok) {
+            toast.ok('Заявка отправлена');
+            btn.textContent = 'Заявка отправлена';
+            btn.classList.add('btn-ghost');
+            refresh?.();
+          } else {
+            toast.err('Не удалось');
+            btn.disabled = false;
+          }
+        } }, 'Добавить'),
+      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(f.steam_id)}` }, 'Профиль')
+    );
+    card.appendChild(buildFriendRow(f, actions, 'Ваш Steam-друг'));
+  }
+  anchor.parentElement?.insertBefore(card, anchor);
+  decorateFriendPresence(card);
 }
 
 function paintFriendsList(root, arr, tab) {

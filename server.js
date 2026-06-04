@@ -1489,6 +1489,24 @@ async function fetchPlayerBans(steamid) {
   }
 }
 
+async function fetchSteamFriendIds(steamid) {
+  if (!STEAM_API_KEY) return { ok: false, reason: 'no-api-key', ids: [] };
+  if (!isSteamId(steamid)) return { ok: false, reason: 'steam-required', ids: [] };
+  try {
+    const url = `https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${STEAM_API_KEY}&steamid=${steamid}&relationship=friend`;
+    const r = await fetchWithTimeout(url);
+    if (r.status === 401 || r.status === 403) return { ok: false, reason: 'private', ids: [] };
+    if (!r.ok) return { ok: false, reason: `http-${r.status}`, ids: [] };
+    const j = await r.json();
+    const ids = (j?.friendslist?.friends || [])
+      .map(f => String(f.steamid || '').trim())
+      .filter(isSteamId);
+    return { ok: true, ids };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e), ids: [] };
+  }
+}
+
 // ---------- request handler ----------
 const _lastSeenCache = new Map(); // steam_id -> ms timestamp of last DB write
 const LAST_SEEN_THROTTLE_MS = 60 * 1000;
@@ -2984,6 +3002,23 @@ async function handleApi(req, res, pathname, query) {
         source: prof?.source || (isTelegramUserId(e.steam_id) ? 'telegram' : 'steam') });
     }
     return out;
+  }
+
+  if (pathname === '/api/friends/steam' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (!isSteamId(me)) return sendJson(res, 200, { ok: false, reason: 'steam-required', friends: [] });
+    const fetched = await fetchSteamFriendIds(me);
+    if (!fetched.ok) return sendJson(res, 200, { ok: false, reason: fetched.reason, friends: [] });
+    const known = [];
+    for (const sid of fetched.ids.slice(0, 500)) {
+      const u = db.getUser(sid);
+      if (!u || sid === me || db.areFriends(me, sid)) continue;
+      known.push({ steam_id: sid });
+      if (known.length >= 30) break;
+    }
+    const friends = await enrichSteamList(known);
+    return sendJson(res, 200, { ok: true, count: friends.length, friends });
   }
 
   if (pathname === '/api/friends') {
