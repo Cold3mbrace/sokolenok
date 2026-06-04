@@ -785,6 +785,49 @@ function getPriceHistory(market_name, currency, source = 'steam', days = 30) {
     .sort((a,b) => a.recorded_at.localeCompare(b.recorded_at));
 }
 
+function getPriceMovers(names, currency, source = 'steam', days = 30) {
+  const unique = Array.from(new Set((names || []).map(String).map(s => s.trim()).filter(Boolean))).slice(0, 120);
+  if (!unique.length) return [];
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+  let rows;
+  if (useSqlite()) {
+    const ph = unique.map(() => '?').join(',');
+    rows = openSqlite().prepare(`SELECT market_name, recorded_at, price_value FROM price_history
+      WHERE currency = ? AND source = ? AND recorded_at >= ? AND market_name IN (${ph})
+      ORDER BY market_name ASC, recorded_at ASC`).all(currency, source, cutoff, ...unique);
+  } else {
+    rows = readFallback().price_history
+      .filter(r => unique.includes(r.market_name) && r.currency === currency && r.source === source && r.recorded_at >= cutoff)
+      .sort((a,b) => (a.market_name || '').localeCompare(b.market_name || '') || (a.recorded_at || '').localeCompare(b.recorded_at || ''));
+  }
+  const byName = new Map();
+  for (const r of rows) {
+    const v = Number(r.price_value);
+    if (!Number.isFinite(v) || v <= 0) continue;
+    if (!byName.has(r.market_name)) byName.set(r.market_name, []);
+    byName.get(r.market_name).push({ at: r.recorded_at, value: v });
+  }
+  const out = [];
+  for (const [name, arr] of byName) {
+    if (arr.length < 2) continue;
+    const first = arr[0], last = arr[arr.length - 1];
+    if (!first || !last || first.value <= 0 || last.value <= 0) continue;
+    const diff = last.value - first.value;
+    if (Math.abs(diff) < 0.01) continue;
+    out.push({
+      name,
+      first_value: first.value,
+      last_value: last.value,
+      diff,
+      pct: diff / first.value * 100,
+      first_at: first.at,
+      last_at: last.at,
+      points: arr.length
+    });
+  }
+  return out;
+}
+
 // ----- watchlist -----
 function listWatchlist(steamId) {
   if (!steamId) return [];
@@ -2580,7 +2623,7 @@ module.exports = {
   saveInventorySnapshot, listInventorySnapshots, latestInventorySnapshot,
   getInventoryCache, setInventoryCache,
   // prices
-  setPrice, getPrice, getPriceHistory,
+  setPrice, getPrice, getPriceHistory, getPriceMovers,
   // watchlist
   listWatchlist, addWatch, removeWatch,
   // settings

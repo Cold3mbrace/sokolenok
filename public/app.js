@@ -238,6 +238,13 @@ const api = {
     const q = new URLSearchParams({ name, currency, days });
     return this.request(`/api/price-history?${q}`);
   },
+  priceMovers(names, currency = 'RUB', days = 30) {
+    return this.request('/api/price-movers', {
+      method: 'POST',
+      body: JSON.stringify({ names, currency, days })
+    });
+  },
+  activityPing() { return this.request('/api/presence/ping', { method: 'POST' }); },
   watchlist: {
     list() { return api.request('/api/watchlist'); },
     add(data) { return api.request('/api/watchlist', {
@@ -299,6 +306,7 @@ async function renderTopbar(active = '') {
   ensureUnreadPolling();
   // Realtime channel — push messages and notifications without polling
   if (me.logged_in) {
+    ensureActivityHeartbeat();
     ensureRealtime();
     // Register service worker for Web Push (no-op if browser doesn't support it)
     ensureServiceWorker();
@@ -640,6 +648,30 @@ function ensureUnreadPolling() {
     if (document.hidden) { if (_unreadTimer) { clearInterval(_unreadTimer); _unreadTimer = null; } }
     else if (!_unreadTimer) { refreshUnreadBadge(); startTimer(); }
   });
+}
+
+let _activityStarted = false;
+let _lastActivityPing = 0;
+function ensureActivityHeartbeat() {
+  if (_activityStarted) return;
+  _activityStarted = true;
+  const ping = (force = false) => {
+    if (document.hidden || !document.hasFocus()) return;
+    const now = Date.now();
+    if (!force && now - _lastActivityPing < 45000) return;
+    _lastActivityPing = now;
+    api.activityPing().catch(() => {});
+  };
+  const onActive = () => ping(false);
+  window.addEventListener('focus', () => ping(true));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) setTimeout(() => ping(true), 150);
+  });
+  for (const ev of ['pointerdown', 'keydown', 'touchstart', 'mousemove']) {
+    window.addEventListener(ev, onActive, { passive: true });
+  }
+  setInterval(() => ping(false), 30000);
+  setTimeout(() => ping(true), 500);
 }
 
 // Floating "Support" button (bottom-right) for logged-in users.
@@ -2717,6 +2749,7 @@ async function pageInventory() {
     currency,
     inv: null,
     history: null,
+    priceMovers: null,
     search: '',
     cat: 'all',
     sort: 'price-desc',
@@ -2733,6 +2766,18 @@ async function pageInventory() {
     paintInvLists(state);
     paintInvTable(state);
     paintInvAnalytics(state);
+  };
+
+  const refreshPriceMovers = async () => {
+    if (!state.inv?.ok) return;
+    const names = (state.inv.items || [])
+      .filter(i => i.price_value != null && i.market_name)
+      .map(i => i.market_name);
+    if (!names.length) return;
+    const r = await api.priceMovers(names, state.currency, 30).catch(() => null);
+    if (!r?.ok) return;
+    state.priceMovers = r.movers || [];
+    paintInvLists(state);
   };
 
   // Shows a subtle "обновлено N мин назад / обновляем…" indicator near the refresh button
@@ -2753,6 +2798,7 @@ async function pageInventory() {
   state.inv = first;
   state.history = await histPromise;
   renderAll();
+  refreshPriceMovers();
 
   if (first.cached) {
     const mins = Math.round((first.cache_age_ms || 0) / 60000);
@@ -2767,6 +2813,7 @@ async function pageInventory() {
         if (fresh && fresh.ok) {
           state.inv = fresh;
           renderAll();
+          refreshPriceMovers();
           setFreshness('обновлено только что');
         } else {
           setFreshness('');
@@ -2791,6 +2838,7 @@ async function pageInventory() {
         state.inv = invR2;
         state.history = histR2;
         renderAll();
+        refreshPriceMovers();
         setFreshness('обновлено только что');
         toast.ok('Инвентарь обновлён');
       } catch (e) {
@@ -3109,12 +3157,14 @@ function paintInvLists(state) {
   root.appendChild(topCard);
 
   // 3) & 4) Risers / Fallers — derived from snapshot diff
-  const movers = computeMovers(inv, state.history);
+  const movers = computeMovers(inv, state.history, state.priceMovers);
   const upCard = el('div', { class: 'card' });
   upCard.appendChild(el('div', { class: 'card-eyebrow', style: { color: 'var(--g)' } }, 'Лидеры роста'));
   if (movers.up.length === 0) {
     upCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', { class: 'desc' }, 'Сравнение появится после повторного визита')));
+      el('div', { class: 'desc' }, state.priceMovers == null
+        ? 'Считаем изменения по истории цен…'
+        : 'Пока нет предметов с заметным ростом цены.')));
   } else {
     const list = el('div', { class: 'movers-list' });
     movers.up.forEach((m, i) => list.appendChild(buildMoverDelta(m, inv.currency, 'up')));
@@ -3126,7 +3176,9 @@ function paintInvLists(state) {
   downCard.appendChild(el('div', { class: 'card-eyebrow', style: { color: 'var(--red)' } }, 'Лидеры падения'));
   if (movers.down.length === 0) {
     downCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', { class: 'desc' }, 'Сравнение появится после повторного визита')));
+      el('div', { class: 'desc' }, state.priceMovers == null
+        ? 'Считаем изменения по истории цен…'
+        : 'Пока нет предметов с заметным падением цены.')));
   } else {
     const list = el('div', { class: 'movers-list' });
     movers.down.forEach((m, i) => list.appendChild(buildMoverDelta(m, inv.currency, 'down')));
@@ -3235,8 +3287,27 @@ function buildMoverDelta(m, currency, dir) {
   );
 }
 
-function computeMovers(inv, history) {
+function computeMovers(inv, history, priceMovers = null) {
   const out = { up: [], down: [] };
+  if (Array.isArray(priceMovers) && priceMovers.length) {
+    const itemMap = new Map((inv.items || []).map(it => [it.market_name, it]));
+    const deltas = priceMovers
+      .map(m => {
+        const it = itemMap.get(m.name);
+        return {
+          name: m.name,
+          diff: Number(m.diff),
+          pct: Number(m.pct),
+          grad: it ? gradientForItem(it) : 'linear-gradient(135deg,#444,#222)',
+          emoji: it ? emojiForItem(it) : '🎯'
+        };
+      })
+      .filter(m => Number.isFinite(m.diff) && Number.isFinite(m.pct) && Math.abs(m.diff) >= 0.01);
+    deltas.sort((a, b) => b.pct - a.pct);
+    out.up = deltas.filter(d => d.diff > 0).slice(0, 4);
+    out.down = deltas.filter(d => d.diff < 0).sort((a, b) => a.pct - b.pct).slice(0, 4);
+    return out;
+  }
   if (!history?.snapshots?.length) return out;
   // Last snapshot's stored "items" array is just top10 with name+value
   const snaps = history.snapshots.filter(s => s.currency === inv.currency && Array.isArray(s.items));
@@ -7424,11 +7495,11 @@ async function pageFriends() {
       paintRecommendations(body, r.recommendations || []);
     } else if (tab === 'blocks') {
       const r = await api.blocks().catch(() => ({ ok: false, blocked: [] }));
-      paintFriendsBlocks(body, r.blocked || []);
+      paintFriendsBlocks(body, r.blocked || [], () => load(cur));
     } else {
       const r = await api.friends().catch(() => ({ ok: false }));
       const arr = r[tab] || [];
-      paintFriendsList(body, arr, tab);
+      paintFriendsList(body, arr, tab, () => load(cur));
     }
   };
   for (const btn of tabs.querySelectorAll('.feed-tab')) {
@@ -7554,7 +7625,7 @@ async function mountSteamFriendsSuggestions(anchor, refresh) {
   decorateFriendPresence(card);
 }
 
-function paintFriendsList(root, arr, tab) {
+function paintFriendsList(root, arr, tab, refresh) {
   root.innerHTML = '';
   if (!arr.length) {
     const empties = {
@@ -7575,17 +7646,17 @@ function paintFriendsList(root, arr, tab) {
     if (tab === 'friends') {
       actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(f.steam_id)}` }, 'Написать'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); pageFriends(); } } }, 'Удалить'));
+        onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); refresh?.(); } } }, 'Удалить'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' },
-        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); pageFriends(); } } }, 'В чёрный список'));
+        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); refresh?.(); } } }, 'В чёрный список'));
     } else if (tab === 'incoming') {
       actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
-        onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); pageFriends(); } }, 'Принять'));
+        onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); refresh?.(); } }, 'Принять'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отклонить'));
+        onclick: async () => { await api.friendRemove(f.steam_id); refresh?.(); } }, 'Отклонить'));
     } else {
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отменить'));
+        onclick: async () => { await api.friendRemove(f.steam_id); refresh?.(); } }, 'Отменить'));
     }
     card.appendChild(buildFriendRow(f, actions));
   }
@@ -7619,7 +7690,7 @@ function paintRecommendations(root, arr) {
   root.appendChild(card);
 }
 
-function paintFriendsBlocks(root, arr) {
+function paintFriendsBlocks(root, arr, refresh) {
   root.innerHTML = '';
   if (!arr.length) {
     root.appendChild(emptyCard('Чёрный список пуст', 'Заблокированные не смогут писать и добавляться к вам.', '🚫'));
@@ -7630,7 +7701,7 @@ function paintFriendsBlocks(root, arr) {
     card.appendChild(buildFriendRow(f,
       el('div', { class: 'friend-row-actions' },
         el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-          onclick: async () => { await api.unblock(f.steam_id); toast.ok('Разблокирован'); pageFriends(); } }, 'Разблокировать')
+          onclick: async () => { await api.unblock(f.steam_id); toast.ok('Разблокирован'); refresh?.(); } }, 'Разблокировать')
       )
     ));
   }

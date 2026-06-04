@@ -1509,7 +1509,7 @@ async function fetchSteamFriendIds(steamid) {
 
 // ---------- request handler ----------
 const _lastSeenCache = new Map(); // steam_id -> ms timestamp of last DB write
-const LAST_SEEN_THROTTLE_MS = 60 * 1000;
+const LAST_SEEN_THROTTLE_MS = 45 * 1000;
 
 function getRequestSteamId(req) {
   const cookies = parseCookies(req);
@@ -1517,15 +1517,16 @@ function getRequestSteamId(req) {
   if (!token) return null;
   const s = db.getSession(token);
   const sid = s?.steam_id || null;
-  if (sid) {
-    const now = Date.now();
-    const last = _lastSeenCache.get(sid) || 0;
-    if (now - last > LAST_SEEN_THROTTLE_MS) {
-      _lastSeenCache.set(sid, now);
-      try { db.touchLastSeen(sid); } catch (_) {}
-    }
-  }
   return sid;
+}
+
+function touchActivePresence(steamId) {
+  if (!steamId) return;
+  const now = Date.now();
+  const last = _lastSeenCache.get(steamId) || 0;
+  if (now - last <= LAST_SEEN_THROTTLE_MS) return;
+  _lastSeenCache.set(steamId, now);
+  try { db.touchLastSeen(steamId); } catch (_) {}
 }
 
 async function handleSteamOpenId(req, res, parsedUrl) {
@@ -2151,6 +2152,13 @@ async function handleApi(req, res, pathname, query) {
     }
     out.results = out.users || [];
     return sendJson(res, 200, out);
+  }
+
+  if (pathname === '/api/presence/ping' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    touchActivePresence(me);
+    return sendJson(res, 200, { ok: true });
   }
 
   if (pathname === '/api/resolve') {
@@ -2882,6 +2890,16 @@ async function handleApi(req, res, pathname, query) {
     if (!name) return sendJson(res, 400, { ok: false, error: 'no-name' });
     const history = db.getPriceHistory(name, currency.code, 'steam', days);
     return sendJson(res, 200, { ok: true, name, currency: currency.code, days, history });
+  }
+
+  if (pathname === '/api/price-movers' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const names = Array.isArray(body.names) ? body.names.map(String).map(s => s.trim()).filter(Boolean) : [];
+    if (!names.length) return sendJson(res, 400, { ok: false, error: 'no-names' });
+    const currency = normalizeCurrency(body.currency || 'RUB');
+    const days = Math.min(90, Math.max(1, Number(body.days || 30)));
+    const movers = db.getPriceMovers(names, currency.code, 'steam', days);
+    return sendJson(res, 200, { ok: true, currency: currency.code, days, movers });
   }
 
   if (pathname === '/api/watchlist') {
