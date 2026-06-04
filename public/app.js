@@ -65,6 +65,18 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+function encId(id) {
+  return encodeURIComponent(String(id || ''));
+}
+
+function isSteamId(id) {
+  return /^\d{17}$/.test(String(id || ''));
+}
+
+function isSiteUserId(id) {
+  return isSteamId(id) || /^tg:\d+$/.test(String(id || ''));
+}
+
 // ============ first-party conversion tracking ============
 function readCampaign() {
   const p = new URLSearchParams(location.search);
@@ -96,20 +108,20 @@ const api = {
   async resolveAny(input) {
     const s = String(input || '').trim();
     if (!s) return null;
-    if (/^\d{17}$/.test(s)) return s;
+    if (isSiteUserId(s)) return s;
     const r = await this.resolve(s).catch(() => null);
     return r?.ok && r.steamid ? r.steamid : null;
   },
-  profile(steamid) { return this.request(`/api/profile/${steamid}`); },
+  profile(steamid) { return this.request(`/api/profile/${encId(steamid)}`); },
   inventory(steamid, opts = {}) {
     const q = new URLSearchParams();
     if (opts.currency) q.set('currency', opts.currency);
     if (opts.noPrices) q.set('no_prices', '1');
     if (opts.cachedOk) q.set('cached_ok', '1');
     if (opts.force) q.set('force', '1');
-    return this.request(`/api/inventory/${steamid}${q.toString() ? '?' + q : ''}`);
+    return this.request(`/api/inventory/${encId(steamid)}${q.toString() ? '?' + q : ''}`);
   },
-  inventoryHistory(steamid) { return this.request(`/api/inventory/history?steamid=${steamid}`); },
+  inventoryHistory(steamid) { return this.request(`/api/inventory/history?steamid=${encId(steamid)}`); },
   news(count = 10) {
     // News can be slow if Steam is having a bad day — race against a 10s timeout
     return Promise.race([
@@ -117,18 +129,18 @@ const api = {
       new Promise((_, reject) => setTimeout(() => reject(new Error('news-timeout')), 10000))
     ]);
   },
-  stats(steamid) { return this.request(`/api/stats/${steamid}`); },
-  bans(steamid)    { return this.request(`/api/playerbans/${steamid}`); },
-  leetify(steamid) { return this.request(`/api/leetify/${steamid}`); },
+  stats(steamid) { return this.request(`/api/stats/${encId(steamid)}`); },
+  bans(steamid)    { return this.request(`/api/playerbans/${encId(steamid)}`); },
+  leetify(steamid) { return this.request(`/api/leetify/${encId(steamid)}`); },
   reputation: {
-    get(steamid)  { return api.request(`/api/reputation/${steamid}`); },
+    get(steamid)  { return api.request(`/api/reputation/${encId(steamid)}`); },
     vote(steamid, categories, comment) {
-      return api.request(`/api/reputation/${steamid}`, {
+      return api.request(`/api/reputation/${encId(steamid)}`, {
         method: 'POST', body: JSON.stringify({ categories, comment: comment || null })
       });
     },
     remove(steamid) {
-      return api.request(`/api/reputation/${steamid}`, { method: 'DELETE' });
+      return api.request(`/api/reputation/${encId(steamid)}`, { method: 'DELETE' });
     }
   },
   feed(scope = 'all') { return this.request(`/api/feed?scope=${encodeURIComponent(scope)}`); },
@@ -167,19 +179,19 @@ const api = {
   subscribePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/subscribe`, { method: 'POST' }); },
   unsubscribePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/subscribe`, { method: 'DELETE' }); },
   friends() { return this.request('/api/friends'); },
-  friendStatus(id) { return this.request(`/api/friends/${id}`); },
-  friendsOf(id) { return this.request(`/api/friends/${id}/list`); },
-  friendRequest(id) { return this.request(`/api/friends/${id}/request`, { method: 'POST' }); },
-  friendAccept(id) { return this.request(`/api/friends/${id}/accept`, { method: 'POST' }); },
-  friendRemove(id) { return this.request(`/api/friends/${id}`, { method: 'DELETE' }); },
+  friendStatus(id) { return this.request(`/api/friends/${encId(id)}`); },
+  friendsOf(id) { return this.request(`/api/friends/${encId(id)}/list`); },
+  friendRequest(id) { return this.request(`/api/friends/${encId(id)}/request`, { method: 'POST' }); },
+  friendAccept(id) { return this.request(`/api/friends/${encId(id)}/accept`, { method: 'POST' }); },
+  friendRemove(id) { return this.request(`/api/friends/${encId(id)}`, { method: 'DELETE' }); },
   blocks() { return this.request('/api/blocks'); },
-  block(id) { return this.request(`/api/blocks/${id}`, { method: 'POST' }); },
-  unblock(id) { return this.request(`/api/blocks/${id}`, { method: 'DELETE' }); },
+  block(id) { return this.request(`/api/blocks/${encId(id)}`, { method: 'POST' }); },
+  unblock(id) { return this.request(`/api/blocks/${encId(id)}`, { method: 'DELETE' }); },
   conversations() { return this.request('/api/conversations'); },
-  messages(id) { return this.request(`/api/messages/${id}`); },
+  messages(id) { return this.request(`/api/messages/${encId(id)}`); },
   sendMessage(id, text, attachment) {
     const body = attachment ? { text: text || '', attachment } : { text };
-    return this.request(`/api/messages/${id}`, { method: 'POST', body: JSON.stringify(body) });
+    return this.request(`/api/messages/${encId(id)}`, { method: 'POST', body: JSON.stringify(body) });
   },
   report(target_type, target_id, reason) {
     return this.request('/api/report', { method: 'POST', body: JSON.stringify({ target_type, target_id, reason }) });
@@ -208,14 +220,14 @@ const api = {
     removeRoleMember(id, sid) { return api.request(`/api/admin/roles/${id}/members/${sid}`, { method: 'DELETE' }); }
   },
   publicEditors(pid) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors`); },
-  addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'POST' }); },
-  removePublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'DELETE' }); },
+  addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${encId(id)}`, { method: 'POST' }); },
+  removePublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${encId(id)}`, { method: 'DELETE' }); },
   faceit(steamid, opts = {}) {
     const q = new URLSearchParams();
     if (opts.nickname) q.set('nickname', opts.nickname);
     if (opts.matches) q.set('matches', String(opts.matches));
     const qs = q.toString();
-    return this.request(`/api/faceit/${steamid}${qs ? '?' + qs : ''}`);
+    return this.request(`/api/faceit/${encId(steamid)}${qs ? '?' + qs : ''}`);
   },
   prices(names, currency = 'RUB') {
     const q = new URLSearchParams({ names: names.join(','), currency });
@@ -701,7 +713,7 @@ function openSearchModal() {
     if (/^\d{17}$/.test(q) || /steamcommunity\.com/.test(q)) {
       results.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Открываем…</div>';
       const id = await api.resolveAny(q);
-      if (id) open(`/lookup?steamid=${id}`);
+      if (id) open(`/lookup?steamid=${encId(id)}`);
       else { results.innerHTML = ''; toast.err('Не нашли такого игрока'); }
       return;
     }
@@ -718,7 +730,7 @@ function openSearchModal() {
         'Ничего не нашли. ',
         el('button', { class: 'search-try-vanity', type: 'button', onclick: async () => {
           const id = await api.resolveAny(q);
-          if (id) open(`/lookup?steamid=${id}`);
+          if (id) open(`/lookup?steamid=${encId(id)}`);
           else toast.err('Не вышло резолвить как ник Steam');
         } }, 'Попробовать как ник Steam')
       ));
@@ -728,7 +740,7 @@ function openSearchModal() {
     // Users
     const usersSec = renderSection(`👤 Игроки (${r.users.length})`, r.users, u => {
       const row = el('button', { class: 'search-result', type: 'button',
-        onclick: () => open(`/lookup?steamid=${u.steam_id}`) });
+        onclick: () => open(`/lookup?steamid=${encId(u.steam_id)}`) });
       const ava = el('div', { class: 'search-result-ava' });
       if (u.avatar) {
         const img = el('img', { src: u.avatar, alt: '' });
@@ -1064,7 +1076,7 @@ function renderSidebar(active, me) {
   // For logged-in users we split nav: top group + Settings pinned to the bottom
   const authedTop = [
     { href: '/dashboard', label: 'Дашборд',   key: 'dashboard', icon: 'home' },
-    { href: `/lookup?steamid=${me.steamid}`, label: 'Мой профиль', key: 'profile', icon: 'users' },
+    { href: `/lookup?steamid=${encId(me.steamid)}`, label: 'Мой профиль', key: 'profile', icon: 'users' },
     { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
     { href: '/notifications', label: 'Уведомления', key: 'notifications', icon: 'bell', badge: 'notif' },
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
@@ -1318,7 +1330,7 @@ async function pageIndex() {
       try {
         track('lookup_started', { target: input.slice(0, 80) });
         const r = await api.resolve(input);
-        if (r.ok) location.assign(`/lookup?steamid=${r.steamid}`);
+        if (r.ok) location.assign(`/lookup?steamid=${encId(r.steamid)}`);
         else toast.err('Не нашли такого игрока в Steam');
       } catch (e) {
         toast.err('Не удалось разрешить');
@@ -1591,7 +1603,7 @@ async function pageDashboard() {
   if (titleEl && !document.getElementById('dash-view-profile')) {
     const btn = el('a', {
       id: 'dash-view-profile',
-      href: `/lookup?steamid=${me.steamid}`,
+      href: `/lookup?steamid=${encId(me.steamid)}`,
       class: 'dash-profile-link',
       title: 'Открыть мою публичную страницу',
       'aria-label': 'Открыть мою публичную страницу',
@@ -2072,7 +2084,7 @@ function paintLookupHistory() {
 
     const link = el('a', {
       class: 'rail-recent-item',
-      href: `/lookup?steamid=${it.steamid}`
+      href: `/lookup?steamid=${encId(it.steamid)}`
     },
       avatar,
       el('div', { style: { minWidth: 0 } },
@@ -2123,7 +2135,7 @@ function wireDashLookup() {
         }
       } catch (_) {}
       saveLookupHistoryItem(entry);
-      location.assign(`/lookup?steamid=${r.steamid}`);
+      location.assign(`/lookup?steamid=${encId(r.steamid)}`);
     } catch (err) {
       toast.err('Не удалось разрешить SteamID');
     } finally {
@@ -3864,7 +3876,7 @@ async function pageLookup() {
   const params = new URLSearchParams(location.search);
   const steamid = params.get('steamid');
 
-  if (!steamid || !/^\d{17}$/.test(steamid)) {
+  if (!steamid || !isSiteUserId(steamid)) {
     const root = $('#lk-profile');
     if (root) {
       root.innerHTML = '';
@@ -4009,7 +4021,7 @@ async function paintLookupSocial(steamid, profR) {
   try { const r = await api.friendStatus(steamid); status = r?.status || 'none'; } catch (_) {}
 
   if (status === 'friends') {
-    actions.appendChild(el('a', { class: 'btn lk-social-primary', href: `/messages?to=${steamid}` }, 'Написать'));
+    actions.appendChild(el('a', { class: 'btn lk-social-primary', href: `/messages?to=${encId(steamid)}` }, 'Написать'));
     actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
       onclick: async () => { if (confirm(`Удалить ${name} из друзей?`)) { await api.friendRemove(steamid); toast.ok('Удалён из друзей'); rerender(); } } }, 'Удалить из друзей'));
   } else if (status === 'incoming') {
@@ -4056,7 +4068,9 @@ async function paintLookupSocial(steamid, profR) {
 
 // Share profile link: copy + send to friend in DM
 function openShareProfileModal(steamid, name, profile) {
-  const link = `${location.origin}/u/${steamid}`;
+  const link = isSteamId(steamid)
+    ? `${location.origin}/u/${encId(steamid)}`
+    : `${location.origin}/lookup?steamid=${encId(steamid)}`;
   const me = window.__me;
   const listBox = el('div', { class: 'share-list' });
 
@@ -4141,7 +4155,7 @@ async function paintLookupFriends(steamid) {
       img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0, 1).toUpperCase(); };
       ava.appendChild(img);
     } else ava.textContent = (f.name || '?').slice(0, 1).toUpperCase();
-    grid.appendChild(el('a', { class: 'lk-friend', href: `/lookup?steamid=${f.steam_id}`, title: f.name },
+    grid.appendChild(el('a', { class: 'lk-friend', href: `/lookup?steamid=${encId(f.steam_id)}`, title: f.name },
       ava, el('div', { class: 'lk-friend-name' }, f.name || f.steam_id.slice(-6))
     ));
   }
@@ -4341,7 +4355,7 @@ async function paintLookupActivity(steamid) {
   const root = $('#lk-activity');
   if (!root) return;
   root.innerHTML = '';
-  const r = await api.request(`/api/profile/${steamid}/activity`).catch(() => null);
+  const r = await api.request(`/api/profile/${encId(steamid)}/activity`).catch(() => null);
   if (!r?.ok || !r.items?.length) return; // hide block entirely if no activity
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-eyebrow' }, 'Активность'));
@@ -4483,6 +4497,7 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   root.innerHTML = '';
   const p = profR?.profile || {};
   const bans = bansR?.ok ? bansR.data : null;
+  const isTelegramProfile = p.source === 'telegram' || /^tg:\d+$/.test(String(p.steamid || ''));
 
   // Update page title
   if (p.personaname) {
@@ -4491,8 +4506,8 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   }
 
   const vis = Number(p.communityvisibilitystate || 0);
-  const visText = vis === 3 ? 'Публичный' : vis === 2 ? 'Только друзья' : 'Закрытый';
-  const visKind = vis === 3 ? 'green' : '';
+  const visText = isTelegramProfile ? 'Telegram' : (vis === 3 ? 'Публичный' : vis === 2 ? 'Только друзья' : 'Закрытый');
+  const visKind = (isTelegramProfile || vis === 3) ? 'green' : '';
   const sinceYear = p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null;
   const h = statsR?.summary?.headline || {};
 
@@ -4553,9 +4568,9 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   }
   info.appendChild(nameRow);
   info.appendChild(el('div', { class: 'pc-sub' },
-    `Steam ID: ${p.steamid || '—'}`,
+    `${isTelegramProfile ? 'Telegram ID' : 'Steam ID'}: ${p.steamid || '—'}`,
     el('button', { type: 'button', title: 'Скопировать',
-      onclick: () => { try { navigator.clipboard.writeText(p.steamid || ''); toast.ok('SteamID скопирован'); } catch (_) {} }
+      onclick: () => { try { navigator.clipboard.writeText(p.steamid || ''); toast.ok(isTelegramProfile ? 'Telegram ID скопирован' : 'SteamID скопирован'); } catch (_) {} }
     }, el('span', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' }))
   ));
   // Presence row: in-site activity + Steam in-game (respects target's privacy)
@@ -4618,7 +4633,7 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   // Below the profile card: external profile links — Steam, CSStats, Leetify, Faceit
   // CSStats and Leetify accept SteamID64 directly; Faceit needs faceit_url from API response.
   const sid = p.steamid;
-  if (sid) {
+  if (sid && !isTelegramProfile) {
     const links = el('div', { class: 'card ext-links' });
     links.appendChild(el('div', { class: 'card-eyebrow' }, 'Другие сервисы'));
     links.appendChild(el('div', { class: 'ext-links-grid' },
@@ -5217,7 +5232,7 @@ function renderCommentsPreview(container, comments, postId, me, onExpand) {
       ava,
       el('div', { class: 'comment-body' },
         el('div', { class: 'comment-head' },
-          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${encId(c.author_steam_id)}` }, c.author_name || c.author_steam_id),
           roleBadge(c.author_role),
           el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
         ),
@@ -5248,7 +5263,7 @@ async function loadCommentsInto(panel, postId, me, onChange) {
       ava,
       el('div', { class: 'comment-body' },
         el('div', { class: 'comment-head' },
-          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${encId(c.author_steam_id)}` }, c.author_name || c.author_steam_id),
           roleBadge(c.author_role),
           el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
         ),
@@ -5626,7 +5641,7 @@ function openEditorsModal(pub) {
     } else {
       for (const e of r.editors) {
         listBox.appendChild(el('div', { class: 'editor-row' },
-          el('a', { class: 'editor-name', href: `/lookup?steamid=${e.steam_id}` }, e.name || e.steam_id),
+          el('a', { class: 'editor-name', href: `/lookup?steamid=${encId(e.steam_id)}` }, e.name || e.steam_id),
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
             onclick: async () => { await api.removePublicEditor(pub.id, e.steam_id); toast.ok('Удалён'); reload(); } }, 'Убрать')
         ));
@@ -6229,7 +6244,7 @@ async function pageMessages() {
         }
         list.appendChild(el('div', { class: 'msgr-friend' },
           avatarEl(f.avatar, f.name, 'msgr-avatar'),
-          el('a', { class: 'msgr-friend-name', href: `/lookup?steamid=${f.steam_id}` }, f.name),
+          el('a', { class: 'msgr-friend-name', href: `/lookup?steamid=${encId(f.steam_id)}` }, f.name),
           actions
         ));
       }
@@ -6423,7 +6438,7 @@ async function pageMessages() {
         html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>' }),
       avatarEl(o.avatar, o.name, 'msgr-avatar'),
       el('div', { class: 'msgr-thread-h-info' },
-        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${o.steam_id}` }, o.name),
+        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${encId(o.steam_id)}` }, o.name),
         el('div', { class: 'msgr-thread-presence', id: 'msgr-thread-presence' }, '')
       ),
       el('div', { class: 'msgr-thread-actions' },
@@ -6620,7 +6635,7 @@ async function pageMessages() {
   // Initial load; if URL has ?to=steamid, open that thread
   await renderLeft();
   const toId = new URLSearchParams(location.search).get('to');
-  if (toId && /^\d{17}$/.test(toId)) openThread(toId);
+  if (toId && isSiteUserId(toId)) openThread(toId);
 
   // Hybrid realtime: WebSocket pushes deliver new messages instantly; polling
   // remains as a slow safety net (and as the only path when WS is blocked).
@@ -6783,7 +6798,7 @@ async function paintAdminModerators(panel) {
     for (const m of r.moderators) {
       card.appendChild(el('div', { class: 'admin-row' },
         el('div', { class: 'admin-row-main' },
-          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id)),
+          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${encId(m.steam_id)}` }, m.name || m.steam_id)),
           el('div', { class: 'admin-row-sub' }, 'Назначен ', relDate(m.created_at))),
         el('div', { class: 'admin-row-actions' },
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
@@ -6863,7 +6878,7 @@ async function paintAdminRoles(panel) {
       const list = el('div', { class: 'role-members-list' });
       for (const m of role.members) {
         list.appendChild(el('div', { class: 'role-member' },
-          el('a', { class: 'role-member-link', href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id),
+          el('a', { class: 'role-member-link', href: `/lookup?steamid=${encId(m.steam_id)}` }, m.name || m.steam_id),
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button', onclick: async () => {
             if (!confirm('Снять роль с этого игрока?')) return;
             await api.admin.removeRoleMember(role.id, m.steam_id);
@@ -6960,12 +6975,12 @@ async function paintAdminReports(panel) {
             : el('span', { class: 'admin-tag' }, rep.target_type),
           isSupport ? '' : (' ' + rep.target_id)),
         el('div', { class: 'admin-row-sub' },
-          'От: ', el('a', { href: `/lookup?steamid=${rep.reporter_steam_id}` }, rep.reporter_name || rep.reporter_steam_id),
+          'От: ', el('a', { href: `/lookup?steamid=${encId(rep.reporter_steam_id)}` }, rep.reporter_name || rep.reporter_steam_id),
           rep.reason ? ` · «${rep.reason}»` : '',
           ' · ', relDate(rep.created_at))
       ),
       el('div', { class: 'admin-row-actions' },
-        isSupport ? el('a', { class: 'btn btn-sm', href: `/messages?to=${rep.reporter_steam_id}` }, 'Ответить') : null,
+        isSupport ? el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(rep.reporter_steam_id)}` }, 'Ответить') : null,
         (!isSupport && rep.target_type === 'user') ? el('button', { class: 'btn btn-sm', type: 'button',
           onclick: async () => { const reason = prompt('Причина бана:') || ''; await api.admin.ban(rep.target_id, reason); await api.admin.resolveReport(rep.id, 'resolved'); toast.ok('Забанен'); paintAdminReports(panel); } }, 'Забанить') : null,
         el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
@@ -6989,7 +7004,7 @@ async function paintAdminBans(panel) {
     for (const b of r.bans) {
       card.appendChild(el('div', { class: 'admin-row' },
         el('div', { class: 'admin-row-main' },
-          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${b.steam_id}` }, b.name || b.steam_id)),
+          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${encId(b.steam_id)}` }, b.name || b.steam_id)),
           el('div', { class: 'admin-row-sub' }, (b.reason || 'без причины'), ' · ', relDate(b.created_at))
         ),
         el('div', { class: 'admin-row-actions' },
@@ -7152,7 +7167,7 @@ function paintFriendsList(root, arr, tab) {
   for (const f of arr) {
     const actions = el('div', { class: 'friend-row-actions' });
     if (tab === 'friends') {
-      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${f.steam_id}` }, 'Написать'));
+      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(f.steam_id)}` }, 'Написать'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
         onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); pageFriends(); } } }, 'Удалить'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' },
@@ -7190,7 +7205,7 @@ function paintRecommendations(root, arr) {
           if (r.ok) { toast.ok('Заявка отправлена'); btn.textContent = 'Заявка отправлена'; btn.classList.add('btn-ghost'); }
           else { toast.err('Ошибка'); btn.disabled = false; }
         } }, 'Добавить в друзья'),
-      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${f.steam_id}` }, 'Профиль')
+      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(f.steam_id)}` }, 'Профиль')
     );
     card.appendChild(buildFriendRow(f, actions, `${f.mutuals} общ. ${f.mutuals === 1 ? 'друг' : 'друзей'}`));
   }
@@ -7225,7 +7240,7 @@ function buildFriendRow(f, actionsNode, subText) {
   return el('div', { class: 'friend-row' },
     ava,
     el('div', { class: 'friend-row-info' },
-      el('a', { class: 'friend-row-name', href: `/lookup?steamid=${f.steam_id}` }, f.name || f.steam_id),
+      el('a', { class: 'friend-row-name', href: `/lookup?steamid=${encId(f.steam_id)}` }, f.name || f.steam_id),
       subText ? el('div', { class: 'friend-row-sub' }, subText) : null
     ),
     actionsNode
@@ -7305,7 +7320,7 @@ function buildNotificationRow(n) {
   } else if (n.kind === 'friend_accept') {
     icon = '✓';
     text = 'принял(а) вашу заявку в друзья';
-    href = `/lookup?steamid=${actor.steam_id || ''}`;
+    href = `/lookup?steamid=${encId(actor.steam_id || '')}`;
   } else {
     text = 'выполнил(а) действие';
   }
@@ -7512,7 +7527,7 @@ async function pageMe() {
         el('div', { class: 'me-prof-id' }, 'ID: ' + (me.steamid || '').slice(-12))
       )
     ),
-    el('a', { class: 'btn btn-full', href: `/lookup?steamid=${me.steamid}`, style: { marginTop: '14px' } }, 'Открыть мой профиль')
+    el('a', { class: 'btn btn-full', href: `/lookup?steamid=${encId(me.steamid)}`, style: { marginTop: '14px' } }, 'Открыть мой профиль')
   );
   root.appendChild(profCard);
 

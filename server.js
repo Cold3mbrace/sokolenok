@@ -217,6 +217,50 @@ function canModerate(steamid) {
   return isSuperAdmin(steamid) || db.isModerator(steamid);
 }
 
+function isSteamId(id) {
+  return /^\d{17}$/.test(String(id || ''));
+}
+
+function isTelegramUserId(id) {
+  return /^tg:\d+$/.test(String(id || ''));
+}
+
+function isSiteUserId(id) {
+  return isSteamId(id) || isTelegramUserId(id);
+}
+
+function localProfileFromUser(id) {
+  const u = db.getUser(id);
+  if (!u) return null;
+  let stored = {};
+  try { stored = u.profile_json ? JSON.parse(u.profile_json) : {}; } catch (_) {}
+  return {
+    steamid: u.steam_id,
+    personaname: u.persona_name || stored.personaname || u.steam_id,
+    avatar: u.avatar || stored.avatar || stored.avatarfull || null,
+    avatarfull: stored.avatarfull || u.avatar || stored.avatar || null,
+    profileurl: stored.profileurl || u.steam_url || null,
+    communityvisibilitystate: stored.communityvisibilitystate || u.visibility || 3,
+    timecreated: stored.timecreated || null,
+    source: stored.source || (isTelegramUserId(u.steam_id) ? 'telegram' : 'steam')
+  };
+}
+
+async function profileForSiteUser(id, { refreshSteam = true } = {}) {
+  if (!isSiteUserId(id)) return null;
+  if (isTelegramUserId(id)) return localProfileFromUser(id);
+  if (refreshSteam) {
+    try {
+      const prof = await fetchProfile(id);
+      if (prof) {
+        db.upsertUser(prof);
+        return prof;
+      }
+    } catch (_) {}
+  }
+  return localProfileFromUser(id);
+}
+
 // ---------- message encryption at rest ----------
 // DMs are stored encrypted with AES-256-GCM. The key is derived from MESSAGE_SECRET
 // (or, if unset, from a file in the data dir so it's stable across restarts).
@@ -2104,7 +2148,7 @@ async function handleApi(req, res, pathname, query) {
   // POST /api/presence  { ids: ["7656...", ...] }
   if (pathname === '/api/presence' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    const ids = Array.isArray(body.ids) ? body.ids.filter(x => /^\d{17}$/.test(x)).slice(0, 100) : [];
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isSiteUserId).slice(0, 100) : [];
     const out = {};
     const now = Date.now();
     const FRESH_MS = 3 * 60 * 1000; // 3 min: how stale profile is allowed
@@ -2120,7 +2164,7 @@ async function handleApi(req, res, pathname, query) {
       // Active = seen on the site in the last 2 min
       const lastSeen = db.getLastSeen(id);
       const isActive = lastSeen && (now - Date.parse(lastSeen)) < 2 * 60 * 1000;
-      if (isActive && (now - updatedAtMs) > FRESH_MS) {
+      if (isSteamId(id) && isActive && (now - updatedAtMs) > FRESH_MS) {
         refreshable.push(id);
       }
       out[id] = buildPresence(id, p);
@@ -2134,8 +2178,9 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, presence: out });
   }
 
-  if (pathname.match(/^\/api\/profile\/\d{17}\/activity$/)) {
-    const steamid = pathname.split('/')[3];
+  if (pathname.startsWith('/api/profile/') && pathname.endsWith('/activity')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length, -'/activity'.length).split('/')[0] || '').trim();
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const posts = db.listPostsByAuthor(steamid, 30);
     const comments = db.listCommentsByAuthor(steamid, 30);
     const items = [];
@@ -2168,9 +2213,9 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/profile/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
-    const profile = await fetchProfile(steamid);
-    db.upsertUser(profile);
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    const profile = await profileForSiteUser(steamid);
+    if (!profile) return sendJson(res, 404, { ok: false, error: 'not-found' });
     const presence = buildPresence(steamid, profile);
     // Attach cover_url from user_settings (per-user banner image, optional)
     const userSettings = db.getSettings(steamid);
@@ -2180,14 +2225,28 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/inventory/history')) {
     const steamid = query.get('steamid') || getRequestSteamId(req);
-    if (!steamid || !/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!steamid || !isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, status: 'steam-required', snapshots: [] });
     const snapshots = db.listInventorySnapshots(steamid, 30);
     return sendJson(res, 200, { ok: true, steamid, snapshots });
   }
 
   if (pathname.startsWith('/api/inventory/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/inventory/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) {
+      const currency = normalizeCurrency(query.get('currency') || 'RUB');
+      return sendJson(res, 200, {
+        ok: false,
+        steamid,
+        status: 'steam-required',
+        error: 'steam-login-required',
+        items: [],
+        total_items: 0,
+        pricing: null,
+        currency: currency.code
+      });
+    }
 
     const sessionSteamId = getRequestSteamId(req);
     const settings = sessionSteamId ? db.getSettings(sessionSteamId) : null;
@@ -2633,7 +2692,7 @@ async function handleApi(req, res, pathname, query) {
         const rows = db.listComments(postId, 200);
         const enriched = [];
         for (const c of rows) {
-          let p = null; try { p = await fetchProfile(c.author_steam_id); } catch (_) {}
+          const p = await profileForSiteUser(c.author_steam_id, { refreshSteam: isSteamId(c.author_steam_id) }).catch(() => null);
           enriched.push({ id: c.id, author_steam_id: c.author_steam_id, body: c.body, created_at: c.created_at,
             author_name: p?.personaname || c.author_steam_id, author_avatar: p?.avatar || null,
             author_role: db.getUserRole(c.author_steam_id) });
@@ -2648,7 +2707,7 @@ async function handleApi(req, res, pathname, query) {
         if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
         if (text.length > 1000) return sendJson(res, 400, { ok: false, error: 'too-long' });
         const c = db.addComment(postId, me, text);
-        let p = null; try { p = await fetchProfile(me); } catch (_) {}
+        const p = await profileForSiteUser(me, { refreshSteam: isSteamId(me) }).catch(() => null);
         db.logEvent('comment', me, { post_id: post.id });
         db.createNotification({ recipient: post.author_steam_id, actor: me, kind: 'post_comment',
           data: { post_id: post.id, public_id: post.public_id, post_title: post.title, snippet: text.slice(0, 80) } });
@@ -2734,7 +2793,7 @@ async function handleApi(req, res, pathname, query) {
     const recs = db.recommendFriends(me, 24);
     const enriched = [];
     for (const r of recs) {
-      let prof = null; try { prof = await fetchProfile(r.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(r.steam_id, { refreshSteam: isSteamId(r.steam_id) }).catch(() => null);
       enriched.push({ steam_id: r.steam_id, mutuals: r.mutuals,
         name: prof?.personaname || r.steam_id, avatar: prof?.avatar || null });
     }
@@ -2743,21 +2802,24 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/stats/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/stats/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required', summary: null, items: [] });
     const s = await fetchCs2Stats(steamid);
     return sendJson(res, 200, { ...s, steamid });
   }
 
   if (pathname.startsWith('/api/playerbans/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/playerbans/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required', data: null });
     const r = await fetchPlayerBans(steamid);
     return sendJson(res, 200, r);
   }
 
   if (pathname.startsWith('/api/leetify/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/leetify/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required' });
     const r = await fetchLeetifyProfile(steamid);
     return sendJson(res, 200, r);
   }
@@ -2770,7 +2832,13 @@ async function handleApi(req, res, pathname, query) {
     if (!idPart && !nickname) {
       return sendJson(res, 400, { ok: false, error: 'no-identifier' });
     }
-    const steamid = /^\d{17}$/.test(idPart) ? idPart : null;
+    if (idPart && !isSiteUserId(idPart) && !nickname) {
+      return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    }
+    if (isTelegramUserId(idPart) && !nickname) {
+      return sendJson(res, 200, { ok: false, steamid: idPart, reason: 'steam-required' });
+    }
+    const steamid = isSteamId(idPart) ? idPart : null;
     if (!steamid && !nickname) {
       return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
     }
@@ -2842,7 +2910,7 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/reputation/')) {
     const target = decodeURIComponent(pathname.slice('/api/reputation/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(target)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const voter = getRequestSteamId(req);
 
     if (req.method === 'GET') {
@@ -2876,6 +2944,7 @@ async function handleApi(req, res, pathname, query) {
       // Anti-bot weighting: account younger than 30 days has weight 0 (counted but not shown)
       let weight = 1;
       try {
+        if (!isSteamId(voter)) throw new Error('not-steam');
         const prof = await fetchProfile(voter);
         const tc = Number(prof?.timecreated || 0);
         if (tc > 0) {
@@ -2908,11 +2977,11 @@ async function handleApi(req, res, pathname, query) {
   async function enrichSteamList(arr) {
     const out = [];
     for (const e of arr) {
-      let prof = null;
-      try { prof = await fetchProfile(e.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(e.steam_id, { refreshSteam: isSteamId(e.steam_id) }).catch(() => null);
       out.push({ ...e,
         name: prof?.personaname || e.steam_id,
-        avatar: prof?.avatar || prof?.avatarfull || null });
+        avatar: prof?.avatar || prof?.avatarfull || null,
+        source: prof?.source || (isTelegramUserId(e.steam_id) ? 'telegram' : 'steam') });
     }
     return out;
   }
@@ -2930,8 +2999,9 @@ async function handleApi(req, res, pathname, query) {
   }
 
   // Public: list of confirmed friends-on-site for any steamid (used on profile pages)
-  if (/^\/api\/friends\/\d{17}\/list$/.test(pathname) && req.method === 'GET') {
-    const target = pathname.slice('/api/friends/'.length, -'/list'.length);
+  if (pathname.startsWith('/api/friends/') && pathname.endsWith('/list') && req.method === 'GET') {
+    const target = decodeURIComponent(pathname.slice('/api/friends/'.length, -'/list'.length).split('/')[0] || '').trim();
+    if (!isSiteUserId(target)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const lists = db.listFriends(target);
     const friends = await enrichSteamList(lists.friends);
     return sendJson(res, 200, { ok: true, friends, count: friends.length });
@@ -2943,7 +3013,7 @@ async function handleApi(req, res, pathname, query) {
     const parts = pathname.slice('/api/friends/'.length).split('/');
     const other = decodeURIComponent(parts[0] || '').trim();
     const action = parts[1] || '';
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
 
     if (req.method === 'POST' && action === 'request') {
       const r = db.sendFriendRequest(me, other);
@@ -2982,7 +3052,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const other = decodeURIComponent(pathname.slice('/api/blocks/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     if (req.method === 'POST') {
       const r = db.blockUser(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
@@ -3003,8 +3073,7 @@ async function handleApi(req, res, pathname, query) {
     const convos = db.listConversations(me);
     const enriched = [];
     for (const c of convos) {
-      let prof = null;
-      try { prof = await fetchProfile(c.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(c.steam_id, { refreshSteam: isSteamId(c.steam_id) }).catch(() => null);
       let preview = '';
       if (c.last) {
         if (c.last.deleted_at) {
@@ -3079,7 +3148,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const other = decodeURIComponent(pathname.slice('/api/messages/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
 
     if (req.method === 'GET') {
       const rows = db.listMessages(me, other, 200);
@@ -3104,8 +3173,7 @@ async function handleApi(req, res, pathname, query) {
       db.markRead(me, other);
       // Tell the other party their messages were seen — UI can flip the "✓" to "✓✓".
       wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
-      let prof = null;
-      try { prof = await fetchProfile(other); } catch (_) {}
+      const prof = await profileForSiteUser(other, { refreshSteam: isSteamId(other) }).catch(() => null);
       return sendJson(res, 200, { ok: true, other: {
         steam_id: other, name: prof?.personaname || other,
         avatar: prof?.avatar || prof?.avatarfull || null

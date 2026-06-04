@@ -43,27 +43,21 @@ body {
   background: var(--bg);
   min-height: 100vh;
 }
-/* PWA mode (site added to iPhone home screen). The iOS status bar overlaps
-   our content otherwise, and the notch area looks empty/awkward. We push
-   everything down by the safe-area inset and fill that space with a green
-   SOKOLENOK branding strip — turns a problem into a feature. */
+/* PWA mode (site added to iPhone home screen). Keep the safe-area protected
+   without turning it into a loud visible header on every mobile screen. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
   body {
-    padding-top: calc(env(safe-area-inset-top, 0px) + 26px);
+    padding-top: env(safe-area-inset-top, 0px);
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
   }
   body::after {
-    content: 'SOKOLENOK';
+    content: '';
     position: fixed; top: 0; left: 0; right: 0;
-    height: calc(env(safe-area-inset-top, 0px) + 26px);
-    padding-top: env(safe-area-inset-top, 0px);
-    background: var(--g, #4ade80);
-    color: #fff;
-    font-size: 12px; font-weight: 800; letter-spacing: 0.12em;
-    display: flex; align-items: center; justify-content: center;
+    height: env(safe-area-inset-top, 0px);
+    background: color-mix(in srgb, var(--g) 16%, var(--bg) 84%);
+    border-bottom: 1px solid rgba(74, 222, 128, 0.10);
     z-index: 9999;
-    text-align: center;
     pointer-events: none;
   }
 }
@@ -3875,3 +3869,137 @@ body.large-font .post-act svg { transform: scale(1.1); }
 .notfound-card{text-align:center;max-width:560px;padding:46px 28px}.notfound-code{font-size:92px;line-height:1;font-weight:800;letter-spacing:-.06em;color:var(--g,#42d392)}
 .notfound-title{font-size:30px;margin:18px 0 12px}.notfound-text{color:var(--muted,#9dafaa);line-height:1.55;margin:0 auto 25px}
 .notfound-actions{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+
+/* v49.1: mobile stability pass */
+@media (max-width: 860px) {
+  html, body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .layout,
+  .main,
+  .card,
+  .hero,
+  .hero-side,
+  .feed-grid,
+  .lk-grid,
+  .lk-three,
+  .dash-layout,
+  .dash-row,
+  .inv-grid-layout,
+  .msgr,
+  .settings-grid,
+  .admin-grid,
+  .cm-grid {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .hero,
+  .hero-side,
+  .lk-grid,
+  .lk-three,
+  .lp-feature-grid,
+  .lp-cards,
+  .og-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .card,
+  .post,
+  .feed-card,
+  .prof-card {
+    overflow: hidden;
+  }
+
+  .feed-tabs,
+  .cat-tabs,
+  .chart-tabs,
+  .st-tabs,
+  .msgr-tabs {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .feed-tabs::-webkit-scrollbar,
+  .cat-tabs::-webkit-scrollbar,
+  .chart-tabs::-webkit-scrollbar,
+  .st-tabs::-webkit-scrollbar,
+  .msgr-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .pc-top,
+  .dash-user,
+  .topbar,
+  .friend-row {
+    min-width: 0;
+  }
+
+  .pc-name,
+  .pc-sub,
+  .friend-row-name,
+  .friend-row-sub,
+  .msgr-friend-name,
+  .msgr-thread-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pc-stats,
+  .kpis,
+  .kpis.k4,
+  .lk-friends-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .main {
+    width: 100%;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .friend-row {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+  }
+
+  .friend-row-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    padding-left: 54px !important;
+    justify-content: flex-start;
+  }
+
+  .friend-row-actions .btn,
+  .lk-social-actions .btn {
+    min-width: 0;
+    max-width: 100%;
+    white-space: nowrap;
+  }
+
+  .lk-social-actions {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .lk-social-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .share-link-row {
+    grid-template-columns: 1fr;
+  }
+}
