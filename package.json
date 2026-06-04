@@ -1,6 +1,6 @@
 {
   "name": "sokolenok",
-  "version": "4.7.0",
+  "version": "4.9.0",
   "description": "SOKOLENOK — личный кабинет игрока CS2",
   "private": true,
   "main": "server.js",
@@ -13,7 +13,7 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^1.0.0",
+    "@napi-rs/canvas": "^0.1.78",
     "ws": "^8.21.0"
   }
 }

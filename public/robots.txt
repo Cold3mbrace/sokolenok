@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /messages
+Disallow: /settings
+Sitemap: https://sokolenok.pro/sitemap.xml

@@ -36,6 +36,10 @@ const path = require('path');
 const crypto = require('crypto');
 const db = require('./storage/db');
 const wsHub = require('./lib/ws-hub');
+let Canvas = null;
+try { Canvas = require('@napi-rs/canvas'); } catch (_) {
+  console.warn('[og] @napi-rs/canvas not installed — profile previews use the logo fallback. Run: npm install');
+}
 
 // Transparently push every new notification through WebSocket to its recipient.
 // We monkey-patch instead of editing each call-site (there are 5+ of them)
@@ -142,11 +146,6 @@ try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
 
 // Web Push (no npm deps, self-contained crypto)
 const webPush = require('./lib/web-push');
-// OG card generator (profile/inventory/post preview images for social sharing)
-let ogCard = null;
-try { ogCard = require('./lib/og-card'); } catch (_) {
-  console.warn('[og] @napi-rs/canvas not available — OG image endpoints disabled');
-}
 
 // VAPID keys: prefer env vars, otherwise auto-generate on first boot and
 // persist them in DATA_DIR/vapid.json so the same keys survive restarts.
@@ -183,13 +182,12 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.6.0';
+const APP_VERSION = 'v49.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(ROOT, '.data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const OG_CACHE_DIR = path.join(DATA_DIR, 'og-cache');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
@@ -1656,108 +1654,6 @@ async function handleSteamOpenId(req, res, parsedUrl) {
 }
 
 async function handleApi(req, res, pathname, query) {
-  // ---- OG image generation (/og/profile/:steamid.png, /og/inventory/:steamid.png) ----
-  // These are called by Telegram/Discord/VK when a user shares a link.
-  // We generate a 1200×630 PNG on the fly (or from cache) with the player's
-  // stats, avatar and brand. Cache is busted after 24h.
-  if (ogCard && pathname.startsWith('/og/') && pathname.endsWith('.png')) {
-    const parts = pathname.slice(4, -4).split('/'); // ['profile', '765...'] or ['inventory', '765...'] or ['post', '8']
-    const kind = parts[0];
-    const id = parts[1];
-    if (!id) { res.writeHead(400); res.end(); return true; }
-
-    try {
-      fs.mkdirSync(OG_CACHE_DIR, { recursive: true });
-    } catch (_) {}
-
-    const cacheKey = `${kind}-${id}.png`;
-    const cachePath = path.join(OG_CACHE_DIR, cacheKey);
-    const maxAge = 86400; // seconds — 24h
-
-    // Serve from cache if fresh
-    try {
-      const st = fs.statSync(cachePath);
-      if (Date.now() - st.mtimeMs < maxAge * 1000) {
-        const buf = fs.readFileSync(cachePath);
-        res.writeHead(200, {
-          'Content-Type': 'image/png',
-          'Content-Length': buf.length,
-          'Cache-Control': `public, max-age=${maxAge}`,
-          'X-Cache': 'HIT'
-        });
-        res.end(buf);
-        return true;
-      }
-    } catch (_) { /* no cache */ }
-
-    let buf = null;
-    try {
-      if (kind === 'profile') {
-        const steamid = id;
-        let profile = db.getUser(steamid);
-        if (!profile) {
-          try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {}
-        }
-        const inv = db.latestInventorySnapshot(steamid, 'RUB');
-        const statsJson = profile?.profile_json ? (() => { try { return JSON.parse(profile.profile_json); } catch (_) { return {}; } })() : {};
-        const kd = statsJson.kd ?? null;
-        const hs = statsJson.hs_percent ?? statsJson.hs ?? null;
-        const hours = statsJson.hours_cs2 ?? statsJson.hours ?? null;
-        buf = await ogCard.renderProfileCard({
-          name: profile?.persona_name || profile?.personaname || 'Игрок CS2',
-          steamId: steamid,
-          avatar: profile?.avatar || profile?.avatarfull || null,
-          vacBanned: profile?.vac_banned || profile?.vacBanned || false,
-          kd, hsPercent: hs, hoursCs2: hours,
-          inventoryValueText: inv?.total_value_text || null
-        });
-      } else if (kind === 'inventory') {
-        const steamid = id;
-        let profile = db.getUser(steamid);
-        if (!profile) { try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {} }
-        const inv = db.latestInventorySnapshot(steamid, 'RUB');
-        buf = await ogCard.renderInventoryCard({
-          name: profile?.persona_name || profile?.personaname || 'Игрок',
-          avatar: profile?.avatar || profile?.avatarfull || null,
-          totalValueText: inv?.total_value_text || null,
-          itemCount: inv?.total_items || 0,
-          currency: 'RUB'
-        });
-      } else if (kind === 'post') {
-        const postId = parseInt(id, 10);
-        const post = isNaN(postId) ? null : db.getPost?.(postId) || null;
-        const pubName = post?.public_name || 'SOKOLENOK';
-        buf = await ogCard.renderPostCard({
-          publicName: pubName,
-          publicAvatar: post?.public_avatar || null,
-          title: post?.title || '',
-          body: post?.body || ''
-        });
-      }
-    } catch (e) {
-      console.warn('[og] render error:', e?.message);
-    }
-
-    if (!buf) {
-      // Return a tiny 1×1 transparent PNG placeholder so Telegram doesn't retry forever
-      const fallback = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': fallback.length });
-      res.end(fallback);
-      return true;
-    }
-
-    // Cache and serve
-    try { fs.writeFileSync(cachePath, buf); } catch (_) {}
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': buf.length,
-      'Cache-Control': `public, max-age=${maxAge}`,
-      'X-Cache': 'MISS'
-    });
-    res.end(buf);
-    return true;
-  }
-
   if (pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: true,
@@ -1766,6 +1662,35 @@ async function handleApi(req, res, pathname, query) {
       has_steam_api_key: Boolean(STEAM_API_KEY),
       storage: db.storageHealth()
     });
+  }
+
+  // First-party conversion analytics. Stores only action names, page and UTM labels.
+  if (pathname === '/api/track' && req.method === 'POST') {
+    const body = await readJsonBody(req).catch(() => ({}));
+    const allowed = new Set(['page_view','lookup_started','lookup_success','inventory_value_shown','steam_login_clicked','profile_shared','watchlist_added','onboarding_complete']);
+    const kind = String(body.kind || '');
+    if (!allowed.has(kind)) return sendJson(res, 400, { ok: false, error: 'unsupported-event' });
+    const cleanText = (v, n = 120) => typeof v === 'string' ? v.slice(0, n) : null;
+    const utmRaw = body.utm && typeof body.utm === 'object' ? body.utm : {};
+    const data = {
+      page: cleanText(body.page, 160),
+      target: cleanText(body.target, 80),
+      referrer: cleanText(body.referrer, 120),
+      utm: {
+        source: cleanText(utmRaw.source, 60), medium: cleanText(utmRaw.medium, 60),
+        campaign: cleanText(utmRaw.campaign, 100), content: cleanText(utmRaw.content, 100), term: cleanText(utmRaw.term, 100)
+      }
+    };
+    db.logEvent(kind, getRequestSteamId(req), data);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/onboarding/complete' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    db.setSettings(me, { onboarding_done: true });
+    db.logEvent('onboarding_complete', me, {});
+    return sendJson(res, 200, { ok: true });
   }
 
   // Public auth config — tells the frontend which login methods are
@@ -2054,6 +1979,9 @@ async function handleApi(req, res, pathname, query) {
 
     if (sub === 'stats' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, stats: db.adminStats() });
+    }
+    if (sub === 'analytics' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, report: db.analyticsReport(query.get('days') || 30) });
     }
     if (sub === 'reports' && req.method === 'GET') {
       const status = query.get('status') || 'open';
@@ -2898,7 +2826,7 @@ async function handleApi(req, res, pathname, query) {
         threshold_above: body.threshold_above != null ? Number(body.threshold_above) : null,
         threshold_below: body.threshold_below != null ? Number(body.threshold_below) : null
       });
-      db.logEvent('watchlist-add', steamid, { market_name: name });
+      db.logEvent('watchlist_added', steamid, { market_name: name });
       return sendJson(res, 200, { ok: true, item: row });
     }
     if (req.method === 'DELETE') {
@@ -3283,6 +3211,61 @@ async function handleApi(req, res, pathname, query) {
   return sendJson(res, 404, { ok: false, error: 'not-found', path: pathname });
 }
 
+// ---------- dynamic PNG previews for social sharing ----------
+async function serveProfileOgPng(req, res, steamid) {
+  if (!/^\d{17}$/.test(steamid)) return sendText(res, 404, 'Not found');
+  if (!Canvas) {
+    res.writeHead(302, { Location: '/assets/logo-full-dark.png', 'Cache-Control': 'public, max-age=300' });
+    return res.end();
+  }
+  try {
+    const { createCanvas, loadImage } = Canvas;
+    const c = createCanvas(1200, 630);
+    const x = c.getContext('2d');
+    const profile = await fetchProfile(steamid).catch(() => null);
+    const name = String(profile?.personaname || 'Игрок CS2').slice(0, 30);
+    const role = db.getUserRole(steamid);
+    const cached = db.getInventoryCache(steamid, 'RUB');
+    const total = cached?.payload?.total_value_text || null;
+    x.fillStyle = '#080d0d'; x.fillRect(0, 0, 1200, 630);
+    const grad = x.createLinearGradient(0, 0, 1200, 630);
+    grad.addColorStop(0, '#132821'); grad.addColorStop(0.6, '#091110'); grad.addColorStop(1, '#081b17');
+    x.fillStyle = grad; x.fillRect(22, 22, 1156, 586);
+    x.strokeStyle = '#1f5042'; x.lineWidth = 2; x.strokeRect(22, 22, 1156, 586);
+    x.fillStyle = '#4bf2a6'; x.font = 'bold 27px Arial'; x.fillText('SOKOLENOK', 62, 82);
+    x.fillStyle = '#8da79e'; x.font = '22px Arial'; x.fillText('ПРОФИЛЬ ИГРОКА COUNTER-STRIKE 2', 62, 122);
+    x.fillStyle = '#142621'; x.beginPath(); x.roundRect(62, 178, 170, 170, 26); x.fill();
+    if (profile?.avatarfull || profile?.avatar) {
+      try {
+        const imgResp = await fetch(profile.avatarfull || profile.avatar);
+        if (imgResp.ok) { const avatar = await loadImage(Buffer.from(await imgResp.arrayBuffer())); x.drawImage(avatar, 62, 178, 170, 170); }
+      } catch (_) {}
+    }
+    x.fillStyle = '#eef7f4'; x.font = 'bold 54px Arial'; x.fillText(name, 270, 240);
+    x.fillStyle = '#8da79e'; x.font = '24px Arial'; x.fillText(`SteamID: ${steamid}`, 270, 288);
+    if (role?.name) { x.fillStyle = '#4bf2a6'; x.font = 'bold 22px Arial'; x.fillText(`✓ ${String(role.name).slice(0, 25)}`, 270, 332); }
+    const boxes = [
+      ['ИНВЕНТАРЬ', total || 'Открой профиль'],
+      ['ДАННЫЕ', 'Steam • Faceit'],
+      ['ПРОВЕРКА', 'Публичный профиль']
+    ];
+    boxes.forEach((b, i) => {
+      const bx = 62 + i * 360; const by = 430;
+      x.fillStyle = '#0c1715'; x.beginPath(); x.roundRect(bx, by, 330, 105, 18); x.fill();
+      x.fillStyle = '#6f8b82'; x.font = '17px Arial'; x.fillText(b[0], bx + 22, by + 34);
+      x.fillStyle = '#eef7f4'; x.font = 'bold 25px Arial'; x.fillText(String(b[1]).slice(0, 20), bx + 22, by + 72);
+    });
+    x.fillStyle = '#7e968e'; x.font = '18px Arial'; x.fillText('Проверь свой профиль на sokolenok.pro', 62, 575);
+    const png = c.toBuffer('image/png');
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': png.length, 'Cache-Control': 'public, max-age=900' });
+    res.end(png);
+  } catch (e) {
+    console.warn('[og] render failed:', e?.message);
+    res.writeHead(302, { Location: '/assets/logo-full-dark.png', 'Cache-Control': 'public, max-age=120' });
+    res.end();
+  }
+}
+
 // ---------- static ----------
 function safeJoin(base, target) {
   const r = path.resolve(base, '.' + target);
@@ -3352,14 +3335,10 @@ function serveStatic(req, res, pathname) {
           const sid = query.get('steamid');
           const p = await fetchProfile(sid).catch(() => null);
           const name = escapeHtml(p?.personaname || 'Игрок');
+          const avatar = `${base}/og/profile/${sid}.png`;
           const title = `${name} — профиль CS2 на SOKOLENOK`;
           const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-          // Use the generated OG card as the preview image — it shows stats and
-          // branding instead of just a plain Steam avatar.
-          const ogImage = ogCard
-            ? `${base}/og/profile/${sid}.png`
-            : (p?.avatarfull || p?.avatar || defaultImage);
-          og = renderOgTags({ title, desc, image: ogImage, url: `${base}/lookup?steamid=${sid}` });
+          og = renderOgTags({ title, desc, image: avatar, url: `${base}/lookup?steamid=${sid}` });
         } else if (pathname === '/feed' && query.get('public')) {
           const pid = query.get('public');
           const pub = db.getPublic(pid);
@@ -3403,10 +3382,10 @@ function serveStatic(req, res, pathname) {
         const defaultImage = `${base}/assets/logo-full-dark.png`;
         const p = await fetchProfile(sid).catch(() => null);
         const name = escapeHtml(p?.personaname || 'Игрок');
+        const avatar = p?.avatarfull || p?.avatar || defaultImage;
         const title = `${name} — профиль CS2 на SOKOLENOK`;
         const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-        const ogImage = ogCard ? `${base}/og/profile/${sid}.png` : (p?.avatarfull || p?.avatar || defaultImage);
-        const og = renderOgTags({ title, desc, image: ogImage, url: `${base}/u/${sid}` });
+        const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
         // Inject a tiny script that rewrites the URL to the canonical ?steamid= form,
         // so existing frontend logic (which reads URLSearchParams) keeps working.
         const rewrite = `<script>try{history.replaceState({},'','/lookup?steamid=${sid}');}catch(_){}</script>`;
@@ -3444,11 +3423,10 @@ function serveStatic(req, res, pathname) {
   if (!file) { sendText(res, 403, 'Forbidden'); return; }
   fs.stat(file, (err, stat) => {
     if (err || !stat.isFile()) {
-      // SPA fallback to index.html for unknown HTML routes
       if (req.headers.accept && req.headers.accept.includes('text/html')) {
-        return fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e, d) => {
+        return fs.readFile(path.join(PUBLIC_DIR, '404.html'), (e, d) => {
           if (e) return sendText(res, 404, 'Not found');
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
           res.end(d);
         });
       }
@@ -3482,6 +3460,10 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
+    if (pathname.startsWith('/og/profile/') && pathname.endsWith('.png')) {
+      const sid = pathname.slice('/og/profile/'.length, -4);
+      return await serveProfileOgPng(req, res, sid);
+    }
     if (pathname.startsWith('/auth/')) {
       const handled = await handleSteamOpenId(req, res, parsedUrl);
       if (handled !== false) return;

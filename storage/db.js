@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   faceit_nickname TEXT,
   consent_at TEXT,
   show_activity INTEGER NOT NULL DEFAULT 1,
+  onboarding_done INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 
@@ -361,6 +362,9 @@ function openSqlite() {
     }
     if (!colNames.has('cover_url')) {
       db.exec('ALTER TABLE user_settings ADD COLUMN cover_url TEXT');
+    }
+    if (!colNames.has('onboarding_done')) {
+      db.exec('ALTER TABLE user_settings ADD COLUMN onboarding_done INTEGER DEFAULT 0');
     }
   } catch (_) { /* best-effort */ }
   try {
@@ -833,7 +837,7 @@ function removeWatch(steamId, marketName) {
 function getSettings(steamId) {
   if (!steamId) return null;
   const empty = { steam_id: steamId, currency: 'RUB', language: 'ru',
-    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, updated_at: null };
+    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, onboarding_done: 0, updated_at: null };
   let row;
   if (useSqlite()) {
     row = openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId) || empty;
@@ -842,6 +846,7 @@ function getSettings(steamId) {
   }
   // Treat NULL/undefined as default ON for show_activity
   if (row.show_activity == null) row.show_activity = 1;
+  if (row.onboarding_done == null) row.onboarding_done = 0;
   return row;
 }
 
@@ -856,11 +861,12 @@ function setSettings(steamId, patch = {}) {
     consent_at: patch.consent_at !== undefined ? patch.consent_at : cur.consent_at,
     show_activity: patch.show_activity !== undefined ? (patch.show_activity ? 1 : 0) : (cur.show_activity ?? 1),
     cover_url: patch.cover_url !== undefined ? patch.cover_url : cur.cover_url,
+    onboarding_done: patch.onboarding_done !== undefined ? (patch.onboarding_done ? 1 : 0) : (cur.onboarding_done ?? 0),
     updated_at: nowIso()
   };
   if (useSqlite()) {
-    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?)
+    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, onboarding_done, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(steam_id) DO UPDATE SET
         currency = excluded.currency,
         language = excluded.language,
@@ -869,8 +875,9 @@ function setSettings(steamId, patch = {}) {
         consent_at = excluded.consent_at,
         show_activity = excluded.show_activity,
         cover_url = excluded.cover_url,
+        onboarding_done = excluded.onboarding_done,
         updated_at = excluded.updated_at`)
-      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.updated_at);
+      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.onboarding_done, next.updated_at);
   } else {
     const state = readFallback();
     state.user_settings[steamId] = next;
@@ -2358,6 +2365,36 @@ function logEvent(kind, steamId = null, data = null) {
   }
 }
 
+function analyticsReport(days = 30) {
+  const safeDays = Math.min(365, Math.max(1, Number(days) || 30));
+  const since = new Date(Date.now() - safeDays * 86400000).toISOString();
+  let rows;
+  if (useSqlite()) {
+    rows = openSqlite().prepare(`SELECT ts, kind, steam_id, data_json FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT 20000`).all(since);
+  } else {
+    rows = (readFallback().events || []).filter(e => e.ts >= since).slice(-20000).reverse();
+  }
+  const tracked = ['page_view','lookup_started','lookup_success','inventory_value_shown','steam_login_clicked','steam_login_success','profile_shared','watchlist_added','onboarding_complete','register'];
+  const totals = Object.fromEntries(tracked.map(k => [k, 0]));
+  const sources = {};
+  const daily = {};
+  for (const row of rows) {
+    let data = {}; try { data = JSON.parse(row.data_json || '{}') || {}; } catch (_) {}
+    if (totals[row.kind] != null) totals[row.kind]++;
+    const day = String(row.ts || '').slice(0, 10);
+    if (!daily[day]) daily[day] = { page_view: 0, lookup_success: 0, steam_login_success: 0, profile_shared: 0 };
+    if (daily[day][row.kind] != null) daily[day][row.kind]++;
+    const utm = data.utm || {};
+    const source = String(utm.source || data.referrer || 'direct').slice(0, 60) || 'direct';
+    if (!sources[source]) sources[source] = { source, visits: 0, lookups: 0, logins: 0, shares: 0 };
+    if (row.kind === 'page_view') sources[source].visits++;
+    if (row.kind === 'lookup_success') sources[source].lookups++;
+    if (row.kind === 'steam_login_success' || row.kind === 'register') sources[source].logins++;
+    if (row.kind === 'profile_shared') sources[source].shares++;
+  }
+  return { days: safeDays, since, totals, sources: Object.values(sources).sort((a,b) => b.lookups - a.lookups || b.visits - a.visits).slice(0, 30), daily: Object.entries(daily).sort((a,b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, ...value })) };
+}
+
 function storageHealth() {
   const backend = useSqlite() ? 'sqlite' : 'json-fallback';
   let counts = {};
@@ -2574,5 +2611,5 @@ module.exports = {
   createNotification, listNotifications, countUnreadNotifications, markNotificationsRead,
   // push subscriptions
   savePushSubscription, deletePushSubscription, listPushSubscriptions, touchPushSubscription,
-  logEvent, storageHealth
+  logEvent, analyticsReport, storageHealth
 };

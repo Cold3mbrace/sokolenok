@@ -65,6 +65,20 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+// ============ first-party conversion tracking ============
+function readCampaign() {
+  const p = new URLSearchParams(location.search);
+  const fresh = { source: p.get('utm_source'), medium: p.get('utm_medium'), campaign: p.get('utm_campaign'), content: p.get('utm_content'), term: p.get('utm_term') };
+  try {
+    if (fresh.source || fresh.medium || fresh.campaign || fresh.content || fresh.term) localStorage.setItem('sok:utm', JSON.stringify(fresh));
+    return JSON.parse(localStorage.getItem('sok:utm') || 'null') || fresh;
+  } catch (_) { return fresh; }
+}
+function track(kind, extra = {}) {
+  const payload = { kind, page: location.pathname, referrer: document.referrer ? (() => { try { return new URL(document.referrer).hostname; } catch (_) { return ''; } })() : '', utm: readCampaign(), ...extra };
+  fetch('/api/track', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
+}
+
 // ============ api wrapper ============
 const api = {
   async request(path, opts = {}) {
@@ -75,6 +89,7 @@ const api = {
     return body;
   },
   me() { return this.request('/api/me'); },
+  completeOnboarding() { return this.request('/api/onboarding/complete', { method: 'POST' }); },
   health() { return this.request('/api/health'); },
   resolve(target) { return this.request(`/api/resolve?target=${encodeURIComponent(target)}`); },
   // Accept SteamID64, vanity, full profile URL, or short URL. Returns steamid or null.
@@ -171,6 +186,7 @@ const api = {
   },
   admin: {
     stats() { return api.request('/api/admin/stats'); },
+    analytics(days = 30) { return api.request(`/api/admin/analytics?days=${days}`); },
     reports(status = 'open') { return api.request(`/api/admin/reports?status=${status}`); },
     resolveReport(id, status) { return api.request(`/api/admin/reports/${id}`, { method: 'POST', body: JSON.stringify({ status }) }); },
     bans() { return api.request('/api/admin/bans'); },
@@ -250,6 +266,12 @@ const toast = {
 async function renderTopbar(active = '') {
   const me = await api.me().catch(() => ({ logged_in: false }));
   window.__me = me;
+  try {
+    if (me.logged_in && sessionStorage.getItem('sok:await_login') === '1') {
+      sessionStorage.removeItem('sok:await_login');
+      track('steam_login_success');
+    }
+  } catch (_) {}
   if (active !== 'messages') document.body.classList.remove('msgr-thread-open');
   renderSidebar(active, me);
   renderMainToolbar(me);
@@ -258,6 +280,7 @@ async function renderTopbar(active = '') {
   document.getElementById('support-fab')?.remove();
   // First-login consent gate (152-ФЗ explicit consent)
   if (me.logged_in && me.consented === false) showConsentGate();
+  else if (me.logged_in && !me.settings?.onboarding_done) setTimeout(() => showOnboardingTour(), 500);
   // Background polling for unread messages (stops on next page change naturally)
   ensureUnreadPolling();
   // Realtime channel — push messages and notifications without polling
@@ -270,6 +293,33 @@ async function renderTopbar(active = '') {
     setTimeout(() => maybeShowPushOptIn(), 1500);
   }
   return me;
+}
+
+
+// First-login onboarding: deliberately lightweight and isolated from page logic.
+let _tourOpen = false;
+function showOnboardingTour() {
+  if (_tourOpen || document.querySelector('.sok-tour')) return;
+  _tourOpen = true;
+  const steps = [
+    ['Добро пожаловать в SOKOLENOK', 'Здесь можно проверить профиль игрока CS2, узнать стоимость инвентаря и поделиться результатом.'],
+    ['Проверка игрока', 'Вставьте SteamID или ссылку в поиск — публичный профиль откроется без передачи пароля.'],
+    ['Инвентарь и цены', 'В разделе «Инвентарь» показываются доступные предметы и их оценка в выбранной валюте.'],
+    ['Друзья и сообщения', 'Добавляйте знакомых игроков и отправляйте им найденные профили прямо внутри сайта.'],
+    ['Делитесь карточкой', 'Кнопка «Поделиться» создаёт красивое превью для Telegram, VK и Discord.']
+  ];
+  let n = 0;
+  const overlay = el('div', { class: 'sok-tour' });
+  const card = el('div', { class: 'sok-tour-card' });
+  const count = el('div', { class: 'sok-tour-count' });
+  const title = el('h2', { class: 'sok-tour-title' });
+  const text = el('p', { class: 'sok-tour-text' });
+  const next = el('button', { class: 'btn', type: 'button' });
+  const close = async () => { await api.completeOnboarding().catch(() => null); overlay.remove(); _tourOpen = false; };
+  const draw = () => { count.textContent = `${n + 1} / ${steps.length}`; title.textContent = steps[n][0]; text.textContent = steps[n][1]; next.textContent = n === steps.length - 1 ? 'Начать' : 'Далее'; };
+  next.addEventListener('click', () => { if (n < steps.length - 1) { n++; draw(); } else close(); });
+  const skip = el('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Пропустить');
+  card.append(count, title, text, el('div', { class: 'sok-tour-actions' }, skip, next)); overlay.appendChild(card); document.body.appendChild(overlay); draw();
 }
 
 // ============ Push opt-in banner ============
@@ -581,6 +631,8 @@ function ensureUnreadPolling() {
 // Floating "Support" button (bottom-right) for logged-in users.
 // Anti-scam explainer before redirecting to Steam OpenID.
 function steamLogin(ev) {
+  track('steam_login_clicked');
+  try { sessionStorage.setItem('sok:await_login', '1'); } catch (_) {}
   if (ev) ev.preventDefault();
   const host = el('div', { id: 'modal-host', class: 'modal-host' });
   const close = () => host.remove();
@@ -1264,6 +1316,7 @@ async function pageIndex() {
       const origText = submitBtn.textContent;
       submitBtn.disabled = true; submitBtn.textContent = 'Ищем…';
       try {
+        track('lookup_started', { target: input.slice(0, 80) });
         const r = await api.resolve(input);
         if (r.ok) location.assign(`/lookup?steamid=${r.steamid}`);
         else toast.err('Не нашли такого игрока в Steam');
@@ -3523,6 +3576,7 @@ async function toggleWatch(marketName, addIt) {
   try {
     if (addIt) {
       await api.watchlist.add({ market_name: marketName });
+      track('watchlist_added', { target: marketName });
       toast.ok('Добавлено в watchlist');
     } else {
       await api.watchlist.remove(marketName);
@@ -3839,6 +3893,9 @@ async function pageLookup() {
     api.reputation.get(steamid).catch(() => ({ ok: false }))
   ]);
 
+  if (profR?.ok) track('lookup_success', { target: steamid });
+  if (invR?.ok && invR.total_value != null) track('inventory_value_shown', { target: steamid });
+
   // Update lookup history (skip own profile)
   if (profR?.profile && (!me.logged_in || me.steamid !== steamid)) {
     saveLookupHistoryItem({
@@ -4009,7 +4066,7 @@ function openShareProfileModal(steamid, name, profile) {
     el('div', { class: 'share-link-row' },
       el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
       el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        try { await navigator.clipboard.writeText(link); track('profile_shared', { target: steamid }); toast.ok('Скопировано'); }
         catch (_) { toast.warn('Скопируйте вручную'); }
       } }, 'Копировать')
     )
@@ -4019,7 +4076,7 @@ function openShareProfileModal(steamid, name, profile) {
   if (navigator.share) {
     content.push(el('button', { class: 'btn btn-full', type: 'button', style: { marginTop: '8px' },
       onclick: async () => {
-        try { await navigator.share({ title: `Профиль ${name} на SOKOLENOK`, url: link }); }
+        try { await navigator.share({ title: `Профиль ${name} на SOKOLENOK`, url: link }); track('profile_shared', { target: steamid }); }
         catch (_) { /* user cancelled */ }
       }
     }, 'Открыть «Поделиться…»'));
@@ -4057,7 +4114,7 @@ function openShareProfileModal(steamid, name, profile) {
           row.disabled = true; sendBtn.textContent = '…';
           const text = `Посмотри профиль игрока: ${link}`;
           const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
-          if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+          if (res.ok) { track('profile_shared', { target: steamid }); sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
           else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
         });
         listBox.appendChild(row);
@@ -5253,7 +5310,7 @@ async function openShareModal(item, me) {
     el('div', { class: 'share-link-row' },
       el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
       el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        try { await navigator.clipboard.writeText(link); track('profile_shared', { target: steamid }); toast.ok('Скопировано'); }
         catch (_) { toast.warn('Скопируйте вручную'); }
       } }, 'Копировать')
     )
@@ -5281,7 +5338,7 @@ async function openShareModal(item, me) {
     row.addEventListener('click', async () => {
       row.disabled = true; sendBtn.textContent = '…';
       const res = await api.sendMessage(f.steam_id, '', { type: 'post', post_id: item.post_id }).catch(() => ({ ok: false }));
-      if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+      if (res.ok) { track('profile_shared', { target: steamid }); sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
       else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
     });
     listBox.appendChild(row);
@@ -6698,6 +6755,7 @@ async function pageAdmin() {
     if (tab === 'bans') return paintAdminBans(panel);
     if (tab === 'publics') return paintAdminPublics(panel);
     if (tab === 'posts') return paintAdminPosts(panel);
+    if (tab === 'analytics') return paintAdminAnalytics(panel);
     if (tab === 'moderators') return paintAdminModerators(panel);
     if (tab === 'roles') return paintAdminRoles(panel);
     if (tab === 'tools') return paintAdminTools(panel);
@@ -6981,6 +7039,28 @@ async function paintAdminPublics(panel) {
   }
   panel.appendChild(card);
 }
+
+
+async function paintAdminAnalytics(panel) {
+  const r = await api.admin.analytics(30).catch(() => ({ ok: false }));
+  panel.innerHTML = '';
+  if (!r.ok) { panel.appendChild(el('div', { class: 'card admin-empty' }, 'Не удалось загрузить аналитику.')); return; }
+  const report = r.report || { totals: {}, sources: [] };
+  const t = report.totals || {};
+  const cards = el('div', { class: 'kpis k4' },
+    adminKpi('Проверки профиля', t.lookup_success || 0),
+    adminKpi('Показана цена', t.inventory_value_shown || 0),
+    adminKpi('Входы Steam', t.steam_login_success || 0),
+    adminKpi('Шеринги', t.profile_shared || 0)
+  );
+  panel.appendChild(cards);
+  const sourceCard = el('div', { class: 'card', style: { marginTop: '16px' } }, el('div', { class: 'card-eyebrow' }, 'Источники за 30 дней'));
+  if (!(report.sources || []).length) sourceCard.appendChild(el('div', { class: 'admin-empty' }, 'Событий ещё нет. Добавьте UTM-ссылку и сделайте тестовый переход.'));
+  else for (const s of report.sources) sourceCard.appendChild(el('div', { class: 'admin-row' },
+    el('div', { class: 'admin-row-main' }, el('div', { class: 'admin-row-title' }, s.source), el('div', { class: 'admin-row-sub' }, `${s.visits} визитов · ${s.lookups} проверок · ${s.logins} входов · ${s.shares} шерингов`))));
+  panel.appendChild(sourceCard);
+}
+function adminKpi(label, value) { return el('div', { class: 'kpi' }, el('div', { class: 'kpi-label' }, label), el('div', { class: 'kpi-value' }, String(value))); }
 
 async function paintAdminPosts(panel) {
   const r = await api.admin.posts().catch(() => ({ ok: false, posts: [] }));
@@ -7878,6 +7958,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Restore accessibility preferences early (before paint)
   try { if (localStorage.getItem('sok:large-font') === '1') document.body.classList.add('large-font'); } catch (_) {}
   initCookieBanner();
+  track('page_view');
   const page = document.body.dataset.page;
   const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities, notifications: pageNotifications };
   const fn = router[page];

@@ -3862,3 +3862,16 @@ body.large-font .post-act svg { transform: scale(1.1); }
   .lp-feed-head { flex-direction: column; align-items: stretch; }
   .lp-feed-head .btn { align-self: flex-start; }
 }
+
+
+/* v49: onboarding and marketing instrumentation UI */
+.sok-tour{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;background:rgba(2,6,6,.74);backdrop-filter:blur(6px);padding:20px}
+.sok-tour-card{width:min(480px,100%);background:var(--panel,#101715);border:1px solid var(--line,#25302c);border-radius:22px;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.55)}
+.sok-tour-count{font-size:12px;color:var(--g,#42d392);font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px}
+.sok-tour-title{font-size:25px;margin:0 0 12px;color:var(--text,#eef6f1)}
+.sok-tour-text{font-size:15px;line-height:1.6;color:var(--muted,#9dafaa);margin:0 0 24px}
+.sok-tour-actions{display:flex;justify-content:flex-end;gap:10px}
+.notfound{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 25%,#14271f 0,#090e0d 48%,#070a09 100%)}
+.notfound-card{text-align:center;max-width:560px;padding:46px 28px}.notfound-code{font-size:92px;line-height:1;font-weight:800;letter-spacing:-.06em;color:var(--g,#42d392)}
+.notfound-title{font-size:30px;margin:18px 0 12px}.notfound-text{color:var(--muted,#9dafaa);line-height:1.55;margin:0 auto 25px}
+.notfound-actions{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
