@@ -6581,9 +6581,14 @@ async function pageMessages() {
     } else {
       paintThread(r);
     }
+    if (Array.isArray(state.convos)) {
+      state.convos = state.convos.map(c => c.steam_id === other ? { ...c, unread: 0 } : c);
+      writeMsgPageCache('convos', state.convos);
+      renderLeft({ localOnly: true });
+    }
     refreshUnreadBadge(); // opening marks read
     loadThreadPresence(other);
-    if (Date.now() - state.lastLeftRefresh > 4000) renderLeft({ silent: true, force: true }).catch(() => {});
+    renderLeft({ silent: true, force: true }).catch(() => {});
   }
 
   async function loadThreadPresence(steamId) {

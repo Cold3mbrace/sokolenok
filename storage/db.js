@@ -1724,10 +1724,12 @@ function insertMessage(sender, recipient, bodyEnc, attachmentEnc) {
 // Conversation between two users, oldest→newest
 function listMessages(a, b, limit = 100) {
   if (useSqlite()) {
-    return openSqlite().prepare(`SELECT * FROM messages
-      WHERE (sender_steam_id=? AND recipient_steam_id=?)
-         OR (sender_steam_id=? AND recipient_steam_id=?)
-      ORDER BY created_at ASC LIMIT ?`).all(a, b, b, a, limit);
+    return openSqlite().prepare(`SELECT * FROM (
+      SELECT * FROM messages
+        WHERE (sender_steam_id=? AND recipient_steam_id=?)
+           OR (sender_steam_id=? AND recipient_steam_id=?)
+        ORDER BY created_at DESC, id DESC LIMIT ?
+      ) ORDER BY created_at ASC, id ASC`).all(a, b, b, a, limit);
   }
   return (readFallback().messages || [])
     .filter(m => (m.sender_steam_id === a && m.recipient_steam_id === b) || (m.sender_steam_id === b && m.recipient_steam_id === a))
