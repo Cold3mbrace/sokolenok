@@ -3870,6 +3870,173 @@ body.large-font .post-act svg { transform: scale(1.1); }
 .notfound-title{font-size:30px;margin:18px 0 12px}.notfound-text{color:var(--muted,#9dafaa);line-height:1.55;margin:0 auto 25px}
 .notfound-actions{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
 
+/* v50.0: social UX topbar */
+.social-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.top-search {
+  flex: 1 1 420px;
+  min-width: 180px;
+  max-width: 620px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 86%, transparent);
+}
+.top-search-ico {
+  width: 18px;
+  height: 18px;
+  color: var(--mute);
+  flex: 0 0 auto;
+}
+.top-search-ico svg { width: 18px; height: 18px; display: block; }
+.top-search-input {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--text);
+  outline: none;
+}
+.top-search:focus-within {
+  border-color: var(--line-acc);
+  box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.08);
+}
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.top-icon-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+.top-icon-btn svg {
+  width: 20px;
+  height: 20px;
+}
+.top-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 17px;
+  text-align: center;
+  border: 2px solid var(--bg);
+}
+.top-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--card-2);
+  display: grid;
+  place-items: center;
+  color: var(--g);
+  font-weight: 800;
+}
+.top-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.top-notif-wrap {
+  position: relative;
+}
+.notif-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 120;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(520px, calc(100vh - 120px));
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 96%, #000 4%);
+  box-shadow: 0 24px 70px rgba(0,0,0,0.45);
+}
+.notif-popover[hidden] { display: none; }
+.notif-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 4px 10px;
+}
+.notif-popover-head a {
+  color: var(--g);
+  font-size: 12px;
+  font-weight: 700;
+}
+.notif-popover .notif-row {
+  border-radius: 9px;
+  border-bottom: 0;
+  margin-bottom: 4px;
+}
+.notif-popover-loading,
+.notif-popover-empty,
+.friends-search-empty {
+  padding: 14px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+/* v50.0: friends finder */
+.friends-finder {
+  margin-bottom: 14px;
+}
+.friends-finder-main {
+  display: grid;
+  gap: 10px;
+}
+.friends-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.friends-search-results {
+  margin-top: 10px;
+}
+.friends-search-results:empty {
+  display: none;
+}
+
+/* v50.0: message receipts */
+.msgr-bubble-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.msgr-receipt {
+  font-size: 11px;
+  letter-spacing: 0;
+  color: var(--mute);
+}
+.msgr-receipt.seen {
+  color: var(--g);
+}
+
 /* v49.1: mobile stability pass */
 @media (max-width: 860px) {
   html, body {
@@ -4000,6 +4167,30 @@ body.large-font .post-act svg { transform: scale(1.1); }
   }
 
   .share-link-row {
+    grid-template-columns: 1fr;
+  }
+
+  .social-topbar {
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .top-search {
+    flex-basis: auto;
+    height: 40px;
+  }
+
+  .top-search-input {
+    font-size: 13px;
+  }
+
+  .top-icon-btn,
+  .top-avatar {
+    width: 40px;
+    height: 40px;
+  }
+
+  .friends-search-form {
     grid-template-columns: 1fr;
   }
 }
