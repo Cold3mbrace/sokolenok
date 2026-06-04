@@ -6473,6 +6473,7 @@ async function pageMessages() {
       ava.dataset.sid = c.steam_id;
       list.appendChild(el('div', {
         class: 'msgr-convo' + (state.activeOther === c.steam_id ? ' active' : ''),
+        dataset: { sid: c.steam_id },
         onclick: () => openThread(c.steam_id)
       },
         ava,
@@ -6546,8 +6547,29 @@ async function pageMessages() {
     }
   }
 
+  function markActiveConvo(other) {
+    const list = $('#msgr-list');
+    if (!list) return;
+    for (const row of list.querySelectorAll('.msgr-convo')) {
+      const isActive = row.dataset.sid === other;
+      row.classList.toggle('active', isActive);
+      if (isActive) row.querySelector('.msgr-unread')?.remove();
+    }
+  }
+
   async function openThread(other) {
-    if (state.activeOther === other && $('#msgr-thread-scroll')) return;
+    if (state.activeOther === other && $('#msgr-thread-scroll')) {
+      document.body.classList.add('msgr-thread-open');
+      tellServiceWorkerActiveMessagePeer(other);
+      markActiveConvo(other);
+      const token = ++state.threadFetchToken;
+      const r = await api.messages(other).catch(() => ({ ok: false }));
+      if (token !== state.threadFetchToken || state.activeOther !== other || !r.ok) return;
+      state.threadCache.set(other, r);
+      renderThreadResponse(r);
+      refreshUnreadBadge();
+      return;
+    }
     state.activeOther = other;
     tellServiceWorkerActiveMessagePeer(other);
     try {
@@ -6562,7 +6584,7 @@ async function pageMessages() {
     state.threadLoaded = false;
     state.replyToId = null;
     document.body.classList.add('msgr-thread-open'); // mobile: show thread, hide list
-    renderLeft({ localOnly: true }); // refresh active highlight without hitting the network
+    markActiveConvo(other);
     const right = $('#msgr-right');
     const cached = state.threadCache.get(other);
     if (cached) {
@@ -6576,7 +6598,7 @@ async function pageMessages() {
     if (!r.ok) { right.innerHTML = '<div class="msgr-empty"><div class="msgr-empty-title">Не удалось загрузить</div></div>'; return; }
     state.threadCache.set(other, r);
     if (cached && $('#msgr-thread-scroll')) {
-      renderMessages(r.messages || []);
+      renderThreadResponse(r);
       state.threadFriend = r.friend;
     } else {
       paintThread(r);
@@ -6584,11 +6606,10 @@ async function pageMessages() {
     if (Array.isArray(state.convos)) {
       state.convos = state.convos.map(c => c.steam_id === other ? { ...c, unread: 0 } : c);
       writeMsgPageCache('convos', state.convos);
-      renderLeft({ localOnly: true });
+      markActiveConvo(other);
     }
     refreshUnreadBadge(); // opening marks read
     loadThreadPresence(other);
-    renderLeft({ silent: true, force: true }).catch(() => {});
   }
 
   async function loadThreadPresence(steamId) {
@@ -6615,6 +6636,29 @@ async function pageMessages() {
   function cacheActiveThreadResponse(r) {
     if (!r?.ok || !state.activeOther) return;
     state.threadCache.set(state.activeOther, r);
+  }
+
+  function appendMessageToThreadCache(peer, message) {
+    if (!peer || !message?.id) return;
+    const cached = state.threadCache.get(peer);
+    if (!cached?.ok) return;
+    const existing = cached.messages || [];
+    if (existing.some(m => m.id === message.id)) return;
+    cached.messages = [...existing, message];
+    state.threadCache.set(peer, cached);
+  }
+
+  function renderThreadResponse(r) {
+    if (!r?.ok) return;
+    const messages = r.messages || [];
+    const latest = messages[messages.length - 1];
+    const scroll = $('#msgr-thread-scroll');
+    if (scroll && latest?.id != null && latest.id <= state.lastMsgId &&
+        !scroll.querySelector(`.msgr-bubble-row[data-mid="${latest.id}"]`)) {
+      paintThread(r);
+      return;
+    }
+    renderMessages(messages);
   }
 
   // Append only messages we haven't drawn yet (by id), inserting date separators as needed.
@@ -6835,7 +6879,7 @@ async function pageMessages() {
     // Messages scroll area (empty; filled by renderMessages)
     right.appendChild(el('div', { class: 'msgr-thread-scroll', id: 'msgr-thread-scroll' }));
     state.threadFriend = r.friend;
-    renderMessages(r.messages || []);
+    renderThreadResponse(r);
 
     // Composer is shown if the user can write to this peer. Friends — always.
     // Moderators/admins — to anyone, for support replies. Otherwise locked.
@@ -7002,7 +7046,7 @@ async function pageMessages() {
       }
 
       requestAnimationFrame(() => {
-        input.focus();
+        if (window.matchMedia?.('(min-width: 761px)').matches) input.focus();
         if (input.value) { input.style.height = 'auto'; input.style.height = Math.min(120, input.scrollHeight) + 'px'; }
       });
     } else {
@@ -7030,7 +7074,7 @@ async function pageMessages() {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
         cacheActiveThreadResponse(r);
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
       loadThreadPresence(state.activeOther);
     }
@@ -7053,17 +7097,21 @@ async function pageMessages() {
     const m = ev.detail;
     if (!m) return;
     if (m.type === 'message:new' && state.activeOther && m.message?.peer === state.activeOther) {
+      renderMessages([m.message]);
+      appendMessageToThreadCache(state.activeOther, m.message);
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
         cacheActiveThreadResponse(r);
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
     } else if (m.type === 'message:sent' && state.activeOther && m.message?.peer === state.activeOther) {
+      renderMessages([m.message]);
+      appendMessageToThreadCache(state.activeOther, m.message);
       // Sent from another tab — keep this tab in sync
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
         cacheActiveThreadResponse(r);
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
     } else if (m.type === 'message:read' && state.activeOther === m.by) {
       markOutgoingSeen();
@@ -7072,7 +7120,7 @@ async function pageMessages() {
         api.messages(state.activeOther).then(r => {
           if (r.ok) {
             cacheActiveThreadResponse(r);
-            renderMessages(r.messages || []);
+            renderThreadResponse(r);
           }
         }).catch(() => {});
       }
