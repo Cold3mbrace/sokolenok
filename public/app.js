@@ -281,6 +281,16 @@ const toast = {
   warn(m) { this.show(m, 'warn'); }
 };
 
+function tellServiceWorkerActiveMessagePeer(peer) {
+  try {
+    if (!navigator.serviceWorker?.controller) return;
+    navigator.serviceWorker.controller.postMessage({
+      type: 'sok:active-message-peer',
+      peer: peer || null
+    });
+  } catch (_) {}
+}
+
 // ============ sidebar + main toolbar ============
 // Returns the `me` object so callers can use logged_in state immediately.
 async function renderTopbar(active = '') {
@@ -292,7 +302,10 @@ async function renderTopbar(active = '') {
       track('steam_login_success');
     }
   } catch (_) {}
-  if (active !== 'messages') document.body.classList.remove('msgr-thread-open');
+  if (active !== 'messages') {
+    document.body.classList.remove('msgr-thread-open');
+    tellServiceWorkerActiveMessagePeer(null);
+  }
   renderSidebar(active, me);
   renderMainToolbar(me);
   renderSocialTopbar(me);
@@ -6536,6 +6549,14 @@ async function pageMessages() {
   async function openThread(other) {
     if (state.activeOther === other && $('#msgr-thread-scroll')) return;
     state.activeOther = other;
+    tellServiceWorkerActiveMessagePeer(other);
+    try {
+      const url = new URL(location.href);
+      url.pathname = '/messages';
+      url.search = '';
+      url.searchParams.set('to', other);
+      history.replaceState(history.state, '', url.pathname + url.search);
+    } catch (_) {}
     state.lastMsgId = 0;
     state.lastDate = null;
     state.threadLoaded = false;
@@ -6780,7 +6801,13 @@ async function pageMessages() {
     // Header
     right.appendChild(el('div', { class: 'msgr-thread-h' },
       el('button', { class: 'msgr-back', type: 'button', 'aria-label': 'Назад',
-        onclick: () => { document.body.classList.remove('msgr-thread-open'); state.activeOther = null; renderLeft(); },
+        onclick: () => {
+          document.body.classList.remove('msgr-thread-open');
+          state.activeOther = null;
+          tellServiceWorkerActiveMessagePeer(null);
+          try { history.replaceState(history.state, '', '/messages'); } catch (_) {}
+          renderLeft();
+        },
         html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>' }),
       avatarEl(o.avatar, o.name, 'msgr-avatar'),
       el('div', { class: 'msgr-thread-h-info' },

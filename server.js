@@ -3280,7 +3280,7 @@ async function handleApi(req, res, pathname, query) {
       pushToUser(other, {
         title: senderName,
         body: preview,
-        url: `/messages?to=${me}`,
+        url: `/messages?to=${encodeURIComponent(me)}`,
         kind: 'message',
         peer: me,
         avatar: senderAvatar
