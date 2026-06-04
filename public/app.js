@@ -1693,15 +1693,59 @@ function weaponIconEl(look) {
   return wrap;
 }
 
-function emptyCard(title, message, icon = '📊') {
+function emptyCard(title, message, icon = '📊', action = null) {
   return el('div', { class: 'card' },
     el('div', { class: 'card-h' }, el('h2', null, title)),
     el('div', { class: 'empty-state' },
       el('div', { class: 'icon' }, icon),
       el('div', { class: 'title' }, 'Пока нет данных'),
-      el('div', { class: 'desc' }, message)
+      el('div', { class: 'desc' }, message),
+      action ? el('div', { class: 'empty-state-actions' },
+        action.href
+          ? el('a', { class: action.class || 'btn btn-sm', href: action.href, onclick: action.onclick || null }, action.label)
+          : el('button', { class: action.class || 'btn btn-sm', type: 'button', onclick: action.onclick }, action.label)
+      ) : null
     )
   );
+}
+
+function renderFirstVisitActions(me) {
+  const main = document.querySelector('.dash-main');
+  if (!main || document.getElementById('first-visit-actions')) return;
+  const profileHref = `/lookup?steamid=${encId(me.steamid)}`;
+  const card = el('div', { class: 'card first-visit-actions', id: 'first-visit-actions' },
+    el('div', { class: 'first-visit-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'С чего начать'),
+        el('h2', null, 'Три быстрых действия')
+      ),
+      el('div', { class: 'first-visit-note' }, 'Для первого визита')
+    ),
+    el('div', { class: 'first-visit-grid' },
+      el('button', { class: 'first-visit-item primary', type: 'button', onclick: openSearchModal },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Проверить игрока'),
+          el('small', null, 'Ник, ссылка Steam или SteamID')
+        )
+      ),
+      el('a', { class: 'first-visit-item', href: profileHref },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Открыть свой профиль'),
+          el('small', null, 'Так вас видят другие')
+        )
+      ),
+      el('a', { class: 'first-visit-item', href: '/friends' },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Найти друзей'),
+          el('small', null, 'Добавить знакомых на сайте')
+        )
+      )
+    )
+  );
+  main.insertBefore(card, main.firstElementChild);
 }
 
 // ============ page: dashboard ============
@@ -1735,6 +1779,7 @@ async function pageDashboard() {
   }
   // Clear any leftover data-attr from old mode logic (no-op if absent)
   delete document.body.dataset.dashMode;
+  renderFirstVisitActions(me);
 
   // Load Steam stats first — these block the main UI (KPI row + Steam tables)
   let statsResp;
@@ -4123,6 +4168,13 @@ async function paintLookupSocial(steamid, profR) {
       el('span', { html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' }),
       'Это ваша публичная страница — как её видят другие'
     ));
+    if (!isSteamId(me.steamid)) {
+      actions.appendChild(el('div', { class: 'lk-social-hint lk-social-steam-hint' },
+        'Вы вошли через Telegram. Подключите Steam, чтобы открыть CS2-статистику, инвентарь и полноценную проверку профиля.'
+      ));
+      actions.appendChild(el('a', { class: 'btn lk-social-primary', href: '/auth/steam', onclick: typeof steamLogin === 'function' ? steamLogin : null },
+        'Подключить Steam'));
+    }
     actions.appendChild(el('a', { class: 'btn', href: '/settings',
       html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Редактировать профиль'
     }));
@@ -6295,7 +6347,9 @@ async function pageMessages() {
     list.innerHTML = '';
     if (!convos.length) {
       list.appendChild(el('div', { class: 'msgr-list-empty' },
-        'Пока нет диалогов. Откройте профиль друга и нажмите «Написать».'));
+        el('div', null, 'Пока нет диалогов. Сначала добавьте игрока в друзья, потом можно будет написать.'),
+        el('a', { class: 'btn btn-sm', href: '/friends' }, 'Добавить друга')
+      ));
       return;
     }
     for (const c of convos) {
@@ -6345,7 +6399,10 @@ async function pageMessages() {
       if (!arr.length && kind !== 'friends') continue;
       list.appendChild(el('div', { class: 'msgr-section-h' }, title));
       if (!arr.length) {
-        list.appendChild(el('div', { class: 'msgr-list-empty' }, 'Пусто.'));
+        list.appendChild(el('div', { class: 'msgr-list-empty' },
+          el('div', null, 'Друзей пока нет. Найдите игрока и отправьте заявку.'),
+          el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти игрока')
+        ));
         continue;
       }
       for (const f of arr) {
@@ -7432,7 +7489,10 @@ function paintFriendsList(root, arr, tab) {
       outgoing: ['Отправленных заявок нет', 'Заявки, которые вы отправили, появятся тут.']
     };
     const [t, s] = empties[tab] || ['Пусто', ''];
-    root.appendChild(emptyCard(t, s, '👥'));
+    const action = tab === 'friends'
+      ? { label: 'Найти игрока', onclick: () => document.querySelector('.friends-search-input')?.focus() }
+      : null;
+    root.appendChild(emptyCard(t, s, '👥', action));
     return;
   }
   const card = el('div', { class: 'card' });
@@ -7443,7 +7503,7 @@ function paintFriendsList(root, arr, tab) {
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
         onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); pageFriends(); } } }, 'Удалить'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' },
-        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); pageFriends(); } } }, 'В ЧС'));
+        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); pageFriends(); } } }, 'В чёрный список'));
     } else if (tab === 'incoming') {
       actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
         onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); pageFriends(); } }, 'Принять'));
@@ -7462,12 +7522,13 @@ function paintFriendsList(root, arr, tab) {
 function paintRecommendations(root, arr) {
   root.innerHTML = '';
   if (!arr.length) {
-    root.appendChild(emptyCard('Пока нет рекомендаций',
-      'Когда у вас появятся друзья — здесь будут их друзья, которых вы ещё не добавили.', '✨'));
+    root.appendChild(emptyCard('Пока нет подсказок по друзьям',
+      'Когда у вас появятся друзья, SOKOLENOK покажет знакомых людей из их круга.', '✨',
+      { label: 'Найти игрока', onclick: () => document.querySelector('.friends-search-input')?.focus() }));
     return;
   }
   const card = el('div', { class: 'card' });
-  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Друзья ваших друзей'));
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Знакомые через друзей'));
   for (const f of arr) {
     const actions = el('div', { class: 'friend-row-actions' },
       el('button', { class: 'btn btn-sm', type: 'button',
@@ -7557,7 +7618,11 @@ async function pageNotifications() {
     body.appendChild(el('div', { class: 'card feed-empty' },
       el('div', { class: 'feed-empty-icon' }, '🔔'),
       el('div', { class: 'feed-empty-title' }, 'Уведомлений пока нет'),
-      el('div', { class: 'feed-empty-desc' }, 'Здесь появятся реакции на ваши посты, новые подписчики и заявки в друзья.')
+      el('div', { class: 'feed-empty-desc' }, 'Здесь появятся заявки в друзья, ответы, реакции и важные события по вашему профилю.'),
+      el('div', { class: 'feed-empty-actions' },
+        el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+        el('a', { class: 'btn btn-sm btn-ghost', href: '/feed' }, 'Открыть ленту')
+      )
     ));
     return;
   }
@@ -7805,7 +7870,7 @@ async function pageMe() {
 
   // Menu items
   const items = [
-    { href: '/friends', label: 'Друзья', icon: 'users', desc: 'Список, заявки, рекомендации, ЧС' },
+    { href: '/friends', label: 'Друзья', icon: 'users', desc: 'Список, заявки, подсказки и чёрный список' },
     { href: '/communities', label: 'Сообщества', icon: 'grid', desc: 'Ваши и подписки' },
     { action: openSearchModal, label: 'Найти игрока', icon: 'help', desc: 'По никнейму, ссылке или SteamID' },
     { action: openSupportModal, label: 'Связь с поддержкой', icon: 'help', desc: 'Написать администратору' },
