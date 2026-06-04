@@ -142,6 +142,11 @@ try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
 
 // Web Push (no npm deps, self-contained crypto)
 const webPush = require('./lib/web-push');
+// OG card generator (profile/inventory/post preview images for social sharing)
+let ogCard = null;
+try { ogCard = require('./lib/og-card'); } catch (_) {
+  console.warn('[og] @napi-rs/canvas not available — OG image endpoints disabled');
+}
 
 // VAPID keys: prefer env vars, otherwise auto-generate on first boot and
 // persist them in DATA_DIR/vapid.json so the same keys survive restarts.
@@ -178,12 +183,13 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.5.0';
+const APP_VERSION = 'v48.6.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(ROOT, '.data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const OG_CACHE_DIR = path.join(DATA_DIR, 'og-cache');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
@@ -1650,6 +1656,108 @@ async function handleSteamOpenId(req, res, parsedUrl) {
 }
 
 async function handleApi(req, res, pathname, query) {
+  // ---- OG image generation (/og/profile/:steamid.png, /og/inventory/:steamid.png) ----
+  // These are called by Telegram/Discord/VK when a user shares a link.
+  // We generate a 1200×630 PNG on the fly (or from cache) with the player's
+  // stats, avatar and brand. Cache is busted after 24h.
+  if (ogCard && pathname.startsWith('/og/') && pathname.endsWith('.png')) {
+    const parts = pathname.slice(4, -4).split('/'); // ['profile', '765...'] or ['inventory', '765...'] or ['post', '8']
+    const kind = parts[0];
+    const id = parts[1];
+    if (!id) { res.writeHead(400); res.end(); return true; }
+
+    try {
+      fs.mkdirSync(OG_CACHE_DIR, { recursive: true });
+    } catch (_) {}
+
+    const cacheKey = `${kind}-${id}.png`;
+    const cachePath = path.join(OG_CACHE_DIR, cacheKey);
+    const maxAge = 86400; // seconds — 24h
+
+    // Serve from cache if fresh
+    try {
+      const st = fs.statSync(cachePath);
+      if (Date.now() - st.mtimeMs < maxAge * 1000) {
+        const buf = fs.readFileSync(cachePath);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': buf.length,
+          'Cache-Control': `public, max-age=${maxAge}`,
+          'X-Cache': 'HIT'
+        });
+        res.end(buf);
+        return true;
+      }
+    } catch (_) { /* no cache */ }
+
+    let buf = null;
+    try {
+      if (kind === 'profile') {
+        const steamid = id;
+        let profile = db.getUser(steamid);
+        if (!profile) {
+          try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {}
+        }
+        const inv = db.latestInventorySnapshot(steamid, 'RUB');
+        const statsJson = profile?.profile_json ? (() => { try { return JSON.parse(profile.profile_json); } catch (_) { return {}; } })() : {};
+        const kd = statsJson.kd ?? null;
+        const hs = statsJson.hs_percent ?? statsJson.hs ?? null;
+        const hours = statsJson.hours_cs2 ?? statsJson.hours ?? null;
+        buf = await ogCard.renderProfileCard({
+          name: profile?.persona_name || profile?.personaname || 'Игрок CS2',
+          steamId: steamid,
+          avatar: profile?.avatar || profile?.avatarfull || null,
+          vacBanned: profile?.vac_banned || profile?.vacBanned || false,
+          kd, hsPercent: hs, hoursCs2: hours,
+          inventoryValueText: inv?.total_value_text || null
+        });
+      } else if (kind === 'inventory') {
+        const steamid = id;
+        let profile = db.getUser(steamid);
+        if (!profile) { try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {} }
+        const inv = db.latestInventorySnapshot(steamid, 'RUB');
+        buf = await ogCard.renderInventoryCard({
+          name: profile?.persona_name || profile?.personaname || 'Игрок',
+          avatar: profile?.avatar || profile?.avatarfull || null,
+          totalValueText: inv?.total_value_text || null,
+          itemCount: inv?.total_items || 0,
+          currency: 'RUB'
+        });
+      } else if (kind === 'post') {
+        const postId = parseInt(id, 10);
+        const post = isNaN(postId) ? null : db.getPost?.(postId) || null;
+        const pubName = post?.public_name || 'SOKOLENOK';
+        buf = await ogCard.renderPostCard({
+          publicName: pubName,
+          publicAvatar: post?.public_avatar || null,
+          title: post?.title || '',
+          body: post?.body || ''
+        });
+      }
+    } catch (e) {
+      console.warn('[og] render error:', e?.message);
+    }
+
+    if (!buf) {
+      // Return a tiny 1×1 transparent PNG placeholder so Telegram doesn't retry forever
+      const fallback = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': fallback.length });
+      res.end(fallback);
+      return true;
+    }
+
+    // Cache and serve
+    try { fs.writeFileSync(cachePath, buf); } catch (_) {}
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': buf.length,
+      'Cache-Control': `public, max-age=${maxAge}`,
+      'X-Cache': 'MISS'
+    });
+    res.end(buf);
+    return true;
+  }
+
   if (pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: true,
@@ -3244,10 +3352,14 @@ function serveStatic(req, res, pathname) {
           const sid = query.get('steamid');
           const p = await fetchProfile(sid).catch(() => null);
           const name = escapeHtml(p?.personaname || 'Игрок');
-          const avatar = p?.avatarfull || p?.avatar || defaultImage;
           const title = `${name} — профиль CS2 на SOKOLENOK`;
           const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-          og = renderOgTags({ title, desc, image: avatar, url: `${base}/lookup?steamid=${sid}` });
+          // Use the generated OG card as the preview image — it shows stats and
+          // branding instead of just a plain Steam avatar.
+          const ogImage = ogCard
+            ? `${base}/og/profile/${sid}.png`
+            : (p?.avatarfull || p?.avatar || defaultImage);
+          og = renderOgTags({ title, desc, image: ogImage, url: `${base}/lookup?steamid=${sid}` });
         } else if (pathname === '/feed' && query.get('public')) {
           const pid = query.get('public');
           const pub = db.getPublic(pid);
@@ -3291,10 +3403,10 @@ function serveStatic(req, res, pathname) {
         const defaultImage = `${base}/assets/logo-full-dark.png`;
         const p = await fetchProfile(sid).catch(() => null);
         const name = escapeHtml(p?.personaname || 'Игрок');
-        const avatar = p?.avatarfull || p?.avatar || defaultImage;
         const title = `${name} — профиль CS2 на SOKOLENOK`;
         const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-        const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
+        const ogImage = ogCard ? `${base}/og/profile/${sid}.png` : (p?.avatarfull || p?.avatar || defaultImage);
+        const og = renderOgTags({ title, desc, image: ogImage, url: `${base}/u/${sid}` });
         // Inject a tiny script that rewrites the URL to the canonical ?steamid= form,
         // so existing frontend logic (which reads URLSearchParams) keeps working.
         const rewrite = `<script>try{history.replaceState({},'','/lookup?steamid=${sid}');}catch(_){}</script>`;
