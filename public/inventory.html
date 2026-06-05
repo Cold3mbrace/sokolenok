@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
@@ -9,9 +9,9 @@
   <meta name="apple-mobile-web-app-title" content="SOKOLENOK">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="theme-color" content="#0a0d0c">
-  <title>Инвентарь и цены · SOKOLENOK</title>
+  <title>РРЅРІРµРЅС‚Р°СЂСЊ Рё С†РµРЅС‹ В· SOKOLENOK</title>
   <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
-  <link rel="stylesheet" href="/styles.css?v=1780237108">
+  <link rel="stylesheet" href="/styles.css?v=50.14">
   <style>
     .inv-grid-layout {
       display: grid;
@@ -43,63 +43,64 @@
 
     <a href="/dashboard" class="back-link">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-      Назад в дашборд
+      РќР°Р·Р°Рґ РІ РґР°С€Р±РѕСЂРґ
     </a>
 
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:6px">
       <div>
-        <h1 class="page-title" style="margin-bottom:6px">Инвентарь и цены</h1>
-        <p class="page-sub" style="margin-bottom:0">Полная информация о ваших предметах CS2, их стоимости и динамике цен.</p>
+        <h1 class="page-title" style="margin-bottom:6px">РРЅРІРµРЅС‚Р°СЂСЊ Рё С†РµРЅС‹</h1>
+        <p class="page-sub" style="margin-bottom:0">РџРѕР»РЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ Рѕ РІР°С€РёС… РїСЂРµРґРјРµС‚Р°С… CS2, РёС… СЃС‚РѕРёРјРѕСЃС‚Рё Рё РґРёРЅР°РјРёРєРµ С†РµРЅ.</p>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span id="inv-freshness" class="inv-freshness"></span>
         <button class="btn btn-ghost btn-sm" id="inv-refresh" type="button" style="white-space:nowrap">
           <span style="margin-right:6px;display:inline-flex"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span>
-          Обновить
+          РћР±РЅРѕРІРёС‚СЊ
         </button>
       </div>
     </div>
 
-    <!-- KPI row — JS replaces -->
+    <!-- KPI row вЂ” JS replaces -->
     <div class="kpis k4" id="inv-kpis">
-      <div class="kpi"><div class="card-eyebrow">Общая стоимость</div><div class="loading-inline"><div class="spinner sm"></div>Загружаем…</div></div>
-      <div class="kpi"><div class="card-eyebrow">Предметов с ценой</div><div class="kpi-val">—</div></div>
-      <div class="kpi"><div class="card-eyebrow">Валюта</div><div class="kpi-val">—</div></div>
-      <div class="kpi"><div class="card-eyebrow">Источники цен</div><div class="kpi-val">—</div></div>
+      <div class="kpi"><div class="card-eyebrow">РћР±С‰Р°СЏ СЃС‚РѕРёРјРѕСЃС‚СЊ</div><div class="loading-inline"><div class="spinner sm"></div>Р—Р°РіСЂСѓР¶Р°РµРјвЂ¦</div></div>
+      <div class="kpi"><div class="card-eyebrow">РџСЂРµРґРјРµС‚РѕРІ СЃ С†РµРЅРѕР№</div><div class="kpi-val">вЂ”</div></div>
+      <div class="kpi"><div class="card-eyebrow">Р’Р°Р»СЋС‚Р°</div><div class="kpi-val">вЂ”</div></div>
+      <div class="kpi"><div class="card-eyebrow">РСЃС‚РѕС‡РЅРёРєРё С†РµРЅ</div><div class="kpi-val">вЂ”</div></div>
     </div>
 
-    <!-- Category tabs — JS replaces -->
+    <!-- Category tabs вЂ” JS replaces -->
     <div class="cat-tabs" id="inv-cats">
-      <button class="cat-tab active">Все предметы <span class="cnt">—</span></button>
+      <button class="cat-tab active">Р’СЃРµ РїСЂРµРґРјРµС‚С‹ <span class="cnt">вЂ”</span></button>
     </div>
 
     <div class="inv-grid-layout">
       <div class="inv-main">
 
-        <!-- Lists row: chart + top + risers + fallers — JS replaces -->
+        <!-- Lists row: chart + top + risers + fallers вЂ” JS replaces -->
         <div class="inv-lists-row" id="inv-lists">
-          <div class="card chart-card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем динамику…</div></div>
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Топ предметов…</div></div>
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Лидеры роста…</div></div>
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Лидеры падения…</div></div>
+          <div class="card chart-card"><div class="loading-inline"><div class="spinner sm"></div>Р—Р°РіСЂСѓР¶Р°РµРј РґРёРЅР°РјРёРєСѓвЂ¦</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>РўРѕРї РїСЂРµРґРјРµС‚РѕРІвЂ¦</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Р›РёРґРµСЂС‹ СЂРѕСЃС‚Р°вЂ¦</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Р›РёРґРµСЂС‹ РїР°РґРµРЅРёСЏвЂ¦</div></div>
         </div>
 
-        <!-- Items table — JS replaces -->
+        <!-- Items table вЂ” JS replaces -->
         <div id="inv-items-wrap">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем предметы из Steam…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Р—Р°РіСЂСѓР¶Р°РµРј РїСЂРµРґРјРµС‚С‹ РёР· SteamвЂ¦</div></div>
         </div>
       </div>
 
-      <!-- Analytics sidebar — JS replaces -->
+      <!-- Analytics sidebar вЂ” JS replaces -->
       <div class="card analytics" id="inv-analytics">
-        <div class="card-eyebrow">Аналитика инвентаря</div>
-        <div class="loading-inline"><div class="spinner sm"></div>Считаем аналитику…</div>
+        <div class="card-eyebrow">РђРЅР°Р»РёС‚РёРєР° РёРЅРІРµРЅС‚Р°СЂСЏ</div>
+        <div class="loading-inline"><div class="spinner sm"></div>РЎС‡РёС‚Р°РµРј Р°РЅР°Р»РёС‚РёРєСѓвЂ¦</div>
       </div>
     </div>
   </main>
 </div>
 
 <div id="toast-host" class="toast-host"></div>
-<script src="/app.js?v=1780237108"></script>
+<script src="/boot-guard.js?v=50.14"></script><script src="/app.js?v=50.14"></script>
 </body>
 </html>
+
