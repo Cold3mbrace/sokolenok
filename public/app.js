@@ -1739,16 +1739,17 @@ function weaponIconEl(look) {
 }
 
 function emptyCard(title, message, icon = '📊', action = null) {
+  const actions = Array.isArray(action) ? action.filter(Boolean) : (action ? [action] : []);
   return el('div', { class: 'card' },
     el('div', { class: 'card-h' }, el('h2', null, title)),
     el('div', { class: 'empty-state' },
       el('div', { class: 'icon' }, icon),
-      el('div', { class: 'title' }, 'Пока нет данных'),
+      el('div', { class: 'title' }, title || 'Пока нет данных'),
       el('div', { class: 'desc' }, message),
-      action ? el('div', { class: 'empty-state-actions' },
-        action.href
-          ? el('a', { class: action.class || 'btn btn-sm', href: action.href, onclick: action.onclick || null }, action.label)
-          : el('button', { class: action.class || 'btn btn-sm', type: 'button', onclick: action.onclick }, action.label)
+      actions.length ? el('div', { class: 'empty-state-actions' },
+        actions.map(a => a.href
+          ? el('a', { class: a.class || 'btn btn-sm', href: a.href, onclick: a.onclick || null }, a.label)
+          : el('button', { class: a.class || 'btn btn-sm', type: 'button', onclick: a.onclick }, a.label))
       ) : null
     )
   );
@@ -5200,7 +5201,18 @@ async function renderPublicPage(publicId, me) {
 
   // Posts
   if (!r.posts?.length) {
-    list.appendChild(emptyCard('Пока нет постов', p.is_owner ? 'Опубликуйте первый пост.' : 'Здесь пока пусто.', '📝'));
+    list.appendChild(emptyCard('Пока нет постов',
+      p.is_owner ? 'Опубликуйте первый пост: новость, набор в пати, полезную ссылку или обновление сообщества.' : 'Здесь пока пусто. Подпишитесь на другие сообщества или вернитесь в общую ленту.',
+      '📝',
+      p.is_owner
+        ? [
+            { label: 'Написать пост', onclick: () => openCreatePostModal(p) },
+            { label: 'Редактировать паблик', class: 'btn btn-sm btn-ghost', onclick: () => openEditPublicModal(p, () => renderPublicPage(publicId, me)) }
+          ]
+        : [
+            { label: 'К ленте', href: '/feed' },
+            { label: 'Сообщества', class: 'btn btn-sm btn-ghost', href: '/communities' }
+          ]));
     return;
   }
   for (const post of r.posts) {
@@ -6391,6 +6403,13 @@ async function pageMessages() {
     setTimeout(() => location.replace('/'), 800);
     return;
   }
+  const empty = $('#msgr-empty');
+  if (empty && !empty.querySelector('.empty-state-actions')) {
+    empty.appendChild(el('div', { class: 'empty-state-actions' },
+      el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+      el('a', { class: 'btn btn-sm btn-ghost', href: '/lookup' }, 'Проверить игрока')
+    ));
+  }
 
   const readMsgPageCache = (key, maxAgeMs = 45000) => {
     try {
@@ -6463,8 +6482,12 @@ async function pageMessages() {
     list.innerHTML = '';
     if (!convos.length) {
       list.appendChild(el('div', { class: 'msgr-list-empty' },
-        el('div', null, 'Пока нет диалогов. Сначала добавьте игрока в друзья, потом можно будет написать.'),
-        el('a', { class: 'btn btn-sm', href: '/friends' }, 'Добавить друга')
+        el('div', { class: 'msgr-empty-title-sm' }, 'Диалогов пока нет'),
+        el('div', null, 'Добавьте игрока в друзья — после подтверждения здесь появится переписка.'),
+        el('div', { class: 'empty-state-actions' },
+          el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+          el('a', { class: 'btn btn-sm btn-ghost', href: '/lookup' }, 'Проверить игрока')
+        )
       ));
       return;
     }
@@ -6517,8 +6540,12 @@ async function pageMessages() {
       list.appendChild(el('div', { class: 'msgr-section-h' }, title));
       if (!arr.length) {
         list.appendChild(el('div', { class: 'msgr-list-empty' },
-          el('div', null, 'Друзей пока нет. Найдите игрока и отправьте заявку.'),
-          el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти игрока')
+          el('div', { class: 'msgr-empty-title-sm' }, 'Друзей пока нет'),
+          el('div', null, 'Найдите игрока, отправьте заявку и после принятия сможете написать ему прямо отсюда.'),
+          el('div', { class: 'empty-state-actions' },
+            el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти игрока'),
+            el('a', { class: 'btn btn-sm btn-ghost', href: '/feed' }, 'Открыть ленту')
+          )
         ));
         continue;
       }
@@ -6595,7 +6622,18 @@ async function pageMessages() {
     const token = ++state.threadFetchToken;
     const r = await api.messages(other).catch(() => ({ ok: false }));
     if (token !== state.threadFetchToken || state.activeOther !== other) return;
-    if (!r.ok) { right.innerHTML = '<div class="msgr-empty"><div class="msgr-empty-title">Не удалось загрузить</div></div>'; return; }
+    if (!r.ok) {
+      right.innerHTML = '';
+      right.appendChild(el('div', { class: 'msgr-empty' },
+        el('div', { class: 'msgr-empty-title' }, 'Не удалось загрузить диалог'),
+        el('div', { class: 'msgr-empty-sub' }, 'Связь могла просесть. Попробуйте открыть чат ещё раз.'),
+        el('div', { class: 'empty-state-actions' },
+          el('button', { class: 'btn btn-sm', type: 'button', onclick: () => openThread(other) }, 'Повторить'),
+          el('a', { class: 'btn btn-sm btn-ghost', href: '/messages' }, 'К списку')
+        )
+      ));
+      return;
+    }
     state.threadCache.set(other, r);
     if (cached && $('#msgr-thread-scroll')) {
       renderThreadResponse(r);
@@ -7836,7 +7874,13 @@ async function pageNotifications() {
   const r = await api.request('/api/notifications').catch(() => null);
   body.innerHTML = '';
   if (!r?.ok) {
-    body.appendChild(el('div', { class: 'card' }, 'Не удалось загрузить'));
+    body.appendChild(emptyCard('Не удалось загрузить уведомления',
+      'Похоже на временную сетевую ошибку. Обновите страницу или вернитесь к ленте.',
+      '🔔',
+      [
+        { label: 'Обновить', onclick: () => location.reload() },
+        { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+      ]));
     return;
   }
   if (!r.notifications?.length) {
@@ -7942,7 +7986,16 @@ async function pageCommunities() {
         mine: ['У вас пока нет сообществ', 'Нажмите «Создать» сверху.']
       };
       const [t, s] = empties[state.tab];
-      body.appendChild(emptyCard(t, s, '👥'));
+      const actions = state.tab === 'subs'
+        ? [
+            { label: 'Показать все', onclick: () => { state.tab = 'all'; render(); } },
+            { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+          ]
+        : [
+            { label: 'Создать', onclick: () => openCreatePublicModal() },
+            { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+          ];
+      body.appendChild(emptyCard(t, s, '👥', actions));
     } else {
       const grid = el('div', { class: 'cm-grid' });
       for (const p of list) grid.appendChild(buildCommunityCard(p));

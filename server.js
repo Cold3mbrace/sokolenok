@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.6.0';
+const APP_VERSION = 'v50.7.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
