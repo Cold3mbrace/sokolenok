@@ -8724,5 +8724,4 @@ function initCookieBanner() {
 
 // Expose for debugging
 window.SOK = { api, toast, $, $$, el, steamLogin };
-try { if (typeof window.SOK_BOOT_OK === 'function') window.SOK_BOOT_OK(); } catch (_) {}
 })();
