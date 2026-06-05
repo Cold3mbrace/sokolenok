@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "sokolenok",
-  "version": "5.0.14",
+  "version": "5.0.15",
   "description": "SOKOLENOK — личный кабинет игрока CS2",
   "private": true,
   "main": "server.js",
@@ -17,3 +17,4 @@
     "ws": "^8.21.0"
   }
 }
+

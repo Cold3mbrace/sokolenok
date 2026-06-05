@@ -445,7 +445,8 @@ async function ensureServiceWorker() {
   if (!('serviceWorker' in navigator)) return null;
   if (_swRegistration) return _swRegistration;
   try {
-    _swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    _swRegistration = await navigator.serviceWorker.register('/sw.js?v=50.15', { scope: '/', updateViaCache: 'none' });
+    _swRegistration.update?.().catch(() => null);
     return _swRegistration;
   } catch (e) {
     console.warn('[sw] registration failed:', e?.message);

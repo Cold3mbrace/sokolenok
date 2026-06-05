@@ -1,4 +1,4 @@
-// server.js
+﻿// server.js
 // SOKOLENOK v4.4 — clean rewrite.
 // Только Node.js stdlib. Никаких npm зависимостей.
 //
@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.14.0';
+const APP_VERSION = 'v50.15.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -3622,7 +3622,9 @@ function serveStatic(req, res, pathname) {
     }
     const ext = path.extname(file).toLowerCase();
     const ctype = MIME[ext] || 'application/octet-stream';
-    const cache = (ext === '.html') ? 'no-store' : 'public, max-age=3600';
+    let cache = (ext === '.html') ? 'no-store' : 'public, max-age=3600';
+    if (pathname === '/sw.js') cache = 'no-store, no-cache, must-revalidate';
+    else if (pathname === '/app.js' || pathname === '/styles.css' || pathname === '/manifest.json') cache = 'no-cache, must-revalidate';
     res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': cache });
     fs.createReadStream(file).pipe(res);
   });
@@ -3725,3 +3727,4 @@ server.listen(PORT, () => {
   console.log(`Telegram bot:    ${TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_BOT_USERNAME || 'username NOT SET'})` : 'NOT SET (Telegram login disabled)'}`);
   console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
+

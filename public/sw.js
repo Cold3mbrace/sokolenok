@@ -1,7 +1,7 @@
-// public/sw.js — SOKOLENOK service worker.
+﻿// public/sw.js — SOKOLENOK service worker.
 // Minimal: receive push, show notification, route click.
 
-const CACHE = 'sok-v3';
+const CACHE = 'sok-v50-15';
 const activeMessagePeers = new Map();
 
 self.addEventListener('install', (event) => {
@@ -10,8 +10,18 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  // Claim all clients so push delivery starts working without a reload
-  event.waitUntil(self.clients.claim());
+  // Claim all clients and drop old SOKOLENOK caches so iOS cannot keep a stale shell.
+  event.waitUntil((async () => {
+    try {
+      if (self.caches?.keys) {
+        const keys = await self.caches.keys();
+        await Promise.all(keys
+          .filter(k => /^sok-/.test(k) && k !== CACHE)
+          .map(k => self.caches.delete(k)));
+      }
+    } catch (_) {}
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('message', (event) => {
@@ -109,3 +119,4 @@ self.addEventListener('notificationclick', (event) => {
 self.addEventListener('pushsubscriptionchange', (event) => {
   // Future enhancement: re-subscribe with the new endpoint here and POST it back
 });
+
