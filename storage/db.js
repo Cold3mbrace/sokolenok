@@ -1082,7 +1082,7 @@ function countRecentVotes(voterSteamId, sinceMs) {
 function aggregateReputation(targetSteamId) {
   const rows = getReputationFor(targetSteamId).filter(r => (r.weight ?? 1) > 0);
   const byCat = {};
-  let praise = 0, reports = 0;     // direct sums of positive / negative category marks
+  let praise = 0, reports = 0;     // unique voter counts by direction
   let posVoters = 0, negVoters = 0; // voter-level lean (used only for the verdict label)
   const comments = [];
   for (const r of rows) {
@@ -1090,9 +1090,11 @@ function aggregateReputation(targetSteamId) {
     let good = 0, bad = 0;
     for (const c of cats) {
       byCat[c] = (byCat[c] || 0) + 1;
-      if (REP_CATEGORIES[c] > 0) { good += 1; praise += 1; }
-      else { bad += 1; reports += 1; }
+      if (REP_CATEGORIES[c] > 0) good += 1;
+      else bad += 1;
     }
+    if (good > 0) praise += 1;
+    if (bad > 0) reports += 1;
     if (good > bad) posVoters += 1;
     else if (bad > good) negVoters += 1;
     if (r.comment) {

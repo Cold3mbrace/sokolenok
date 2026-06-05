@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.7.0';
+const APP_VERSION = 'v50.9.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -416,7 +416,7 @@ function escapeHtml(s) {
 }
 
 // Validate + normalize attachment from client.
-// Allowed types: 'post', 'reply', 'forward'. Anything else → null.
+// Allowed types: 'post', 'profile', 'reply', 'forward'. Anything else → null.
 function sanitizeAttachment(att) {
   if (!att || typeof att !== 'object') return null;
   const t = String(att.type || '');
@@ -424,6 +424,11 @@ function sanitizeAttachment(att) {
     const pid = parseInt(att.post_id, 10);
     if (!Number.isFinite(pid)) return null;
     return { type: 'post', post_id: pid };
+  }
+  if (t === 'profile') {
+    const sid = String(att.steam_id || att.profile_id || '').trim();
+    if (!isSiteUserId(sid)) return null;
+    return { type: 'profile', steam_id: sid };
   }
   if (t === 'reply') {
     const mid = parseInt(att.message_id, 10);
@@ -449,7 +454,7 @@ function messageIsInConversation(message, a, b) {
 }
 
 function validateMessageAttachment(att, sender, recipient) {
-  if (!att || att.type === 'post') return { ok: true };
+  if (!att || att.type === 'post' || att.type === 'profile') return { ok: true };
   if (att.type !== 'reply' && att.type !== 'forward') return { ok: false, error: 'bad-attachment' };
   const original = db.getMessage(att.message_id);
   if (!original || original.deleted_at) return { ok: false, error: 'bad-attachment' };
@@ -478,6 +483,24 @@ async function hydrateAttachment(att, context = {}) {
         image: p.image || null
       };
     } catch (_) { return { type: 'post', missing: true }; }
+  }
+  if (att.type === 'profile') {
+    try {
+      const sid = String(att.steam_id || '');
+      if (!isSiteUserId(sid)) return { type: 'profile', missing: true };
+      const p = await profileForSiteUser(sid, { refreshSteam: isSteamId(sid) }).catch(() => null);
+      if (!p) return { type: 'profile', missing: true };
+      const base = context.baseUrl || '';
+      return {
+        type: 'profile',
+        steam_id: sid,
+        name: p.personaname || sid,
+        avatar: p.avatarfull || p.avatar || null,
+        source: p.source || (isTelegramUserId(sid) ? 'telegram' : 'steam'),
+        image: isSteamId(sid) && base ? `${base}/og/profile/${sid}.png` : null,
+        url: isSteamId(sid) ? `${base}/u/${sid}` : `${base}/lookup?steamid=${encodeURIComponent(sid)}`
+      };
+    } catch (_) { return { type: 'profile', missing: true }; }
   }
   if (att.type === 'reply' || att.type === 'forward') {
     try {
@@ -3243,7 +3266,11 @@ async function handleApi(req, res, pathname, query) {
         let attachment = null;
         if (!isDeleted && m.attachment_enc) {
           try { attachment = JSON.parse(decryptMessage(m.attachment_enc)); } catch (_) {}
-          if (attachment) attachment = await hydrateAttachment(attachment, { sharedBy: m.sender_steam_id, conversation: [me, other] });
+          if (attachment) attachment = await hydrateAttachment(attachment, {
+            sharedBy: m.sender_steam_id,
+            conversation: [me, other],
+            baseUrl: getBaseUrl(req)
+          });
         }
         messages.push({
           id: m.id, from_me: m.sender_steam_id === me,
@@ -3287,7 +3314,11 @@ async function handleApi(req, res, pathname, query) {
       const attEnc = attachment ? encryptMessage(JSON.stringify(attachment)) : null;
       const saved = db.insertMessage(me, other, enc, attEnc);
       db.logEvent('message-send', me, { to: other, attachment_type: attachment?.type });
-      const hydratedAtt = attachment ? await hydrateAttachment(attachment, { sharedBy: me, conversation: [me, other] }) : null;
+      const hydratedAtt = attachment ? await hydrateAttachment(attachment, {
+        sharedBy: me,
+        conversation: [me, other],
+        baseUrl: getBaseUrl(req)
+      }) : null;
 
       // Realtime push. Recipient sees the message instantly; sender's other
       // tabs/devices also get it so they stay in sync.

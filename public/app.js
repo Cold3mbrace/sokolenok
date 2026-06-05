@@ -1794,6 +1794,94 @@ function renderFirstVisitActions(me) {
   main.insertBefore(card, main.firstElementChild);
 }
 
+function digestItem(icon, title, text, href) {
+  const content = [
+    el('div', { class: 'daily-ico' }, icon),
+    el('div', { class: 'daily-copy' },
+      el('div', { class: 'daily-item-title' }, title),
+      el('div', { class: 'daily-item-text' }, text)
+    )
+  ];
+  return href
+    ? el('a', { class: 'daily-item', href }, content)
+    : el('div', { class: 'daily-item' }, content);
+}
+
+function inventoryDeltaText(history) {
+  const snaps = Array.isArray(history?.snapshots) ? history.snapshots : [];
+  if (snaps.length < 2) return null;
+  const latest = snaps[0], prev = snaps.find(s => s && s.total_value != null && s.id !== latest.id);
+  if (!latest || latest.total_value == null || !prev || prev.total_value == null) return null;
+  const delta = Number(latest.total_value) - Number(prev.total_value);
+  if (!Number.isFinite(delta) || Math.abs(delta) < 1) return null;
+  const sign = delta > 0 ? '+' : '';
+  const currency = latest.currency || prev.currency || 'RUB';
+  return `${sign}${fmtPrice(delta, currency)} с прошлого снимка`;
+}
+
+async function mountDailyDigest(me) {
+  const main = document.querySelector('.dash-main');
+  if (!main || document.getElementById('daily-digest')) return;
+
+  const card = el('div', { class: 'card daily-digest', id: 'daily-digest' },
+    el('div', { class: 'daily-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'Сегодня'),
+        el('h2', null, 'Что изменилось')
+      ),
+      el('a', { class: 'daily-profile', href: `/lookup?steamid=${encId(me.steamid)}` }, 'Мой профиль')
+    ),
+    el('div', { class: 'daily-grid' },
+      digestItem('•', 'Собираем сводку', 'Проверяем сообщения, друзей и профиль.', null)
+    )
+  );
+  main.insertBefore(card, main.firstElementChild);
+
+  const [notif, convos, friends, hist, rep] = await Promise.all([
+    api.request('/api/notifications/count').catch(() => null),
+    api.conversations().catch(() => null),
+    api.friends().catch(() => null),
+    isSteamId(me.steamid) ? api.inventoryHistory(me.steamid).catch(() => null) : Promise.resolve(null),
+    api.reputation.get(me.steamid).catch(() => null)
+  ]);
+
+  const items = [];
+  const unreadNotifs = Number(notif?.unread || 0);
+  const unreadMsgs = Number(convos?.unread_total || 0);
+  const incoming = (friends?.incoming || []).length;
+  const friendCount = (friends?.friends || []).length;
+  const outgoing = (friends?.outgoing || []).length;
+  const delta = inventoryDeltaText(hist);
+  const repTotal = Number(rep?.total || 0);
+
+  if (unreadMsgs > 0) {
+    items.push(digestItem('✉', 'Новые сообщения', `${unreadMsgs} ${plural(unreadMsgs, ['непрочитанное', 'непрочитанных', 'непрочитанных'])}`, '/messages'));
+  }
+  if (incoming > 0) {
+    items.push(digestItem('+', 'Заявки в друзья', `${incoming} ${plural(incoming, ['заявка ждёт', 'заявки ждут', 'заявок ждут'])} ответа`, '/friends'));
+  }
+  if (unreadNotifs > 0) {
+    items.push(digestItem('🔔', 'Есть события', `${unreadNotifs} ${plural(unreadNotifs, ['новое уведомление', 'новых уведомления', 'новых уведомлений'])}`, '/notifications'));
+  }
+  if (delta) {
+    items.push(digestItem('₽', 'Инвентарь двинулся', delta, '/inventory'));
+  }
+  if (rep?.ok && repTotal > 0) {
+    items.push(digestItem('★', 'Репутация', `+${rep.praise || 0} / -${rep.reports || 0}, ${repTotal} ${plural(repTotal, ['оценка', 'оценки', 'оценок'])}`, `/lookup?steamid=${encId(me.steamid)}#lk-reputation`));
+  }
+  if (!items.length) {
+    const friendLine = friendCount > 0
+      ? `${friendCount} ${plural(friendCount, ['друг', 'друга', 'друзей'])} на сайте`
+      : 'друзей пока нет';
+    items.push(digestItem('✓', 'Спокойный день', `Новых событий нет, ${friendLine}.`, '/friends'));
+    if (outgoing > 0) items.push(digestItem('→', 'Заявки отправлены', `${outgoing} ${plural(outgoing, ['ожидает', 'ожидают', 'ожидают'])} ответа`, '/friends'));
+  }
+
+  const grid = card.querySelector('.daily-grid');
+  grid.innerHTML = '';
+  for (const item of items.slice(0, 4)) grid.appendChild(item);
+}
+
 // ============ page: dashboard ============
 async function pageDashboard() {
   const me = await renderTopbar('dashboard');
@@ -1826,6 +1914,7 @@ async function pageDashboard() {
   // Clear any leftover data-attr from old mode logic (no-op if absent)
   delete document.body.dataset.dashMode;
   renderFirstVisitActions(me);
+  mountDailyDigest(me);
 
   // Load Steam stats first — these block the main UI (KPI row + Steam tables)
   let statsResp;
@@ -4385,8 +4474,7 @@ function openShareProfileModal(steamid, name, profile) {
         row.appendChild(sendBtn);
         row.addEventListener('click', async () => {
           row.disabled = true; sendBtn.textContent = '…';
-          const text = `Посмотри профиль игрока: ${link}`;
-          const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
+          const res = await api.sendMessage(f.steam_id, '', { type: 'profile', steam_id: steamid }).catch(() => ({ ok: false }));
           if (res.ok) { track('profile_shared', { target: steamid }); sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
           else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
         });
@@ -6861,6 +6949,30 @@ async function pageMessages() {
       if (att.body_preview) body.appendChild(el('div', { class: 'msg-att-preview' }, att.body_preview));
       body.appendChild(el('div', { class: 'msg-att-cta' }, 'Открыть пост →'));
       card.appendChild(body);
+      return card;
+    }
+    if (att.type === 'profile') {
+      const sid = att.steam_id || '';
+      const link = att.url || (isSteamId(sid) ? `/u/${encId(sid)}` : `/lookup?steamid=${encId(sid)}`);
+      const card = el('a', { class: 'msg-att msg-att-profile', href: link });
+      if (att.image) card.appendChild(el('div', { class: 'msg-att-img' }, el('img', { src: att.image, alt: '' })));
+      const row = el('div', { class: 'msg-att-profile-row' });
+      const ava = el('div', { class: 'msg-att-profile-ava' });
+      if (att.avatar) {
+        const img = el('img', { src: att.avatar, alt: '' });
+        img.onerror = function() { this.remove(); ava.textContent = (att.name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else {
+        ava.textContent = (att.name || '?').slice(0, 1).toUpperCase();
+      }
+      row.appendChild(ava);
+      row.appendChild(el('div', { class: 'msg-att-profile-body' },
+        el('div', { class: 'msg-att-pub' }, att.source === 'telegram' ? 'Профиль SOKOLENOK' : 'Профиль CS2'),
+        el('div', { class: 'msg-att-title' }, att.name || 'Игрок'),
+        el('div', { class: 'msg-att-preview' }, isSteamId(sid) ? `Steam ID: ${sid}` : 'Telegram-пользователь на сайте'),
+        el('div', { class: 'msg-att-cta' }, 'Открыть профиль →')
+      ));
+      card.appendChild(row);
       return card;
     }
     if (att.type === 'reply') {
