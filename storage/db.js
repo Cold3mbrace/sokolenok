@@ -38,26 +38,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
--- auth_methods: maps external auth identities (Steam, Telegram, …) to our
--- internal user id (stored in users.steam_id). A single user can have many
--- methods bound — e.g. Steam + Telegram for redundancy / mom-without-Steam.
--- The "provider" + "external_id" pair is unique: same Telegram can't bind
--- to two different users.
-CREATE TABLE IF NOT EXISTS auth_methods (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  steam_id TEXT NOT NULL,            -- internal user id (FK to users.steam_id)
-  provider TEXT NOT NULL,            -- 'steam' | 'telegram'
-  external_id TEXT NOT NULL,         -- e.g. Steam ID, Telegram user id
-  external_username TEXT,            -- Telegram @username if any
-  external_name TEXT,                -- Display name from provider
-  external_avatar TEXT,              -- Avatar URL from provider
-  verified INTEGER NOT NULL DEFAULT 1, -- 1 if provider verified identity (OpenID, HMAC)
-  created_at TEXT NOT NULL,
-  last_login_at TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_provider_extid ON auth_methods(provider, external_id);
-CREATE INDEX IF NOT EXISTS idx_auth_user ON auth_methods(steam_id);
-
 CREATE TABLE IF NOT EXISTS inventory_snapshots (
   id TEXT PRIMARY KEY,
   steam_id TEXT NOT NULL,
@@ -114,7 +94,6 @@ CREATE TABLE IF NOT EXISTS user_settings (
   faceit_nickname TEXT,
   consent_at TEXT,
   show_activity INTEGER NOT NULL DEFAULT 1,
-  onboarding_done INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 
@@ -363,9 +342,6 @@ function openSqlite() {
     if (!colNames.has('cover_url')) {
       db.exec('ALTER TABLE user_settings ADD COLUMN cover_url TEXT');
     }
-    if (!colNames.has('onboarding_done')) {
-      db.exec('ALTER TABLE user_settings ADD COLUMN onboarding_done INTEGER DEFAULT 0');
-    }
   } catch (_) { /* best-effort */ }
   try {
     const cols = db.prepare("PRAGMA table_info(reputation)").all();
@@ -410,30 +386,6 @@ function openSqlite() {
       db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT');
     }
   } catch (_) { /* best-effort */ }
-  // One-time backfill: every existing Steam user gets a corresponding
-  // auth_methods row, so the new multi-provider login UI works for them
-  // immediately and they can bind Telegram without re-logging-in.
-  try {
-    const existing = db.prepare("SELECT COUNT(*) AS n FROM auth_methods WHERE provider = 'steam'").get();
-    const userCount = db.prepare("SELECT COUNT(*) AS n FROM users WHERE steam_id NOT LIKE 'tg:%'").get();
-    if ((existing?.n || 0) < (userCount?.n || 0)) {
-      const now = new Date().toISOString();
-      db.exec('BEGIN');
-      const stmt = db.prepare(
-        `INSERT OR IGNORE INTO auth_methods (steam_id, provider, external_id, external_name, external_avatar, verified, created_at, last_login_at)
-         VALUES (?, 'steam', ?, ?, ?, 1, ?, ?)`
-      );
-      const users = db.prepare("SELECT steam_id, persona_name, avatar FROM users WHERE steam_id NOT LIKE 'tg:%'").all();
-      for (const u of users) {
-        stmt.run(u.steam_id, u.steam_id, u.persona_name || null, u.avatar || null, now, now);
-      }
-      db.exec('COMMIT');
-      console.log(`[migrate] backfilled auth_methods for ${users.length} existing Steam user(s)`);
-    }
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch (_) {}
-    console.warn('[migrate] auth_methods backfill failed:', e?.message);
-  }
   return db;
 }
 
@@ -785,49 +737,6 @@ function getPriceHistory(market_name, currency, source = 'steam', days = 30) {
     .sort((a,b) => a.recorded_at.localeCompare(b.recorded_at));
 }
 
-function getPriceMovers(names, currency, source = 'steam', days = 30) {
-  const unique = Array.from(new Set((names || []).map(String).map(s => s.trim()).filter(Boolean))).slice(0, 120);
-  if (!unique.length) return [];
-  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
-  let rows;
-  if (useSqlite()) {
-    const ph = unique.map(() => '?').join(',');
-    rows = openSqlite().prepare(`SELECT market_name, recorded_at, price_value FROM price_history
-      WHERE currency = ? AND source = ? AND recorded_at >= ? AND market_name IN (${ph})
-      ORDER BY market_name ASC, recorded_at ASC`).all(currency, source, cutoff, ...unique);
-  } else {
-    rows = readFallback().price_history
-      .filter(r => unique.includes(r.market_name) && r.currency === currency && r.source === source && r.recorded_at >= cutoff)
-      .sort((a,b) => (a.market_name || '').localeCompare(b.market_name || '') || (a.recorded_at || '').localeCompare(b.recorded_at || ''));
-  }
-  const byName = new Map();
-  for (const r of rows) {
-    const v = Number(r.price_value);
-    if (!Number.isFinite(v) || v <= 0) continue;
-    if (!byName.has(r.market_name)) byName.set(r.market_name, []);
-    byName.get(r.market_name).push({ at: r.recorded_at, value: v });
-  }
-  const out = [];
-  for (const [name, arr] of byName) {
-    if (arr.length < 2) continue;
-    const first = arr[0], last = arr[arr.length - 1];
-    if (!first || !last || first.value <= 0 || last.value <= 0) continue;
-    const diff = last.value - first.value;
-    if (Math.abs(diff) < 0.01) continue;
-    out.push({
-      name,
-      first_value: first.value,
-      last_value: last.value,
-      diff,
-      pct: diff / first.value * 100,
-      first_at: first.at,
-      last_at: last.at,
-      points: arr.length
-    });
-  }
-  return out;
-}
-
 // ----- watchlist -----
 function listWatchlist(steamId) {
   if (!steamId) return [];
@@ -880,7 +789,7 @@ function removeWatch(steamId, marketName) {
 function getSettings(steamId) {
   if (!steamId) return null;
   const empty = { steam_id: steamId, currency: 'RUB', language: 'ru',
-    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, onboarding_done: 0, updated_at: null };
+    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, updated_at: null };
   let row;
   if (useSqlite()) {
     row = openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId) || empty;
@@ -889,7 +798,6 @@ function getSettings(steamId) {
   }
   // Treat NULL/undefined as default ON for show_activity
   if (row.show_activity == null) row.show_activity = 1;
-  if (row.onboarding_done == null) row.onboarding_done = 0;
   return row;
 }
 
@@ -904,12 +812,11 @@ function setSettings(steamId, patch = {}) {
     consent_at: patch.consent_at !== undefined ? patch.consent_at : cur.consent_at,
     show_activity: patch.show_activity !== undefined ? (patch.show_activity ? 1 : 0) : (cur.show_activity ?? 1),
     cover_url: patch.cover_url !== undefined ? patch.cover_url : cur.cover_url,
-    onboarding_done: patch.onboarding_done !== undefined ? (patch.onboarding_done ? 1 : 0) : (cur.onboarding_done ?? 0),
     updated_at: nowIso()
   };
   if (useSqlite()) {
-    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, onboarding_done, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
+    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(steam_id) DO UPDATE SET
         currency = excluded.currency,
         language = excluded.language,
@@ -918,9 +825,8 @@ function setSettings(steamId, patch = {}) {
         consent_at = excluded.consent_at,
         show_activity = excluded.show_activity,
         cover_url = excluded.cover_url,
-        onboarding_done = excluded.onboarding_done,
         updated_at = excluded.updated_at`)
-      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.onboarding_done, next.updated_at);
+      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.updated_at);
   } else {
     const state = readFallback();
     state.user_settings[steamId] = next;
@@ -1082,7 +988,7 @@ function countRecentVotes(voterSteamId, sinceMs) {
 function aggregateReputation(targetSteamId) {
   const rows = getReputationFor(targetSteamId).filter(r => (r.weight ?? 1) > 0);
   const byCat = {};
-  let praise = 0, reports = 0;     // unique voter counts by direction
+  let praise = 0, reports = 0;     // direct sums of positive / negative category marks
   let posVoters = 0, negVoters = 0; // voter-level lean (used only for the verdict label)
   const comments = [];
   for (const r of rows) {
@@ -1090,11 +996,9 @@ function aggregateReputation(targetSteamId) {
     let good = 0, bad = 0;
     for (const c of cats) {
       byCat[c] = (byCat[c] || 0) + 1;
-      if (REP_CATEGORIES[c] > 0) good += 1;
-      else bad += 1;
+      if (REP_CATEGORIES[c] > 0) { good += 1; praise += 1; }
+      else { bad += 1; reports += 1; }
     }
-    if (good > 0) praise += 1;
-    if (bad > 0) reports += 1;
     if (good > bad) posVoters += 1;
     else if (bad > good) negVoters += 1;
     if (r.comment) {
@@ -1726,12 +1630,10 @@ function insertMessage(sender, recipient, bodyEnc, attachmentEnc) {
 // Conversation between two users, oldest→newest
 function listMessages(a, b, limit = 100) {
   if (useSqlite()) {
-    return openSqlite().prepare(`SELECT * FROM (
-      SELECT * FROM messages
-        WHERE (sender_steam_id=? AND recipient_steam_id=?)
-           OR (sender_steam_id=? AND recipient_steam_id=?)
-        ORDER BY created_at DESC, id DESC LIMIT ?
-      ) ORDER BY created_at ASC, id ASC`).all(a, b, b, a, limit);
+    return openSqlite().prepare(`SELECT * FROM messages
+      WHERE (sender_steam_id=? AND recipient_steam_id=?)
+         OR (sender_steam_id=? AND recipient_steam_id=?)
+      ORDER BY created_at ASC LIMIT ?`).all(a, b, b, a, limit);
   }
   return (readFallback().messages || [])
     .filter(m => (m.sender_steam_id === a && m.recipient_steam_id === b) || (m.sender_steam_id === b && m.recipient_steam_id === a))
@@ -1750,22 +1652,17 @@ function getMessage(id) {
 // Mark messages from `other` to `me` as read
 function markRead(me, other) {
   const now = nowIso();
-  let changed = 0;
   if (useSqlite()) {
-    const info = openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
+    openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
       .run(now, me, other);
-    changed = Number(info?.changes || 0);
   } else {
     const state = readFallback();
     for (const m of state.messages || []) {
-      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) {
-        m.read_at = now;
-        changed++;
-      }
+      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) m.read_at = now;
     }
-    if (changed) writeFallback(state);
+    writeFallback(state);
   }
-  return { ok: true, changed };
+  return { ok: true };
 }
 
 // Build the list of conversations for a user, with last message + unread count
@@ -2417,36 +2314,6 @@ function logEvent(kind, steamId = null, data = null) {
   }
 }
 
-function analyticsReport(days = 30) {
-  const safeDays = Math.min(365, Math.max(1, Number(days) || 30));
-  const since = new Date(Date.now() - safeDays * 86400000).toISOString();
-  let rows;
-  if (useSqlite()) {
-    rows = openSqlite().prepare(`SELECT ts, kind, steam_id, data_json FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT 20000`).all(since);
-  } else {
-    rows = (readFallback().events || []).filter(e => e.ts >= since).slice(-20000).reverse();
-  }
-  const tracked = ['page_view','lookup_started','lookup_success','inventory_value_shown','steam_login_clicked','steam_login_success','profile_shared','watchlist_added','onboarding_complete','register'];
-  const totals = Object.fromEntries(tracked.map(k => [k, 0]));
-  const sources = {};
-  const daily = {};
-  for (const row of rows) {
-    let data = {}; try { data = JSON.parse(row.data_json || '{}') || {}; } catch (_) {}
-    if (totals[row.kind] != null) totals[row.kind]++;
-    const day = String(row.ts || '').slice(0, 10);
-    if (!daily[day]) daily[day] = { page_view: 0, lookup_success: 0, steam_login_success: 0, profile_shared: 0 };
-    if (daily[day][row.kind] != null) daily[day][row.kind]++;
-    const utm = data.utm || {};
-    const source = String(utm.source || data.referrer || 'direct').slice(0, 60) || 'direct';
-    if (!sources[source]) sources[source] = { source, visits: 0, lookups: 0, logins: 0, shares: 0 };
-    if (row.kind === 'page_view') sources[source].visits++;
-    if (row.kind === 'lookup_success') sources[source].lookups++;
-    if (row.kind === 'steam_login_success' || row.kind === 'register') sources[source].logins++;
-    if (row.kind === 'profile_shared') sources[source].shares++;
-  }
-  return { days: safeDays, since, totals, sources: Object.values(sources).sort((a,b) => b.lookups - a.lookups || b.visits - a.visits).slice(0, 30), daily: Object.entries(daily).sort((a,b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, ...value })) };
-}
-
 function storageHealth() {
   const backend = useSqlite() ? 'sqlite' : 'json-fallback';
   let counts = {};
@@ -2529,91 +2396,6 @@ function touchPushSubscription(endpoint) {
   }
 }
 
-// ----- auth_methods (external login identities) -----
-// Find which internal user is bound to a given (provider, external_id).
-// Returns the matching auth_methods row or null.
-function findAuthMethod(provider, externalId) {
-  if (!provider || !externalId) return null;
-  if (useSqlite()) {
-    return openSqlite().prepare(
-      'SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?'
-    ).get(String(provider), String(externalId)) || null;
-  }
-  const state = readFallback();
-  return (Object.values(state.auth_methods || {})).find(a =>
-    a.provider === provider && a.external_id === String(externalId)) || null;
-}
-
-// Insert a new auth method, or refresh the cached profile info if it already
-// exists. Returns the row (always present after the call).
-function upsertAuthMethod({ steam_id, provider, external_id, external_username, external_name, external_avatar, verified }) {
-  if (!steam_id || !provider || !external_id) return null;
-  const now = nowIso();
-  if (useSqlite()) {
-    const db = openSqlite();
-    const existing = db.prepare(
-      'SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?'
-    ).get(String(provider), String(external_id));
-    if (existing) {
-      db.prepare(
-        `UPDATE auth_methods SET external_username = ?, external_name = ?, external_avatar = ?, last_login_at = ? WHERE id = ?`
-      ).run(external_username || null, external_name || null, external_avatar || null, now, existing.id);
-      return db.prepare('SELECT * FROM auth_methods WHERE id = ?').get(existing.id);
-    }
-    db.prepare(
-      `INSERT INTO auth_methods (steam_id, provider, external_id, external_username, external_name, external_avatar, verified, created_at, last_login_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(steam_id, String(provider), String(external_id), external_username || null, external_name || null,
-          external_avatar || null, verified ? 1 : 0, now, now);
-    return db.prepare('SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?')
-      .get(String(provider), String(external_id));
-  }
-  const state = readFallback();
-  if (!state.auth_methods) state.auth_methods = {};
-  const key = `${provider}:${external_id}`;
-  const row = state.auth_methods[key] || { id: Object.keys(state.auth_methods).length + 1, created_at: now };
-  Object.assign(row, { steam_id, provider, external_id: String(external_id), external_username, external_name, external_avatar, verified: verified ? 1 : 0, last_login_at: now });
-  state.auth_methods[key] = row;
-  writeFallback(state);
-  return row;
-}
-
-// List all auth methods bound to a user — used in /settings to show "Steam + Telegram".
-function listAuthMethods(steamId) {
-  if (!steamId) return [];
-  if (useSqlite()) {
-    return openSqlite().prepare('SELECT * FROM auth_methods WHERE steam_id = ? ORDER BY created_at').all(steamId);
-  }
-  const state = readFallback();
-  return Object.values(state.auth_methods || {}).filter(a => a.steam_id === steamId);
-}
-
-// Unbind a specific provider from a user (e.g. user removes Telegram).
-// Refuses to remove the last method to avoid orphan accounts.
-function removeAuthMethod(steamId, provider) {
-  if (!steamId || !provider) return false;
-  const all = listAuthMethods(steamId);
-  const remaining = all.filter(a => a.provider !== provider);
-  if (remaining.length === 0) return false; // would lock user out
-  if (useSqlite()) {
-    const r = openSqlite().prepare('DELETE FROM auth_methods WHERE steam_id = ? AND provider = ?')
-      .run(steamId, String(provider));
-    return r.changes > 0;
-  }
-  const state = readFallback();
-  if (!state.auth_methods) return false;
-  let changed = false;
-  for (const key of Object.keys(state.auth_methods)) {
-    const r = state.auth_methods[key];
-    if (r.steam_id === steamId && r.provider === provider) {
-      delete state.auth_methods[key];
-      changed = true;
-    }
-  }
-  if (changed) writeFallback(state);
-  return changed;
-}
-
 module.exports = {
   // common
   nowIso, uuid,
@@ -2621,13 +2403,11 @@ module.exports = {
   upsertUser, getUser, searchUsers, searchPosts, searchPublics, touchLastSeen, getLastSeen,
   // sessions
   createSession, getSession, deleteSession,
-  // auth methods (multi-provider login)
-  findAuthMethod, upsertAuthMethod, listAuthMethods, removeAuthMethod,
   // inventory
   saveInventorySnapshot, listInventorySnapshots, latestInventorySnapshot,
   getInventoryCache, setInventoryCache,
   // prices
-  setPrice, getPrice, getPriceHistory, getPriceMovers,
+  setPrice, getPrice, getPriceHistory,
   // watchlist
   listWatchlist, addWatch, removeWatch,
   // settings
@@ -2663,5 +2443,5 @@ module.exports = {
   createNotification, listNotifications, countUnreadNotifications, markNotificationsRead,
   // push subscriptions
   savePushSubscription, deletePushSubscription, listPushSubscriptions, touchPushSubscription,
-  logEvent, analyticsReport, storageHealth
+  logEvent, storageHealth
 };
