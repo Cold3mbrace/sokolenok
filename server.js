@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v49.0.0';
+const APP_VERSION = 'v50.5.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -3505,7 +3505,7 @@ function serveStatic(req, res, pathname) {
         const defaultImage = `${base}/assets/logo-full-dark.png`;
         const p = await fetchProfile(sid).catch(() => null);
         const name = escapeHtml(p?.personaname || 'Игрок');
-        const avatar = p?.avatarfull || p?.avatar || defaultImage;
+        const avatar = `${base}/og/profile/${sid}.png`;
         const title = `${name} — профиль CS2 на SOKOLENOK`;
         const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
         const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
