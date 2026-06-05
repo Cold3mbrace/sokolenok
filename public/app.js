@@ -1,4 +1,4 @@
-// public/app.js
+﻿// public/app.js
 // SOKOLENOK shared frontend logic.
 // All API calls go through `api`, all DOM helpers through `$/$$`, toasts via `toast.*`.
 // Page-specific code lives in DOMContentLoaded handlers gated by page id.
@@ -65,6 +65,38 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+function encId(id) {
+  return encodeURIComponent(String(id || ''));
+}
+
+function isSteamId(id) {
+  return /^\d{17}$/.test(String(id || ''));
+}
+
+function isSiteUserId(id) {
+  return isSteamId(id) || /^tg:\d+$/.test(String(id || ''));
+}
+
+function publicUserName(user, fallback = 'Telegram-пользователь') {
+  const raw = String(user?.name || user?.personaname || user?.persona_name || user?.steam_id || user?.steamid || '').trim();
+  if (!raw || /^tg:\d+$/.test(raw)) return fallback;
+  return raw;
+}
+
+// ============ first-party conversion tracking ============
+function readCampaign() {
+  const p = new URLSearchParams(location.search);
+  const fresh = { source: p.get('utm_source'), medium: p.get('utm_medium'), campaign: p.get('utm_campaign'), content: p.get('utm_content'), term: p.get('utm_term') };
+  try {
+    if (fresh.source || fresh.medium || fresh.campaign || fresh.content || fresh.term) localStorage.setItem('sok:utm', JSON.stringify(fresh));
+    return JSON.parse(localStorage.getItem('sok:utm') || 'null') || fresh;
+  } catch (_) { return fresh; }
+}
+function track(kind, extra = {}) {
+  const payload = { kind, page: location.pathname, referrer: document.referrer ? (() => { try { return new URL(document.referrer).hostname; } catch (_) { return ''; } })() : '', utm: readCampaign(), ...extra };
+  fetch('/api/track', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
+}
+
 // ============ api wrapper ============
 const api = {
   async request(path, opts = {}) {
@@ -75,26 +107,27 @@ const api = {
     return body;
   },
   me() { return this.request('/api/me'); },
+  completeOnboarding() { return this.request('/api/onboarding/complete', { method: 'POST' }); },
   health() { return this.request('/api/health'); },
   resolve(target) { return this.request(`/api/resolve?target=${encodeURIComponent(target)}`); },
   // Accept SteamID64, vanity, full profile URL, or short URL. Returns steamid or null.
   async resolveAny(input) {
     const s = String(input || '').trim();
     if (!s) return null;
-    if (/^\d{17}$/.test(s)) return s;
+    if (isSiteUserId(s)) return s;
     const r = await this.resolve(s).catch(() => null);
     return r?.ok && r.steamid ? r.steamid : null;
   },
-  profile(steamid) { return this.request(`/api/profile/${steamid}`); },
+  profile(steamid) { return this.request(`/api/profile/${encId(steamid)}`); },
   inventory(steamid, opts = {}) {
     const q = new URLSearchParams();
     if (opts.currency) q.set('currency', opts.currency);
     if (opts.noPrices) q.set('no_prices', '1');
     if (opts.cachedOk) q.set('cached_ok', '1');
     if (opts.force) q.set('force', '1');
-    return this.request(`/api/inventory/${steamid}${q.toString() ? '?' + q : ''}`);
+    return this.request(`/api/inventory/${encId(steamid)}${q.toString() ? '?' + q : ''}`);
   },
-  inventoryHistory(steamid) { return this.request(`/api/inventory/history?steamid=${steamid}`); },
+  inventoryHistory(steamid) { return this.request(`/api/inventory/history?steamid=${encId(steamid)}`); },
   news(count = 10) {
     // News can be slow if Steam is having a bad day — race against a 10s timeout
     return Promise.race([
@@ -102,18 +135,18 @@ const api = {
       new Promise((_, reject) => setTimeout(() => reject(new Error('news-timeout')), 10000))
     ]);
   },
-  stats(steamid) { return this.request(`/api/stats/${steamid}`); },
-  bans(steamid)    { return this.request(`/api/playerbans/${steamid}`); },
-  leetify(steamid) { return this.request(`/api/leetify/${steamid}`); },
+  stats(steamid) { return this.request(`/api/stats/${encId(steamid)}`); },
+  bans(steamid)    { return this.request(`/api/playerbans/${encId(steamid)}`); },
+  leetify(steamid) { return this.request(`/api/leetify/${encId(steamid)}`); },
   reputation: {
-    get(steamid)  { return api.request(`/api/reputation/${steamid}`); },
+    get(steamid)  { return api.request(`/api/reputation/${encId(steamid)}`); },
     vote(steamid, categories, comment) {
-      return api.request(`/api/reputation/${steamid}`, {
+      return api.request(`/api/reputation/${encId(steamid)}`, {
         method: 'POST', body: JSON.stringify({ categories, comment: comment || null })
       });
     },
     remove(steamid) {
-      return api.request(`/api/reputation/${steamid}`, { method: 'DELETE' });
+      return api.request(`/api/reputation/${encId(steamid)}`, { method: 'DELETE' });
     }
   },
   feed(scope = 'all') { return this.request(`/api/feed?scope=${encodeURIComponent(scope)}`); },
@@ -142,6 +175,7 @@ const api = {
   addComment(id, body) { return this.request(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ body }) }); },
   deleteComment(postId, commentId) { return this.request(`/api/posts/${postId}/comments/${commentId}`, { method: 'DELETE' }); },
   recommendFriends() { return this.request('/api/friends/recommend'); },
+  steamFriendsOnSite() { return this.request('/api/friends/steam'); },
   presence(ids) { return this.request('/api/presence', { method: 'POST', body: JSON.stringify({ ids }) }); },
   async upload(file) {
     const fd = new FormData();
@@ -152,25 +186,26 @@ const api = {
   subscribePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/subscribe`, { method: 'POST' }); },
   unsubscribePublic(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/subscribe`, { method: 'DELETE' }); },
   friends() { return this.request('/api/friends'); },
-  friendStatus(id) { return this.request(`/api/friends/${id}`); },
-  friendsOf(id) { return this.request(`/api/friends/${id}/list`); },
-  friendRequest(id) { return this.request(`/api/friends/${id}/request`, { method: 'POST' }); },
-  friendAccept(id) { return this.request(`/api/friends/${id}/accept`, { method: 'POST' }); },
-  friendRemove(id) { return this.request(`/api/friends/${id}`, { method: 'DELETE' }); },
+  friendStatus(id) { return this.request(`/api/friends/${encId(id)}`); },
+  friendsOf(id) { return this.request(`/api/friends/${encId(id)}/list`); },
+  friendRequest(id) { return this.request(`/api/friends/${encId(id)}/request`, { method: 'POST' }); },
+  friendAccept(id) { return this.request(`/api/friends/${encId(id)}/accept`, { method: 'POST' }); },
+  friendRemove(id) { return this.request(`/api/friends/${encId(id)}`, { method: 'DELETE' }); },
   blocks() { return this.request('/api/blocks'); },
-  block(id) { return this.request(`/api/blocks/${id}`, { method: 'POST' }); },
-  unblock(id) { return this.request(`/api/blocks/${id}`, { method: 'DELETE' }); },
+  block(id) { return this.request(`/api/blocks/${encId(id)}`, { method: 'POST' }); },
+  unblock(id) { return this.request(`/api/blocks/${encId(id)}`, { method: 'DELETE' }); },
   conversations() { return this.request('/api/conversations'); },
-  messages(id) { return this.request(`/api/messages/${id}`); },
+  messages(id) { return this.request(`/api/messages/${encId(id)}`); },
   sendMessage(id, text, attachment) {
     const body = attachment ? { text: text || '', attachment } : { text };
-    return this.request(`/api/messages/${id}`, { method: 'POST', body: JSON.stringify(body) });
+    return this.request(`/api/messages/${encId(id)}`, { method: 'POST', body: JSON.stringify(body) });
   },
   report(target_type, target_id, reason) {
     return this.request('/api/report', { method: 'POST', body: JSON.stringify({ target_type, target_id, reason }) });
   },
   admin: {
     stats() { return api.request('/api/admin/stats'); },
+    analytics(days = 30) { return api.request(`/api/admin/analytics?days=${days}`); },
     reports(status = 'open') { return api.request(`/api/admin/reports?status=${status}`); },
     resolveReport(id, status) { return api.request(`/api/admin/reports/${id}`, { method: 'POST', body: JSON.stringify({ status }) }); },
     bans() { return api.request('/api/admin/bans'); },
@@ -192,14 +227,14 @@ const api = {
     removeRoleMember(id, sid) { return api.request(`/api/admin/roles/${id}/members/${sid}`, { method: 'DELETE' }); }
   },
   publicEditors(pid) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors`); },
-  addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'POST' }); },
-  removePublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${id}`, { method: 'DELETE' }); },
+  addPublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${encId(id)}`, { method: 'POST' }); },
+  removePublicEditor(pid, id) { return this.request(`/api/publics/${encodeURIComponent(pid)}/editors/${encId(id)}`, { method: 'DELETE' }); },
   faceit(steamid, opts = {}) {
     const q = new URLSearchParams();
     if (opts.nickname) q.set('nickname', opts.nickname);
     if (opts.matches) q.set('matches', String(opts.matches));
     const qs = q.toString();
-    return this.request(`/api/faceit/${steamid}${qs ? '?' + qs : ''}`);
+    return this.request(`/api/faceit/${encId(steamid)}${qs ? '?' + qs : ''}`);
   },
   prices(names, currency = 'RUB') {
     const q = new URLSearchParams({ names: names.join(','), currency });
@@ -209,6 +244,13 @@ const api = {
     const q = new URLSearchParams({ name, currency, days });
     return this.request(`/api/price-history?${q}`);
   },
+  priceMovers(names, currency = 'RUB', days = 30) {
+    return this.request('/api/price-movers', {
+      method: 'POST',
+      body: JSON.stringify({ names, currency, days })
+    });
+  },
+  activityPing() { return this.request('/api/presence/ping', { method: 'POST' }); },
   watchlist: {
     list() { return api.request('/api/watchlist'); },
     add(data) { return api.request('/api/watchlist', {
@@ -245,31 +287,78 @@ const toast = {
   warn(m) { this.show(m, 'warn'); }
 };
 
+function tellServiceWorkerActiveMessagePeer(peer) {
+  try {
+    if (!navigator.serviceWorker?.controller) return;
+    navigator.serviceWorker.controller.postMessage({
+      type: 'sok:active-message-peer',
+      peer: peer || null
+    });
+  } catch (_) {}
+}
+
 // ============ sidebar + main toolbar ============
 // Returns the `me` object so callers can use logged_in state immediately.
 async function renderTopbar(active = '') {
   const me = await api.me().catch(() => ({ logged_in: false }));
   window.__me = me;
-  if (active !== 'messages') document.body.classList.remove('msgr-thread-open');
+  try {
+    if (me.logged_in && sessionStorage.getItem('sok:await_login') === '1') {
+      sessionStorage.removeItem('sok:await_login');
+      track('steam_login_success');
+    }
+  } catch (_) {}
+  if (active !== 'messages') {
+    document.body.classList.remove('msgr-thread-open');
+    tellServiceWorkerActiveMessagePeer(null);
+  }
   renderSidebar(active, me);
   renderMainToolbar(me);
+  renderSocialTopbar(me);
   ensureMobileNav();
   // (FAB removed: support is now in sidebar/me menu)
   document.getElementById('support-fab')?.remove();
   // First-login consent gate (152-ФЗ explicit consent)
   if (me.logged_in && me.consented === false) showConsentGate();
-  // Background polling for unread messages (stops on next page change naturally)
-  ensureUnreadPolling();
-  // Realtime channel — push messages and notifications without polling
-  if (me.logged_in) {
-    ensureRealtime();
-    // Register service worker for Web Push (no-op if browser doesn't support it)
-    ensureServiceWorker();
-    // Show a non-intrusive banner inviting user to enable push notifications
-    // (only if not already enabled and not dismissed recently)
-    setTimeout(() => maybeShowPushOptIn(), 1500);
-  }
+  else if (me.logged_in && !me.settings?.onboarding_done) setTimeout(() => showOnboardingTour(), 500);
+  // Keep first paint light on mobile: background social activity can start after UI is visible.
+  setTimeout(() => {
+    ensureUnreadPolling();
+    if (me.logged_in) {
+      ensureActivityHeartbeat();
+      ensureRealtime();
+      ensureServiceWorker();
+      setTimeout(() => maybeShowPushOptIn(), 1500);
+    }
+  }, active === 'messages' ? 700 : 1800);
   return me;
+}
+
+
+// First-login onboarding: deliberately lightweight and isolated from page logic.
+let _tourOpen = false;
+function showOnboardingTour() {
+  if (_tourOpen || document.querySelector('.sok-tour')) return;
+  _tourOpen = true;
+  const steps = [
+    ['Добро пожаловать в SOKOLENOK', 'Здесь можно проверить профиль игрока CS2, узнать стоимость инвентаря и поделиться результатом.'],
+    ['Проверка игрока', 'Вставьте SteamID или ссылку в поиск — публичный профиль откроется без передачи пароля.'],
+    ['Инвентарь и цены', 'В разделе «Инвентарь» показываются доступные предметы и их оценка в выбранной валюте.'],
+    ['Друзья и сообщения', 'Добавляйте знакомых игроков и отправляйте им найденные профили прямо внутри сайта.'],
+    ['Делитесь карточкой', 'Кнопка «Поделиться» создаёт красивое превью для Telegram, VK и Discord.']
+  ];
+  let n = 0;
+  const overlay = el('div', { class: 'sok-tour' });
+  const card = el('div', { class: 'sok-tour-card' });
+  const count = el('div', { class: 'sok-tour-count' });
+  const title = el('h2', { class: 'sok-tour-title' });
+  const text = el('p', { class: 'sok-tour-text' });
+  const next = el('button', { class: 'btn', type: 'button' });
+  const close = async () => { await api.completeOnboarding().catch(() => null); overlay.remove(); _tourOpen = false; };
+  const draw = () => { count.textContent = `${n + 1} / ${steps.length}`; title.textContent = steps[n][0]; text.textContent = steps[n][1]; next.textContent = n === steps.length - 1 ? 'Начать' : 'Далее'; };
+  next.addEventListener('click', () => { if (n < steps.length - 1) { n++; draw(); } else close(); });
+  const skip = el('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Пропустить');
+  card.append(count, title, text, el('div', { class: 'sok-tour-actions' }, skip, next)); overlay.appendChild(card); document.body.appendChild(overlay); draw();
 }
 
 // ============ Push opt-in banner ============
@@ -354,7 +443,8 @@ async function ensureServiceWorker() {
   if (!('serviceWorker' in navigator)) return null;
   if (_swRegistration) return _swRegistration;
   try {
-    _swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    _swRegistration = await navigator.serviceWorker.register('/sw.js?v=50.17', { scope: '/', updateViaCache: 'none' });
+    _swRegistration.update?.().catch(() => null);
     return _swRegistration;
   } catch (e) {
     console.warn('[sw] registration failed:', e?.message);
@@ -578,9 +668,35 @@ function ensureUnreadPolling() {
   });
 }
 
+let _activityStarted = false;
+let _lastActivityPing = 0;
+function ensureActivityHeartbeat() {
+  if (_activityStarted) return;
+  _activityStarted = true;
+  const ping = (force = false) => {
+    if (document.hidden || !document.hasFocus()) return;
+    const now = Date.now();
+    if (!force && now - _lastActivityPing < 45000) return;
+    _lastActivityPing = now;
+    api.activityPing().catch(() => {});
+  };
+  const onActive = () => ping(false);
+  window.addEventListener('focus', () => ping(true));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) setTimeout(() => ping(true), 150);
+  });
+  for (const ev of ['pointerdown', 'keydown', 'touchstart', 'mousemove']) {
+    window.addEventListener(ev, onActive, { passive: true });
+  }
+  setInterval(() => ping(false), 30000);
+  setTimeout(() => ping(true), 500);
+}
+
 // Floating "Support" button (bottom-right) for logged-in users.
 // Anti-scam explainer before redirecting to Steam OpenID.
 function steamLogin(ev) {
+  track('steam_login_clicked');
+  try { sessionStorage.setItem('sok:await_login', '1'); } catch (_) {}
   if (ev) ev.preventDefault();
   const host = el('div', { id: 'modal-host', class: 'modal-host' });
   const close = () => host.remove();
@@ -649,7 +765,7 @@ function openSearchModal() {
     if (/^\d{17}$/.test(q) || /steamcommunity\.com/.test(q)) {
       results.innerHTML = '<div class="loading-inline" style="padding:10px"><div class="spinner sm"></div>Открываем…</div>';
       const id = await api.resolveAny(q);
-      if (id) open(`/lookup?steamid=${id}`);
+      if (id) open(`/lookup?steamid=${encId(id)}`);
       else { results.innerHTML = ''; toast.err('Не нашли такого игрока'); }
       return;
     }
@@ -666,7 +782,7 @@ function openSearchModal() {
         'Ничего не нашли. ',
         el('button', { class: 'search-try-vanity', type: 'button', onclick: async () => {
           const id = await api.resolveAny(q);
-          if (id) open(`/lookup?steamid=${id}`);
+          if (id) open(`/lookup?steamid=${encId(id)}`);
           else toast.err('Не вышло резолвить как ник Steam');
         } }, 'Попробовать как ник Steam')
       ));
@@ -676,7 +792,7 @@ function openSearchModal() {
     // Users
     const usersSec = renderSection(`👤 Игроки (${r.users.length})`, r.users, u => {
       const row = el('button', { class: 'search-result', type: 'button',
-        onclick: () => open(`/lookup?steamid=${u.steam_id}`) });
+        onclick: () => open(`/lookup?steamid=${encId(u.steam_id)}`) });
       const ava = el('div', { class: 'search-result-ava' });
       if (u.avatar) {
         const img = el('img', { src: u.avatar, alt: '' });
@@ -911,14 +1027,14 @@ async function refreshUnreadBadge() {
     }
     _lastUnread = nMsgs + nNotif;
     // Messages badge
-    for (const id of ['nav-unread-badge', 'bn-unread']) {
+    for (const id of ['nav-unread-badge', 'bn-unread', 'top-msg-badge']) {
       const badge = document.getElementById(id);
       if (!badge) continue;
       if (nMsgs > 0) { badge.textContent = nMsgs > 99 ? '99+' : String(nMsgs); badge.style.display = ''; }
       else { badge.style.display = 'none'; }
     }
     // Notifications badge (sidebar + bottom-nav)
-    for (const id of ['nav-notif-badge', 'bn-notif']) {
+    for (const id of ['nav-notif-badge', 'bn-notif', 'top-notif-badge']) {
       const badge = document.getElementById(id);
       if (!badge) continue;
       if (nNotif > 0) { badge.textContent = nNotif > 99 ? '99+' : String(nNotif); badge.style.display = ''; }
@@ -1012,7 +1128,7 @@ function renderSidebar(active, me) {
   // For logged-in users we split nav: top group + Settings pinned to the bottom
   const authedTop = [
     { href: '/dashboard', label: 'Дашборд',   key: 'dashboard', icon: 'home' },
-    { href: `/lookup?steamid=${me.steamid}`, label: 'Мой профиль', key: 'profile', icon: 'users' },
+    { href: `/lookup?steamid=${encId(me.steamid)}`, label: 'Мой профиль', key: 'profile', icon: 'users' },
     { href: '/feed',      label: 'Лента',      key: 'feed',      icon: 'feed' },
     { href: '/notifications', label: 'Уведомления', key: 'notifications', icon: 'bell', badge: 'notif' },
     { href: '/messages',  label: 'Сообщения',  key: 'messages',  icon: 'mail', badge: 'unread' },
@@ -1158,6 +1274,126 @@ function renderMainToolbar(me) {
   }
 }
 
+function renderSocialTopbar(me) {
+  const bar = $('.main-top');
+  if (!bar) return;
+  bar.innerHTML = '';
+  bar.classList.add('social-topbar');
+
+  const search = el('form', { class: 'top-search', role: 'search' },
+    el('span', { class: 'top-search-ico', html:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' }),
+    el('input', { class: 'top-search-input', type: 'search', autocomplete: 'off', placeholder: 'Найти игрока' }),
+    el('div', { class: 'top-search-results', hidden: 'hidden' })
+  );
+  const searchInput = search.querySelector('.top-search-input');
+  const searchResults = search.querySelector('.top-search-results');
+  const hideSearchResults = () => { searchResults.hidden = true; searchResults.innerHTML = ''; };
+  const openUserResult = (sid) => { if (sid) location.assign(`/lookup?steamid=${encId(sid)}`); };
+  const drawSearchResults = (users, q) => {
+    searchResults.innerHTML = '';
+    if (!q || q.length < 2) { hideSearchResults(); return; }
+    if (!users.length) {
+      searchResults.appendChild(el('div', { class: 'top-search-empty' }, 'Ничего не найдено'));
+      searchResults.hidden = false;
+      return;
+    }
+    for (const u of users.slice(0, 6)) {
+      const sid = u.steam_id || u.steamid;
+      const row = el('button', { class: 'top-search-row', type: 'button',
+        onclick: () => openUserResult(sid) });
+      const ava = el('span', { class: 'top-search-ava' });
+      if (u.avatar) {
+        const img = el('img', { src: u.avatar, alt: '' });
+        img.onerror = function() { this.remove(); ava.textContent = (u.persona_name || u.name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else ava.textContent = (u.persona_name || u.name || '?').slice(0, 1).toUpperCase();
+      row.appendChild(ava);
+      row.appendChild(el('span', { class: 'top-search-meta' },
+        el('strong', null, u.persona_name || u.name || sid),
+        el('small', null, /^tg:\d+$/.test(String(sid || '')) ? 'Telegram' : String(sid || '').slice(-8))
+      ));
+      searchResults.appendChild(row);
+    }
+    searchResults.hidden = false;
+  };
+  const liveSearch = debounce(async () => {
+    const q = searchInput.value.trim();
+    if (q.length < 2) { hideSearchResults(); return; }
+    const r = await api.request(`/api/search?kind=users&q=${encodeURIComponent(q)}`).catch(() => null);
+    drawSearchResults(r?.users || [], q);
+  }, 220);
+  searchInput.addEventListener('input', liveSearch);
+  searchInput.addEventListener('focus', () => { if (searchResults.children.length) searchResults.hidden = false; });
+  search.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = searchInput.value.trim();
+    if (!q) return;
+    const direct = await api.resolveAny(q).catch(() => null);
+    if (direct) { location.assign(`/lookup?steamid=${encId(direct)}`); return; }
+    const found = await api.request(`/api/search?kind=users&q=${encodeURIComponent(q)}`).catch(() => null);
+    const user = found?.users?.[0];
+    if (user?.steam_id) location.assign(`/lookup?steamid=${encId(user.steam_id)}`);
+    else toast.warn('Игрок не найден');
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.top-search')) hideSearchResults();
+  });
+  bar.appendChild(search);
+
+  const actions = el('div', { class: 'top-actions' });
+  if (!me.logged_in) {
+    actions.appendChild(el('a', { href: '/auth/steam', class: 'btn btn-primary btn-sm', onclick: steamLogin }, 'Войти'));
+  } else {
+    actions.appendChild(el('div', { class: 'top-notif-wrap' },
+      el('button', { class: 'icon-btn top-icon-btn', type: 'button', id: 'top-notif-btn', title: 'Уведомления',
+        html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="top-badge" id="top-notif-badge" style="display:none">0</span>' }),
+      el('div', { class: 'notif-popover', id: 'notif-popover', hidden: 'hidden' })
+    ));
+    actions.appendChild(el('a', { class: 'icon-btn top-icon-btn', href: '/messages', title: 'Сообщения',
+      html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg><span class="top-badge" id="top-msg-badge" style="display:none">0</span>' }));
+    const p = me.profile || {};
+    actions.appendChild(el('a', { class: 'top-avatar', href: `/lookup?steamid=${encId(me.steamid)}`, title: 'Мой профиль' },
+      (p.avatar || p.avatarfull)
+        ? el('img', { src: p.avatar || p.avatarfull, alt: '' })
+        : el('span', null, (p.personaname || '?').slice(0, 1).toUpperCase())
+    ));
+    queueMicrotask(wireNotificationPopover);
+  }
+  bar.appendChild(actions);
+}
+
+function wireNotificationPopover() {
+  const btn = $('#top-notif-btn');
+  const pop = $('#notif-popover');
+  if (!btn || !pop || btn.dataset.wired) return;
+  btn.dataset.wired = '1';
+  const close = () => { pop.hidden = true; };
+  const open = async () => {
+    pop.hidden = false;
+    pop.innerHTML = '<div class="notif-popover-loading"><div class="spinner sm"></div>Загрузка...</div>';
+    const r = await api.request('/api/notifications').catch(() => null);
+    pop.innerHTML = '';
+    pop.appendChild(el('div', { class: 'notif-popover-head' },
+      el('strong', null, 'Уведомления'),
+      el('a', { href: '/notifications' }, 'Все')
+    ));
+    const items = (r?.notifications || []).slice(0, 6);
+    if (!items.length) pop.appendChild(el('div', { class: 'notif-popover-empty' }, 'Пока тихо'));
+    else for (const n of items) pop.appendChild(buildNotificationRow(n, true));
+    refreshUnreadBadge();
+  };
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (pop.hidden) open();
+    else close();
+  });
+  document.addEventListener('click', (e) => {
+    if (!pop.hidden && !e.target.closest('.top-notif-wrap')) close();
+  });
+}
+
 // ============ profile card ============
 function renderProfileCard(profile, opts = {}) {
   const visibilityState = Number(profile?.communityvisibilitystate || 0);
@@ -1264,8 +1500,9 @@ async function pageIndex() {
       const origText = submitBtn.textContent;
       submitBtn.disabled = true; submitBtn.textContent = 'Ищем…';
       try {
+        track('lookup_started', { target: input.slice(0, 80) });
         const r = await api.resolve(input);
-        if (r.ok) location.assign(`/lookup?steamid=${r.steamid}`);
+        if (r.ok) location.assign(`/lookup?steamid=${encId(r.steamid)}`);
         else toast.err('Не нашли такого игрока в Steam');
       } catch (e) {
         toast.err('Не удалось разрешить');
@@ -1506,15 +1743,148 @@ function weaponIconEl(look) {
   return wrap;
 }
 
-function emptyCard(title, message, icon = '📊') {
+function emptyCard(title, message, icon = '📊', action = null) {
+  const actions = Array.isArray(action) ? action.filter(Boolean) : (action ? [action] : []);
   return el('div', { class: 'card' },
     el('div', { class: 'card-h' }, el('h2', null, title)),
     el('div', { class: 'empty-state' },
       el('div', { class: 'icon' }, icon),
-      el('div', { class: 'title' }, 'Пока нет данных'),
-      el('div', { class: 'desc' }, message)
+      el('div', { class: 'title' }, title || 'Пока нет данных'),
+      el('div', { class: 'desc' }, message),
+      actions.length ? el('div', { class: 'empty-state-actions' },
+        actions.map(a => a.href
+          ? el('a', { class: a.class || 'btn btn-sm', href: a.href, onclick: a.onclick || null }, a.label)
+          : el('button', { class: a.class || 'btn btn-sm', type: 'button', onclick: a.onclick }, a.label))
+      ) : null
     )
   );
+}
+
+function renderFirstVisitActions(me) {
+  const main = document.querySelector('.dash-main');
+  if (!main || document.getElementById('first-visit-actions')) return;
+  const profileHref = `/lookup?steamid=${encId(me.steamid)}`;
+  const card = el('div', { class: 'card first-visit-actions', id: 'first-visit-actions' },
+    el('div', { class: 'first-visit-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'С чего начать'),
+        el('h2', null, 'Три быстрых действия')
+      ),
+      el('div', { class: 'first-visit-note' }, 'Для первого визита')
+    ),
+    el('div', { class: 'first-visit-grid' },
+      el('button', { class: 'first-visit-item primary', type: 'button', onclick: openSearchModal },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Проверить игрока'),
+          el('small', null, 'Ник, ссылка Steam или SteamID')
+        )
+      ),
+      el('a', { class: 'first-visit-item', href: profileHref },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Открыть свой профиль'),
+          el('small', null, 'Так вас видят другие')
+        )
+      ),
+      el('a', { class: 'first-visit-item', href: '/friends' },
+        el('span', { class: 'first-visit-icon', html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' }),
+        el('span', { class: 'first-visit-copy' },
+          el('strong', null, 'Найти друзей'),
+          el('small', null, 'Добавить знакомых на сайте')
+        )
+      )
+    )
+  );
+  main.insertBefore(card, main.firstElementChild);
+}
+
+function digestItem(icon, title, text, href) {
+  const content = [
+    el('div', { class: 'daily-ico' }, icon),
+    el('div', { class: 'daily-copy' },
+      el('div', { class: 'daily-item-title' }, title),
+      el('div', { class: 'daily-item-text' }, text)
+    )
+  ];
+  return href
+    ? el('a', { class: 'daily-item', href }, content)
+    : el('div', { class: 'daily-item' }, content);
+}
+
+function inventoryDeltaText(history) {
+  const snaps = Array.isArray(history?.snapshots) ? history.snapshots : [];
+  if (snaps.length < 2) return null;
+  const latest = snaps[0], prev = snaps.find(s => s && s.total_value != null && s.id !== latest.id);
+  if (!latest || latest.total_value == null || !prev || prev.total_value == null) return null;
+  const delta = Number(latest.total_value) - Number(prev.total_value);
+  if (!Number.isFinite(delta) || Math.abs(delta) < 1) return null;
+  const sign = delta > 0 ? '+' : '';
+  const currency = latest.currency || prev.currency || 'RUB';
+  return `${sign}${fmtPrice(delta, currency)} с прошлого снимка`;
+}
+
+async function mountDailyDigest(me) {
+  const main = document.querySelector('.dash-main');
+  if (!main || document.getElementById('daily-digest')) return;
+
+  const card = el('div', { class: 'card daily-digest', id: 'daily-digest' },
+    el('div', { class: 'daily-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'Сегодня'),
+        el('h2', null, 'Что изменилось')
+      ),
+      el('a', { class: 'daily-profile', href: `/lookup?steamid=${encId(me.steamid)}` }, 'Мой профиль')
+    ),
+    el('div', { class: 'daily-grid' },
+      digestItem('•', 'Собираем сводку', 'Проверяем сообщения, друзей и профиль.', null)
+    )
+  );
+  main.insertBefore(card, main.firstElementChild);
+
+  const [notif, convos, friends, hist, rep] = await Promise.all([
+    api.request('/api/notifications/count').catch(() => null),
+    api.conversations().catch(() => null),
+    api.friends().catch(() => null),
+    isSteamId(me.steamid) ? api.inventoryHistory(me.steamid).catch(() => null) : Promise.resolve(null),
+    api.reputation.get(me.steamid).catch(() => null)
+  ]);
+
+  const items = [];
+  const unreadNotifs = Number(notif?.unread || 0);
+  const unreadMsgs = Number(convos?.unread_total || 0);
+  const incoming = (friends?.incoming || []).length;
+  const friendCount = (friends?.friends || []).length;
+  const outgoing = (friends?.outgoing || []).length;
+  const delta = inventoryDeltaText(hist);
+  const repTotal = Number(rep?.total || 0);
+
+  if (unreadMsgs > 0) {
+    items.push(digestItem('✉', 'Новые сообщения', `${unreadMsgs} ${plural(unreadMsgs, ['непрочитанное', 'непрочитанных', 'непрочитанных'])}`, '/messages'));
+  }
+  if (incoming > 0) {
+    items.push(digestItem('+', 'Заявки в друзья', `${incoming} ${plural(incoming, ['заявка ждёт', 'заявки ждут', 'заявок ждут'])} ответа`, '/friends'));
+  }
+  if (unreadNotifs > 0) {
+    items.push(digestItem('🔔', 'Есть события', `${unreadNotifs} ${plural(unreadNotifs, ['новое уведомление', 'новых уведомления', 'новых уведомлений'])}`, '/notifications'));
+  }
+  if (delta) {
+    items.push(digestItem('₽', 'Инвентарь двинулся', delta, '/inventory'));
+  }
+  if (rep?.ok && repTotal > 0) {
+    items.push(digestItem('★', 'Репутация', `+${rep.praise || 0} / -${rep.reports || 0}, ${repTotal} ${plural(repTotal, ['оценка', 'оценки', 'оценок'])}`, `/lookup?steamid=${encId(me.steamid)}#lk-reputation`));
+  }
+  if (!items.length) {
+    const friendLine = friendCount > 0
+      ? `${friendCount} ${plural(friendCount, ['друг', 'друга', 'друзей'])} на сайте`
+      : 'друзей пока нет';
+    items.push(digestItem('✓', 'Спокойный день', `Новых событий нет, ${friendLine}.`, '/friends'));
+    if (outgoing > 0) items.push(digestItem('→', 'Заявки отправлены', `${outgoing} ${plural(outgoing, ['ожидает', 'ожидают', 'ожидают'])} ответа`, '/friends'));
+  }
+
+  const grid = card.querySelector('.daily-grid');
+  grid.innerHTML = '';
+  for (const item of items.slice(0, 4)) grid.appendChild(item);
 }
 
 // ============ page: dashboard ============
@@ -1538,7 +1908,7 @@ async function pageDashboard() {
   if (titleEl && !document.getElementById('dash-view-profile')) {
     const btn = el('a', {
       id: 'dash-view-profile',
-      href: `/lookup?steamid=${me.steamid}`,
+      href: `/lookup?steamid=${encId(me.steamid)}`,
       class: 'dash-profile-link',
       title: 'Открыть мою публичную страницу',
       'aria-label': 'Открыть мою публичную страницу',
@@ -1548,6 +1918,8 @@ async function pageDashboard() {
   }
   // Clear any leftover data-attr from old mode logic (no-op if absent)
   delete document.body.dataset.dashMode;
+  renderFirstVisitActions(me);
+  mountDailyDigest(me);
 
   // Load Steam stats first — these block the main UI (KPI row + Steam tables)
   let statsResp;
@@ -2019,7 +2391,7 @@ function paintLookupHistory() {
 
     const link = el('a', {
       class: 'rail-recent-item',
-      href: `/lookup?steamid=${it.steamid}`
+      href: `/lookup?steamid=${encId(it.steamid)}`
     },
       avatar,
       el('div', { style: { minWidth: 0 } },
@@ -2070,7 +2442,7 @@ function wireDashLookup() {
         }
       } catch (_) {}
       saveLookupHistoryItem(entry);
-      location.assign(`/lookup?steamid=${r.steamid}`);
+      location.assign(`/lookup?steamid=${encId(r.steamid)}`);
     } catch (err) {
       toast.err('Не удалось разрешить SteamID');
     } finally {
@@ -2485,6 +2857,7 @@ async function pageInventory() {
     currency,
     inv: null,
     history: null,
+    priceMovers: null,
     search: '',
     cat: 'all',
     sort: 'price-desc',
@@ -2501,6 +2874,18 @@ async function pageInventory() {
     paintInvLists(state);
     paintInvTable(state);
     paintInvAnalytics(state);
+  };
+
+  const refreshPriceMovers = async () => {
+    if (!state.inv?.ok) return;
+    const names = (state.inv.items || [])
+      .filter(i => i.price_value != null && i.market_name)
+      .map(i => i.market_name);
+    if (!names.length) return;
+    const r = await api.priceMovers(names, state.currency, 30).catch(() => null);
+    if (!r?.ok) return;
+    state.priceMovers = r.movers || [];
+    paintInvLists(state);
   };
 
   // Shows a subtle "обновлено N мин назад / обновляем…" indicator near the refresh button
@@ -2521,6 +2906,7 @@ async function pageInventory() {
   state.inv = first;
   state.history = await histPromise;
   renderAll();
+  refreshPriceMovers();
 
   if (first.cached) {
     const mins = Math.round((first.cache_age_ms || 0) / 60000);
@@ -2535,6 +2921,7 @@ async function pageInventory() {
         if (fresh && fresh.ok) {
           state.inv = fresh;
           renderAll();
+          refreshPriceMovers();
           setFreshness('обновлено только что');
         } else {
           setFreshness('');
@@ -2559,6 +2946,7 @@ async function pageInventory() {
         state.inv = invR2;
         state.history = histR2;
         renderAll();
+        refreshPriceMovers();
         setFreshness('обновлено только что');
         toast.ok('Инвентарь обновлён');
       } catch (e) {
@@ -2877,12 +3265,14 @@ function paintInvLists(state) {
   root.appendChild(topCard);
 
   // 3) & 4) Risers / Fallers — derived from snapshot diff
-  const movers = computeMovers(inv, state.history);
+  const movers = computeMovers(inv, state.history, state.priceMovers);
   const upCard = el('div', { class: 'card' });
   upCard.appendChild(el('div', { class: 'card-eyebrow', style: { color: 'var(--g)' } }, 'Лидеры роста'));
   if (movers.up.length === 0) {
     upCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', { class: 'desc' }, 'Сравнение появится после повторного визита')));
+      el('div', { class: 'desc' }, state.priceMovers == null
+        ? 'Считаем изменения по истории цен…'
+        : 'Пока нет предметов с заметным ростом цены.')));
   } else {
     const list = el('div', { class: 'movers-list' });
     movers.up.forEach((m, i) => list.appendChild(buildMoverDelta(m, inv.currency, 'up')));
@@ -2894,7 +3284,9 @@ function paintInvLists(state) {
   downCard.appendChild(el('div', { class: 'card-eyebrow', style: { color: 'var(--red)' } }, 'Лидеры падения'));
   if (movers.down.length === 0) {
     downCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', { class: 'desc' }, 'Сравнение появится после повторного визита')));
+      el('div', { class: 'desc' }, state.priceMovers == null
+        ? 'Считаем изменения по истории цен…'
+        : 'Пока нет предметов с заметным падением цены.')));
   } else {
     const list = el('div', { class: 'movers-list' });
     movers.down.forEach((m, i) => list.appendChild(buildMoverDelta(m, inv.currency, 'down')));
@@ -3003,8 +3395,27 @@ function buildMoverDelta(m, currency, dir) {
   );
 }
 
-function computeMovers(inv, history) {
+function computeMovers(inv, history, priceMovers = null) {
   const out = { up: [], down: [] };
+  if (Array.isArray(priceMovers) && priceMovers.length) {
+    const itemMap = new Map((inv.items || []).map(it => [it.market_name, it]));
+    const deltas = priceMovers
+      .map(m => {
+        const it = itemMap.get(m.name);
+        return {
+          name: m.name,
+          diff: Number(m.diff),
+          pct: Number(m.pct),
+          grad: it ? gradientForItem(it) : 'linear-gradient(135deg,#444,#222)',
+          emoji: it ? emojiForItem(it) : '🎯'
+        };
+      })
+      .filter(m => Number.isFinite(m.diff) && Number.isFinite(m.pct) && Math.abs(m.diff) >= 0.01);
+    deltas.sort((a, b) => b.pct - a.pct);
+    out.up = deltas.filter(d => d.diff > 0).slice(0, 4);
+    out.down = deltas.filter(d => d.diff < 0).sort((a, b) => a.pct - b.pct).slice(0, 4);
+    return out;
+  }
   if (!history?.snapshots?.length) return out;
   // Last snapshot's stored "items" array is just top10 with name+value
   const snaps = history.snapshots.filter(s => s.currency === inv.currency && Array.isArray(s.items));
@@ -3523,6 +3934,7 @@ async function toggleWatch(marketName, addIt) {
   try {
     if (addIt) {
       await api.watchlist.add({ market_name: marketName });
+      track('watchlist_added', { target: marketName });
       toast.ok('Добавлено в watchlist');
     } else {
       await api.watchlist.remove(marketName);
@@ -3810,7 +4222,7 @@ async function pageLookup() {
   const params = new URLSearchParams(location.search);
   const steamid = params.get('steamid');
 
-  if (!steamid || !/^\d{17}$/.test(steamid)) {
+  if (!steamid || !isSiteUserId(steamid)) {
     const root = $('#lk-profile');
     if (root) {
       root.innerHTML = '';
@@ -3838,6 +4250,9 @@ async function pageLookup() {
     api.leetify(steamid).catch(() => ({ ok: false, reason: 'network' })),
     api.reputation.get(steamid).catch(() => ({ ok: false }))
   ]);
+
+  if (profR?.ok) track('lookup_success', { target: steamid });
+  if (invR?.ok && invR.total_value != null) track('inventory_value_shown', { target: steamid });
 
   // Update lookup history (skip own profile)
   if (profR?.profile && (!me.logged_in || me.steamid !== steamid)) {
@@ -3932,6 +4347,13 @@ async function paintLookupSocial(steamid, profR) {
       el('span', { html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' }),
       'Это ваша публичная страница — как её видят другие'
     ));
+    if (!isSteamId(me.steamid)) {
+      actions.appendChild(el('div', { class: 'lk-social-hint lk-social-steam-hint' },
+        'Вы вошли через Telegram. Подключите Steam, чтобы открыть CS2-статистику, инвентарь и полноценную проверку профиля.'
+      ));
+      actions.appendChild(el('a', { class: 'btn lk-social-primary', href: '/auth/steam', onclick: typeof steamLogin === 'function' ? steamLogin : null },
+        'Подключить Steam'));
+    }
     actions.appendChild(el('a', { class: 'btn', href: '/settings',
       html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;vertical-align:-2px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Редактировать профиль'
     }));
@@ -3952,7 +4374,7 @@ async function paintLookupSocial(steamid, profR) {
   try { const r = await api.friendStatus(steamid); status = r?.status || 'none'; } catch (_) {}
 
   if (status === 'friends') {
-    actions.appendChild(el('a', { class: 'btn lk-social-primary', href: `/messages?to=${steamid}` }, 'Написать'));
+    actions.appendChild(el('a', { class: 'btn lk-social-primary', href: `/messages?to=${encId(steamid)}` }, 'Написать'));
     actions.appendChild(el('button', { class: 'btn btn-ghost', type: 'button',
       onclick: async () => { if (confirm(`Удалить ${name} из друзей?`)) { await api.friendRemove(steamid); toast.ok('Удалён из друзей'); rerender(); } } }, 'Удалить из друзей'));
   } else if (status === 'incoming') {
@@ -3999,7 +4421,9 @@ async function paintLookupSocial(steamid, profR) {
 
 // Share profile link: copy + send to friend in DM
 function openShareProfileModal(steamid, name, profile) {
-  const link = `${location.origin}/u/${steamid}`;
+  const link = isSteamId(steamid)
+    ? `${location.origin}/u/${encId(steamid)}`
+    : `${location.origin}/lookup?steamid=${encId(steamid)}`;
   const me = window.__me;
   const listBox = el('div', { class: 'share-list' });
 
@@ -4009,7 +4433,7 @@ function openShareProfileModal(steamid, name, profile) {
     el('div', { class: 'share-link-row' },
       el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
       el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        try { await navigator.clipboard.writeText(link); track('profile_shared', { target: steamid }); toast.ok('Скопировано'); }
         catch (_) { toast.warn('Скопируйте вручную'); }
       } }, 'Копировать')
     )
@@ -4019,7 +4443,7 @@ function openShareProfileModal(steamid, name, profile) {
   if (navigator.share) {
     content.push(el('button', { class: 'btn btn-full', type: 'button', style: { marginTop: '8px' },
       onclick: async () => {
-        try { await navigator.share({ title: `Профиль ${name} на SOKOLENOK`, url: link }); }
+        try { await navigator.share({ title: `Профиль ${name} на SOKOLENOK`, url: link }); track('profile_shared', { target: steamid }); }
         catch (_) { /* user cancelled */ }
       }
     }, 'Открыть «Поделиться…»'));
@@ -4055,9 +4479,8 @@ function openShareProfileModal(steamid, name, profile) {
         row.appendChild(sendBtn);
         row.addEventListener('click', async () => {
           row.disabled = true; sendBtn.textContent = '…';
-          const text = `Посмотри профиль игрока: ${link}`;
-          const res = await api.sendMessage(f.steam_id, text).catch(() => ({ ok: false }));
-          if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+          const res = await api.sendMessage(f.steam_id, '', { type: 'profile', steam_id: steamid }).catch(() => ({ ok: false }));
+          if (res.ok) { track('profile_shared', { target: steamid }); sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
           else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
         });
         listBox.appendChild(row);
@@ -4084,7 +4507,7 @@ async function paintLookupFriends(steamid) {
       img.onerror = function() { this.remove(); ava.textContent = (f.name || '?').slice(0, 1).toUpperCase(); };
       ava.appendChild(img);
     } else ava.textContent = (f.name || '?').slice(0, 1).toUpperCase();
-    grid.appendChild(el('a', { class: 'lk-friend', href: `/lookup?steamid=${f.steam_id}`, title: f.name },
+    grid.appendChild(el('a', { class: 'lk-friend', href: `/lookup?steamid=${encId(f.steam_id)}`, title: f.name },
       ava, el('div', { class: 'lk-friend-name' }, f.name || f.steam_id.slice(-6))
     ));
   }
@@ -4284,7 +4707,7 @@ async function paintLookupActivity(steamid) {
   const root = $('#lk-activity');
   if (!root) return;
   root.innerHTML = '';
-  const r = await api.request(`/api/profile/${steamid}/activity`).catch(() => null);
+  const r = await api.request(`/api/profile/${encId(steamid)}/activity`).catch(() => null);
   if (!r?.ok || !r.items?.length) return; // hide block entirely if no activity
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-eyebrow' }, 'Активность'));
@@ -4426,6 +4849,7 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   root.innerHTML = '';
   const p = profR?.profile || {};
   const bans = bansR?.ok ? bansR.data : null;
+  const isTelegramProfile = p.source === 'telegram' || /^tg:\d+$/.test(String(p.steamid || ''));
 
   // Update page title
   if (p.personaname) {
@@ -4434,8 +4858,8 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   }
 
   const vis = Number(p.communityvisibilitystate || 0);
-  const visText = vis === 3 ? 'Публичный' : vis === 2 ? 'Только друзья' : 'Закрытый';
-  const visKind = vis === 3 ? 'green' : '';
+  const visText = isTelegramProfile ? 'Telegram' : (vis === 3 ? 'Публичный' : vis === 2 ? 'Только друзья' : 'Закрытый');
+  const visKind = (isTelegramProfile || vis === 3) ? 'green' : '';
   const sinceYear = p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null;
   const h = statsR?.summary?.headline || {};
 
@@ -4496,9 +4920,9 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   }
   info.appendChild(nameRow);
   info.appendChild(el('div', { class: 'pc-sub' },
-    `Steam ID: ${p.steamid || '—'}`,
+    `${isTelegramProfile ? 'Telegram ID' : 'Steam ID'}: ${p.steamid || '—'}`,
     el('button', { type: 'button', title: 'Скопировать',
-      onclick: () => { try { navigator.clipboard.writeText(p.steamid || ''); toast.ok('SteamID скопирован'); } catch (_) {} }
+      onclick: () => { try { navigator.clipboard.writeText(p.steamid || ''); toast.ok(isTelegramProfile ? 'Telegram ID скопирован' : 'SteamID скопирован'); } catch (_) {} }
     }, el('span', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' }))
   ));
   // Presence row: in-site activity + Steam in-game (respects target's privacy)
@@ -4561,7 +4985,7 @@ function paintLookupProfile(profR, statsR, invR, bansR) {
   // Below the profile card: external profile links — Steam, CSStats, Leetify, Faceit
   // CSStats and Leetify accept SteamID64 directly; Faceit needs faceit_url from API response.
   const sid = p.steamid;
-  if (sid) {
+  if (sid && !isTelegramProfile) {
     const links = el('div', { class: 'card ext-links' });
     links.appendChild(el('div', { class: 'card-eyebrow' }, 'Другие сервисы'));
     links.appendChild(el('div', { class: 'ext-links-grid' },
@@ -4870,7 +5294,18 @@ async function renderPublicPage(publicId, me) {
 
   // Posts
   if (!r.posts?.length) {
-    list.appendChild(emptyCard('Пока нет постов', p.is_owner ? 'Опубликуйте первый пост.' : 'Здесь пока пусто.', '📝'));
+    list.appendChild(emptyCard('Пока нет постов',
+      p.is_owner ? 'Опубликуйте первый пост: новость, набор в пати, полезную ссылку или обновление сообщества.' : 'Здесь пока пусто. Подпишитесь на другие сообщества или вернитесь в общую ленту.',
+      '📝',
+      p.is_owner
+        ? [
+            { label: 'Написать пост', onclick: () => openCreatePostModal(p) },
+            { label: 'Редактировать паблик', class: 'btn btn-sm btn-ghost', onclick: () => openEditPublicModal(p, () => renderPublicPage(publicId, me)) }
+          ]
+        : [
+            { label: 'К ленте', href: '/feed' },
+            { label: 'Сообщества', class: 'btn btn-sm btn-ghost', href: '/communities' }
+          ]));
     return;
   }
   for (const post of r.posts) {
@@ -5160,7 +5595,7 @@ function renderCommentsPreview(container, comments, postId, me, onExpand) {
       ava,
       el('div', { class: 'comment-body' },
         el('div', { class: 'comment-head' },
-          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${encId(c.author_steam_id)}` }, c.author_name || c.author_steam_id),
           roleBadge(c.author_role),
           el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
         ),
@@ -5191,7 +5626,7 @@ async function loadCommentsInto(panel, postId, me, onChange) {
       ava,
       el('div', { class: 'comment-body' },
         el('div', { class: 'comment-head' },
-          el('a', { class: 'comment-name', href: `/lookup?steamid=${c.author_steam_id}` }, c.author_name || c.author_steam_id),
+          el('a', { class: 'comment-name', href: `/lookup?steamid=${encId(c.author_steam_id)}` }, c.author_name || c.author_steam_id),
           roleBadge(c.author_role),
           el('span', { class: 'comment-date' }, c.created_at ? relDate(c.created_at) : '')
         ),
@@ -5253,7 +5688,7 @@ async function openShareModal(item, me) {
     el('div', { class: 'share-link-row' },
       el('input', { class: 'modal-input', readonly: 'readonly', value: link }),
       el('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
-        try { await navigator.clipboard.writeText(link); toast.ok('Скопировано'); }
+        try { await navigator.clipboard.writeText(link); track('profile_shared', { target: steamid }); toast.ok('Скопировано'); }
         catch (_) { toast.warn('Скопируйте вручную'); }
       } }, 'Копировать')
     )
@@ -5281,7 +5716,7 @@ async function openShareModal(item, me) {
     row.addEventListener('click', async () => {
       row.disabled = true; sendBtn.textContent = '…';
       const res = await api.sendMessage(f.steam_id, '', { type: 'post', post_id: item.post_id }).catch(() => ({ ok: false }));
-      if (res.ok) { sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
+      if (res.ok) { track('profile_shared', { target: steamid }); sendBtn.textContent = 'Отправлено ✓'; sendBtn.classList.add('sent'); }
       else { sendBtn.textContent = 'Ошибка'; row.disabled = false; }
     });
     listBox.appendChild(row);
@@ -5569,7 +6004,7 @@ function openEditorsModal(pub) {
     } else {
       for (const e of r.editors) {
         listBox.appendChild(el('div', { class: 'editor-row' },
-          el('a', { class: 'editor-name', href: `/lookup?steamid=${e.steam_id}` }, e.name || e.steam_id),
+          el('a', { class: 'editor-name', href: `/lookup?steamid=${encId(e.steam_id)}` }, e.name || e.steam_id),
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
             onclick: async () => { await api.removePublicEditor(pub.id, e.steam_id); toast.ok('Удалён'); reload(); } }, 'Убрать')
         ));
@@ -6061,8 +6496,35 @@ async function pageMessages() {
     setTimeout(() => location.replace('/'), 800);
     return;
   }
+  const empty = $('#msgr-empty');
+  if (empty && !empty.querySelector('.empty-state-actions')) {
+    empty.appendChild(el('div', { class: 'empty-state-actions' },
+      el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+      el('a', { class: 'btn btn-sm btn-ghost', href: '/lookup' }, 'Проверить игрока')
+    ));
+  }
 
-  const state = { tab: 'chats', activeOther: null, pollTimer: null };
+  const readMsgPageCache = (key, maxAgeMs = 45000) => {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(`sok:msg:${key}`) || 'null');
+      if (!cached || Date.now() - cached.ts > maxAgeMs) return null;
+      return cached.value;
+    } catch (_) { return null; }
+  };
+  const writeMsgPageCache = (key, value) => {
+    try { sessionStorage.setItem(`sok:msg:${key}`, JSON.stringify({ ts: Date.now(), value })); } catch (_) {}
+  };
+
+  const state = {
+    tab: 'chats',
+    activeOther: null,
+    pollTimer: null,
+    convos: readMsgPageCache('convos'),
+    friendsData: readMsgPageCache('friends'),
+    threadCache: new Map(),
+    threadFetchToken: 0,
+    lastLeftRefresh: 0
+  };
 
   // Tabs
   const tabs = $('#msgr-tabs');
@@ -6081,19 +6543,31 @@ async function pageMessages() {
   async function renderLeft(opts = {}) {
     const list = $('#msgr-list');
     if (!list) return;
-    // Show spinner only on first paint or explicit force; silent refresh keeps content
-    const isFirst = !state.leftRendered;
+    const cached = state.tab === 'chats' ? state.convos : state.friendsData;
+    if (cached && !opts.force) {
+      if (state.tab === 'chats') renderChatList(cached);
+      else renderFriendList(cached);
+      state.leftRendered = true;
+      if (opts.localOnly) return;
+    }
+    // Show spinner only when there is nothing useful to show yet.
+    const isFirst = !state.leftRendered && !cached;
     if (isFirst && !opts.silent) {
       list.innerHTML = '<div class="loading-inline" style="padding:20px"><div class="spinner sm"></div>Загрузка…</div>';
     }
     if (state.tab === 'chats') {
       const r = await api.conversations().catch(() => ({ ok: false, conversations: [] }));
-      renderChatList(r.conversations || []);
+      state.convos = r.conversations || [];
+      writeMsgPageCache('convos', state.convos);
+      renderChatList(state.convos);
     } else {
       const r = await api.friends().catch(() => ({ ok: false, friends: [], incoming: [], outgoing: [] }));
-      renderFriendList(r);
+      state.friendsData = r;
+      writeMsgPageCache('friends', state.friendsData);
+      renderFriendList(state.friendsData);
     }
     state.leftRendered = true;
+    state.lastLeftRefresh = Date.now();
   }
 
   function renderChatList(convos) {
@@ -6101,7 +6575,13 @@ async function pageMessages() {
     list.innerHTML = '';
     if (!convos.length) {
       list.appendChild(el('div', { class: 'msgr-list-empty' },
-        'Пока нет диалогов. Откройте профиль друга и нажмите «Написать».'));
+        el('div', { class: 'msgr-empty-title-sm' }, 'Диалогов пока нет'),
+        el('div', null, 'Добавьте игрока в друзья — после подтверждения здесь появится переписка.'),
+        el('div', { class: 'empty-state-actions' },
+          el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+          el('a', { class: 'btn btn-sm btn-ghost', href: '/lookup' }, 'Проверить игрока')
+        )
+      ));
       return;
     }
     for (const c of convos) {
@@ -6109,6 +6589,7 @@ async function pageMessages() {
       ava.dataset.sid = c.steam_id;
       list.appendChild(el('div', {
         class: 'msgr-convo' + (state.activeOther === c.steam_id ? ' active' : ''),
+        dataset: { sid: c.steam_id },
         onclick: () => openThread(c.steam_id)
       },
         ava,
@@ -6151,7 +6632,14 @@ async function pageMessages() {
       if (!arr.length && kind !== 'friends') continue;
       list.appendChild(el('div', { class: 'msgr-section-h' }, title));
       if (!arr.length) {
-        list.appendChild(el('div', { class: 'msgr-list-empty' }, 'Пусто.'));
+        list.appendChild(el('div', { class: 'msgr-list-empty' },
+          el('div', { class: 'msgr-empty-title-sm' }, 'Друзей пока нет'),
+          el('div', null, 'Найдите игрока, отправьте заявку и после принятия сможете написать ему прямо отсюда.'),
+          el('div', { class: 'empty-state-actions' },
+            el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти игрока'),
+            el('a', { class: 'btn btn-sm btn-ghost', href: '/feed' }, 'Открыть ленту')
+          )
+        ));
         continue;
       }
       for (const f of arr) {
@@ -6172,25 +6660,85 @@ async function pageMessages() {
         }
         list.appendChild(el('div', { class: 'msgr-friend' },
           avatarEl(f.avatar, f.name, 'msgr-avatar'),
-          el('a', { class: 'msgr-friend-name', href: `/lookup?steamid=${f.steam_id}` }, f.name),
+          el('a', { class: 'msgr-friend-name', href: `/lookup?steamid=${encId(f.steam_id)}` }, f.name),
           actions
         ));
       }
     }
   }
 
+  function markActiveConvo(other) {
+    const list = $('#msgr-list');
+    if (!list) return;
+    for (const row of list.querySelectorAll('.msgr-convo')) {
+      const isActive = row.dataset.sid === other;
+      row.classList.toggle('active', isActive);
+      if (isActive) row.querySelector('.msgr-unread')?.remove();
+    }
+  }
+
   async function openThread(other) {
+    if (state.activeOther === other && $('#msgr-thread-scroll')) {
+      document.body.classList.add('msgr-thread-open');
+      tellServiceWorkerActiveMessagePeer(other);
+      markActiveConvo(other);
+      const token = ++state.threadFetchToken;
+      const r = await api.messages(other).catch(() => ({ ok: false }));
+      if (token !== state.threadFetchToken || state.activeOther !== other || !r.ok) return;
+      state.threadCache.set(other, r);
+      renderThreadResponse(r);
+      refreshUnreadBadge();
+      return;
+    }
     state.activeOther = other;
+    tellServiceWorkerActiveMessagePeer(other);
+    try {
+      const url = new URL(location.href);
+      url.pathname = '/messages';
+      url.search = '';
+      url.searchParams.set('to', other);
+      history.replaceState(history.state, '', url.pathname + url.search);
+    } catch (_) {}
     state.lastMsgId = 0;
     state.lastDate = null;
     state.threadLoaded = false;
+    state.replyToId = null;
     document.body.classList.add('msgr-thread-open'); // mobile: show thread, hide list
-    renderLeft(); // refresh active highlight
+    markActiveConvo(other);
     const right = $('#msgr-right');
-    right.innerHTML = '<div class="loading-inline" style="padding:40px;justify-content:center"><div class="spinner"></div></div>';
+    const cached = state.threadCache.get(other);
+    if (cached) {
+      paintThread(cached, { fromCache: true });
+    } else {
+      right.innerHTML = '<div class="loading-inline" style="padding:40px;justify-content:center"><div class="spinner"></div></div>';
+    }
+    const token = ++state.threadFetchToken;
     const r = await api.messages(other).catch(() => ({ ok: false }));
-    if (!r.ok) { right.innerHTML = '<div class="msgr-empty"><div class="msgr-empty-title">Не удалось загрузить</div></div>'; return; }
-    paintThread(r);
+    if (token !== state.threadFetchToken || state.activeOther !== other) return;
+    if (!r.ok) {
+      right.innerHTML = '';
+      right.appendChild(el('div', { class: 'msgr-empty' },
+        el('div', { class: 'msgr-empty-title' }, 'Не удалось загрузить диалог'),
+        el('div', { class: 'msgr-empty-sub' }, 'Связь могла просесть. Попробуйте открыть чат ещё раз.'),
+        el('div', { class: 'empty-state-actions' },
+          el('button', { class: 'btn btn-sm', type: 'button', onclick: () => openThread(other) }, 'Повторить'),
+          el('a', { class: 'btn btn-sm btn-ghost', href: '/messages' }, 'К списку')
+        )
+      ));
+      return;
+    }
+    state.threadCache.set(other, r);
+    if (cached && $('#msgr-thread-scroll')) {
+      renderThreadResponse(r);
+      state.threadFriend = r.friend;
+    } else {
+      paintThread(r);
+    }
+    if (Array.isArray(state.convos)) {
+      state.convos = state.convos.map(c => c.steam_id === other ? { ...c, unread: 0 } : c);
+      writeMsgPageCache('convos', state.convos);
+      markActiveConvo(other);
+    }
     refreshUnreadBadge(); // opening marks read
     loadThreadPresence(other);
   }
@@ -6216,7 +6764,75 @@ async function pageMessages() {
     node.appendChild(document.createTextNode(' ' + lbl));
   }
 
+  function cacheActiveThreadResponse(r) {
+    if (!r?.ok || !state.activeOther) return;
+    state.threadCache.set(state.activeOther, r);
+  }
+
+  function appendMessageToThreadCache(peer, message) {
+    if (!peer || !message?.id) return;
+    const cached = state.threadCache.get(peer);
+    if (!cached?.ok) return;
+    const existing = cached.messages || [];
+    if (existing.some(m => m.id === message.id)) return;
+    cached.messages = [...existing, message];
+    state.threadCache.set(peer, cached);
+  }
+
+  function renderThreadResponse(r) {
+    if (!r?.ok) return;
+    const messages = r.messages || [];
+    const latest = messages[messages.length - 1];
+    const scroll = $('#msgr-thread-scroll');
+    if (scroll && latest?.id != null && latest.id <= state.lastMsgId &&
+        !scroll.querySelector(`.msgr-bubble-row[data-mid="${latest.id}"]`)) {
+      paintThread(r);
+      return;
+    }
+    renderMessages(messages);
+  }
+
   // Append only messages we haven't drawn yet (by id), inserting date separators as needed.
+  function messageTimeNode(m) {
+    const node = el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : '');
+    if (m.from_me) {
+      node.appendChild(el('span', {
+        class: 'msgr-receipt ' + (m.read ? 'seen' : 'sent'),
+        title: m.read ? 'Прочитано' : 'Отправлено'
+      },
+        el('span', { class: 'msgr-receipt-checks' }, m.read ? '✓✓' : '✓'),
+        el('span', { class: 'msgr-receipt-label' }, m.read ? 'Прочитано' : 'Отправлено')
+      ));
+    }
+    return node;
+  }
+
+  function updateReceiptForMessage(m) {
+    if (!m?.from_me || !m.read || m.id == null) return;
+    const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.id}"]`);
+    const receipt = row?.querySelector('.msgr-receipt');
+    if (!receipt) return;
+    const checks = receipt.querySelector('.msgr-receipt-checks');
+    const label = receipt.querySelector('.msgr-receipt-label');
+    if (checks) checks.textContent = '✓✓';
+    if (label) label.textContent = 'Прочитано';
+    receipt.classList.remove('sent');
+    receipt.classList.add('seen');
+    receipt.title = 'Прочитано';
+  }
+
+  function markOutgoingSeen() {
+    document.querySelectorAll('.msgr-bubble-row.me .msgr-receipt').forEach(r => {
+      const checks = r.querySelector('.msgr-receipt-checks');
+      const label = r.querySelector('.msgr-receipt-label');
+      if (checks) checks.textContent = '✓✓';
+      if (label) label.textContent = 'Прочитано';
+      r.classList.remove('sent');
+      r.classList.add('seen');
+      r.title = 'Прочитано';
+    });
+  }
+
   function renderMessages(messages) {
     const scroll = $('#msgr-thread-scroll');
     if (!scroll) return;
@@ -6224,7 +6840,10 @@ async function pageMessages() {
     let added = false;
     let gotIncoming = false;
     for (const m of messages) {
-      if (m.id != null && m.id <= state.lastMsgId) continue; // already drawn
+      if (m.id != null && m.id <= state.lastMsgId) {
+        updateReceiptForMessage(m);
+        continue; // already drawn
+      }
       const d = m.created_at ? new Date(m.created_at).toDateString() : null;
       if (d && d !== state.lastDate) {
         scroll.appendChild(el('div', { class: 'msgr-date-sep' },
@@ -6235,7 +6854,7 @@ async function pageMessages() {
       const bubble = el('div', { class: 'msgr-bubble' });
       if (m.deleted) {
         bubble.appendChild(el('div', { class: 'msgr-bubble-text msgr-deleted' }, '🗑 Сообщение удалено'));
-        bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
+        bubble.appendChild(messageTimeNode(m));
       } else {
         if (m.attachment) {
           const card = buildAttachmentCard(m.attachment);
@@ -6244,7 +6863,7 @@ async function pageMessages() {
         if (m.text) {
           bubble.appendChild(el('div', { class: 'msgr-bubble-text' }, m.text));
         }
-        bubble.appendChild(el('div', { class: 'msgr-bubble-time' }, m.created_at ? msgTime(m.created_at) : ''));
+        bubble.appendChild(messageTimeNode(m));
         // Reactions chips (below bubble text). Filled by renderReactions helper.
         const reactionsEl = el('div', { class: 'msgr-reactions' });
         bubble.appendChild(reactionsEl);
@@ -6337,6 +6956,30 @@ async function pageMessages() {
       card.appendChild(body);
       return card;
     }
+    if (att.type === 'profile') {
+      const sid = att.steam_id || '';
+      const link = att.url || (isSteamId(sid) ? `/u/${encId(sid)}` : `/lookup?steamid=${encId(sid)}`);
+      const card = el('a', { class: 'msg-att msg-att-profile', href: link });
+      if (att.image) card.appendChild(el('div', { class: 'msg-att-img' }, el('img', { src: att.image, alt: '' })));
+      const row = el('div', { class: 'msg-att-profile-row' });
+      const ava = el('div', { class: 'msg-att-profile-ava' });
+      if (att.avatar) {
+        const img = el('img', { src: att.avatar, alt: '' });
+        img.onerror = function() { this.remove(); ava.textContent = (att.name || '?').slice(0, 1).toUpperCase(); };
+        ava.appendChild(img);
+      } else {
+        ava.textContent = (att.name || '?').slice(0, 1).toUpperCase();
+      }
+      row.appendChild(ava);
+      row.appendChild(el('div', { class: 'msg-att-profile-body' },
+        el('div', { class: 'msg-att-pub' }, att.source === 'telegram' ? 'Профиль SOKOLENOK' : 'Профиль CS2'),
+        el('div', { class: 'msg-att-title' }, att.name || 'Игрок'),
+        el('div', { class: 'msg-att-preview' }, isSteamId(sid) ? `Steam ID: ${sid}` : 'Telegram-пользователь на сайте'),
+        el('div', { class: 'msg-att-cta' }, 'Открыть профиль →')
+      ));
+      card.appendChild(row);
+      return card;
+    }
     if (att.type === 'reply') {
       const card = el('div', { class: 'msg-att msg-att-reply' });
       card.appendChild(el('div', { class: 'msg-att-author' }, '↩ ' + (att.author_name || 'Сообщение')));
@@ -6362,11 +7005,17 @@ async function pageMessages() {
     // Header
     right.appendChild(el('div', { class: 'msgr-thread-h' },
       el('button', { class: 'msgr-back', type: 'button', 'aria-label': 'Назад',
-        onclick: () => { document.body.classList.remove('msgr-thread-open'); state.activeOther = null; renderLeft(); },
+        onclick: () => {
+          document.body.classList.remove('msgr-thread-open');
+          state.activeOther = null;
+          tellServiceWorkerActiveMessagePeer(null);
+          try { history.replaceState(history.state, '', '/messages'); } catch (_) {}
+          renderLeft();
+        },
         html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>' }),
       avatarEl(o.avatar, o.name, 'msgr-avatar'),
       el('div', { class: 'msgr-thread-h-info' },
-        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${o.steam_id}` }, o.name),
+        el('a', { class: 'msgr-thread-name', href: `/lookup?steamid=${encId(o.steam_id)}` }, o.name),
         el('div', { class: 'msgr-thread-presence', id: 'msgr-thread-presence' }, '')
       ),
       el('div', { class: 'msgr-thread-actions' },
@@ -6385,7 +7034,7 @@ async function pageMessages() {
     // Messages scroll area (empty; filled by renderMessages)
     right.appendChild(el('div', { class: 'msgr-thread-scroll', id: 'msgr-thread-scroll' }));
     state.threadFriend = r.friend;
-    renderMessages(r.messages || []);
+    renderThreadResponse(r);
 
     // Composer is shown if the user can write to this peer. Friends — always.
     // Moderators/admins — to anyone, for support replies. Otherwise locked.
@@ -6424,7 +7073,13 @@ async function pageMessages() {
         const res = await api.sendMessage(o.steam_id, text, attachment).catch(() => ({ ok: false }));
         if (res.ok && res.message) {
           renderMessages([res.message]);
-          renderLeft({ silent: true });
+          const cachedThread = state.threadCache.get(o.steam_id);
+          if (cachedThread) {
+            cachedThread.messages = [...(cachedThread.messages || []), res.message];
+            state.threadCache.set(o.steam_id, cachedThread);
+          }
+          state.convos = null;
+          renderLeft({ silent: true, force: true });
         } else {
           toast.err(res.error === 'not-friends' ? 'Вы больше не друзья' : res.error === 'blocked' ? 'Недоступно' : 'Не отправлено');
           input.value = text; persistDraft();
@@ -6546,7 +7201,7 @@ async function pageMessages() {
       }
 
       requestAnimationFrame(() => {
-        input.focus();
+        if (window.matchMedia?.('(min-width: 761px)').matches) input.focus();
         if (input.value) { input.style.height = 'auto'; input.style.height = Math.min(120, input.scrollHeight) + 'px'; }
       });
     } else {
@@ -6563,7 +7218,7 @@ async function pageMessages() {
   // Initial load; if URL has ?to=steamid, open that thread
   await renderLeft();
   const toId = new URLSearchParams(location.search).get('to');
-  if (toId && /^\d{17}$/.test(toId)) openThread(toId);
+  if (toId && isSiteUserId(toId)) openThread(toId);
 
   // Hybrid realtime: WebSocket pushes deliver new messages instantly; polling
   // remains as a slow safety net (and as the only path when WS is blocked).
@@ -6573,7 +7228,8 @@ async function pageMessages() {
     if (state.activeOther) {
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        cacheActiveThreadResponse(r);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
       loadThreadPresence(state.activeOther);
     }
@@ -6582,7 +7238,7 @@ async function pageMessages() {
 
   function schedulePoll() {
     if (state.pollTimer) clearInterval(state.pollTimer);
-    const interval = window.__wsAlive ? 15000 : 3000;
+    const interval = window.__wsAlive ? 25000 : 8000;
     state.pollTimer = setInterval(tick, interval);
   }
   schedulePoll();
@@ -6596,21 +7252,31 @@ async function pageMessages() {
     const m = ev.detail;
     if (!m) return;
     if (m.type === 'message:new' && state.activeOther && m.message?.peer === state.activeOther) {
+      renderMessages([m.message]);
+      appendMessageToThreadCache(state.activeOther, m.message);
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        cacheActiveThreadResponse(r);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
     } else if (m.type === 'message:sent' && state.activeOther && m.message?.peer === state.activeOther) {
+      renderMessages([m.message]);
+      appendMessageToThreadCache(state.activeOther, m.message);
       // Sent from another tab — keep this tab in sync
       api.messages(state.activeOther).then(r => {
         if (!r.ok) return;
-        if ($('#msgr-thread-scroll')) renderMessages(r.messages || []);
+        cacheActiveThreadResponse(r);
+        if ($('#msgr-thread-scroll')) renderThreadResponse(r);
       }).catch(() => {});
     } else if (m.type === 'message:read' && state.activeOther === m.by) {
+      markOutgoingSeen();
       // The other party just read our messages — repaint to show read receipts
       if ($('#msgr-thread-scroll')) {
         api.messages(state.activeOther).then(r => {
-          if (r.ok) renderMessages(r.messages || []);
+          if (r.ok) {
+            cacheActiveThreadResponse(r);
+            renderThreadResponse(r);
+          }
         }).catch(() => {});
       }
     } else if (m.type === 'message:reaction') {
@@ -6623,7 +7289,7 @@ async function pageMessages() {
       }
     } else if (m.type === 'message:new') {
       // Inbox refresh — left rail conversation list shows latest message preview
-      renderLeft().catch(() => {});
+      renderLeft({ silent: true, force: true }).catch(() => {});
     }
   });
 }
@@ -6698,6 +7364,7 @@ async function pageAdmin() {
     if (tab === 'bans') return paintAdminBans(panel);
     if (tab === 'publics') return paintAdminPublics(panel);
     if (tab === 'posts') return paintAdminPosts(panel);
+    if (tab === 'analytics') return paintAdminAnalytics(panel);
     if (tab === 'moderators') return paintAdminModerators(panel);
     if (tab === 'roles') return paintAdminRoles(panel);
     if (tab === 'tools') return paintAdminTools(panel);
@@ -6725,7 +7392,7 @@ async function paintAdminModerators(panel) {
     for (const m of r.moderators) {
       card.appendChild(el('div', { class: 'admin-row' },
         el('div', { class: 'admin-row-main' },
-          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id)),
+          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${encId(m.steam_id)}` }, m.name || m.steam_id)),
           el('div', { class: 'admin-row-sub' }, 'Назначен ', relDate(m.created_at))),
         el('div', { class: 'admin-row-actions' },
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
@@ -6805,7 +7472,7 @@ async function paintAdminRoles(panel) {
       const list = el('div', { class: 'role-members-list' });
       for (const m of role.members) {
         list.appendChild(el('div', { class: 'role-member' },
-          el('a', { class: 'role-member-link', href: `/lookup?steamid=${m.steam_id}` }, m.name || m.steam_id),
+          el('a', { class: 'role-member-link', href: `/lookup?steamid=${encId(m.steam_id)}` }, m.name || m.steam_id),
           el('button', { class: 'btn btn-sm btn-ghost', type: 'button', onclick: async () => {
             if (!confirm('Снять роль с этого игрока?')) return;
             await api.admin.removeRoleMember(role.id, m.steam_id);
@@ -6902,12 +7569,12 @@ async function paintAdminReports(panel) {
             : el('span', { class: 'admin-tag' }, rep.target_type),
           isSupport ? '' : (' ' + rep.target_id)),
         el('div', { class: 'admin-row-sub' },
-          'От: ', el('a', { href: `/lookup?steamid=${rep.reporter_steam_id}` }, rep.reporter_name || rep.reporter_steam_id),
+          'От: ', el('a', { href: `/lookup?steamid=${encId(rep.reporter_steam_id)}` }, rep.reporter_name || rep.reporter_steam_id),
           rep.reason ? ` · «${rep.reason}»` : '',
           ' · ', relDate(rep.created_at))
       ),
       el('div', { class: 'admin-row-actions' },
-        isSupport ? el('a', { class: 'btn btn-sm', href: `/messages?to=${rep.reporter_steam_id}` }, 'Ответить') : null,
+        isSupport ? el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(rep.reporter_steam_id)}` }, 'Ответить') : null,
         (!isSupport && rep.target_type === 'user') ? el('button', { class: 'btn btn-sm', type: 'button',
           onclick: async () => { const reason = prompt('Причина бана:') || ''; await api.admin.ban(rep.target_id, reason); await api.admin.resolveReport(rep.id, 'resolved'); toast.ok('Забанен'); paintAdminReports(panel); } }, 'Забанить') : null,
         el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
@@ -6931,7 +7598,7 @@ async function paintAdminBans(panel) {
     for (const b of r.bans) {
       card.appendChild(el('div', { class: 'admin-row' },
         el('div', { class: 'admin-row-main' },
-          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${b.steam_id}` }, b.name || b.steam_id)),
+          el('div', { class: 'admin-row-title' }, el('a', { href: `/lookup?steamid=${encId(b.steam_id)}` }, b.name || b.steam_id)),
           el('div', { class: 'admin-row-sub' }, (b.reason || 'без причины'), ' · ', relDate(b.created_at))
         ),
         el('div', { class: 'admin-row-actions' },
@@ -6982,6 +7649,28 @@ async function paintAdminPublics(panel) {
   panel.appendChild(card);
 }
 
+
+async function paintAdminAnalytics(panel) {
+  const r = await api.admin.analytics(30).catch(() => ({ ok: false }));
+  panel.innerHTML = '';
+  if (!r.ok) { panel.appendChild(el('div', { class: 'card admin-empty' }, 'Не удалось загрузить аналитику.')); return; }
+  const report = r.report || { totals: {}, sources: [] };
+  const t = report.totals || {};
+  const cards = el('div', { class: 'kpis k4' },
+    adminKpi('Проверки профиля', t.lookup_success || 0),
+    adminKpi('Показана цена', t.inventory_value_shown || 0),
+    adminKpi('Входы Steam', t.steam_login_success || 0),
+    adminKpi('Шеринги', t.profile_shared || 0)
+  );
+  panel.appendChild(cards);
+  const sourceCard = el('div', { class: 'card', style: { marginTop: '16px' } }, el('div', { class: 'card-eyebrow' }, 'Источники за 30 дней'));
+  if (!(report.sources || []).length) sourceCard.appendChild(el('div', { class: 'admin-empty' }, 'Событий ещё нет. Добавьте UTM-ссылку и сделайте тестовый переход.'));
+  else for (const s of report.sources) sourceCard.appendChild(el('div', { class: 'admin-row' },
+    el('div', { class: 'admin-row-main' }, el('div', { class: 'admin-row-title' }, s.source), el('div', { class: 'admin-row-sub' }, `${s.visits} визитов · ${s.lookups} проверок · ${s.logins} входов · ${s.shares} шерингов`))));
+  panel.appendChild(sourceCard);
+}
+function adminKpi(label, value) { return el('div', { class: 'kpi' }, el('div', { class: 'kpi-label' }, label), el('div', { class: 'kpi-value' }, String(value))); }
+
 async function paintAdminPosts(panel) {
   const r = await api.admin.posts().catch(() => ({ ok: false, posts: [] }));
   panel.innerHTML = '';
@@ -7030,6 +7719,8 @@ async function pageFriends() {
   const tabs = $('#friends-tabs');
   const body = $('#friends-body');
   let cur = 'friends';
+  mountFriendsFinder(body, () => load(cur));
+  mountSteamFriendsSuggestions(body, () => load(cur));
 
   const load = async (tab) => {
     cur = tab;
@@ -7039,11 +7730,11 @@ async function pageFriends() {
       paintRecommendations(body, r.recommendations || []);
     } else if (tab === 'blocks') {
       const r = await api.blocks().catch(() => ({ ok: false, blocked: [] }));
-      paintFriendsBlocks(body, r.blocked || []);
+      paintFriendsBlocks(body, r.blocked || [], () => load(cur));
     } else {
       const r = await api.friends().catch(() => ({ ok: false }));
       const arr = r[tab] || [];
-      paintFriendsList(body, arr, tab);
+      paintFriendsList(body, arr, tab, () => load(cur));
     }
   };
   for (const btn of tabs.querySelectorAll('.feed-tab')) {
@@ -7056,7 +7747,120 @@ async function pageFriends() {
   load('friends');
 }
 
-function paintFriendsList(root, arr, tab) {
+function mountFriendsFinder(anchor, refresh) {
+  if (!anchor || document.getElementById('friends-finder')) return;
+  const panel = el('div', { class: 'card friends-finder', id: 'friends-finder' },
+    el('div', { class: 'friends-finder-main' },
+      el('div', { class: 'card-eyebrow' }, 'Найти игрока'),
+      el('form', { class: 'friends-search-form' },
+        el('input', { class: 'input friends-search-input', type: 'search', autocomplete: 'off',
+          placeholder: 'Ник, SteamID, ссылка Steam или Telegram-профиль' }),
+        el('button', { class: 'btn', type: 'submit' }, 'Найти')
+      )
+    ),
+    el('div', { class: 'friends-search-results' })
+  );
+  anchor.parentElement?.insertBefore(panel, anchor);
+  const form = panel.querySelector('form');
+  const input = panel.querySelector('input');
+  const results = panel.querySelector('.friends-search-results');
+  const renderUser = async (u) => {
+    const sid = u.steam_id || u.steamid;
+    if (!sid) return;
+    let status = 'none';
+    try { status = (await api.friendStatus(sid))?.status || 'none'; } catch (_) {}
+    const actions = el('div', { class: 'friend-row-actions' });
+    if (window.__me?.steamid === sid) {
+      actions.appendChild(el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(sid)}` }, 'Это вы'));
+    } else if (status === 'friends') {
+      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(sid)}` }, 'Написать'));
+      actions.appendChild(el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(sid)}` }, 'Профиль'));
+    } else if (status === 'outgoing') {
+      actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', disabled: 'disabled' }, 'Заявка отправлена'));
+    } else if (status === 'incoming') {
+      actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async () => { await api.friendAccept(sid); toast.ok('Заявка принята'); refresh?.(); form.dispatchEvent(new Event('submit', { cancelable: true })); } }, 'Принять'));
+    } else {
+      actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async (e) => {
+          const btn = e.currentTarget; btn.disabled = true;
+          const r = await api.friendRequest(sid).catch(() => ({ ok: false }));
+          if (r.ok) { toast.ok('Заявка отправлена'); btn.textContent = 'Заявка отправлена'; btn.classList.add('btn-ghost'); refresh?.(); }
+          else { toast.err('Не удалось отправить'); btn.disabled = false; }
+        } }, 'Добавить'));
+      actions.appendChild(el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(sid)}` }, 'Профиль'));
+    }
+    results.appendChild(buildFriendRow({
+      steam_id: sid,
+      name: u.persona_name || u.name || sid,
+      avatar: u.avatar || null
+    }, actions, /^tg:\d+$/.test(sid) ? 'Telegram-пользователь' : 'Игрок SOKOLENOK'));
+  };
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    results.innerHTML = '<div class="loading-inline"><div class="spinner sm"></div>Ищем...</div>';
+    const usersR = await api.request(`/api/search?kind=users&q=${encodeURIComponent(q)}`).catch(() => null);
+    let users = usersR?.users || [];
+    const direct = await api.resolveAny(q).catch(() => null);
+    if (direct && !users.some(u => u.steam_id === direct)) {
+      const pr = await api.profile(direct).catch(() => null);
+      if (pr?.ok) users.unshift({
+        steam_id: direct,
+        persona_name: pr.profile?.personaname,
+        avatar: pr.profile?.avatar || pr.profile?.avatarfull
+      });
+    }
+    results.innerHTML = '';
+    if (!users.length) {
+      results.appendChild(el('div', { class: 'friends-search-empty' }, 'Пока никого не нашли. Попробуйте SteamID или ссылку на профиль.'));
+      return;
+    }
+    for (const u of users.slice(0, 8)) await renderUser(u);
+    decorateFriendPresence(results);
+  });
+}
+
+async function mountSteamFriendsSuggestions(anchor, refresh) {
+  if (!anchor || document.getElementById('steam-friends-suggest')) return;
+  if (!isSteamId(window.__me?.steamid)) return;
+  const r = await api.steamFriendsOnSite().catch(() => null);
+  const arr = r?.ok ? (r.friends || []) : [];
+  if (!arr.length) return;
+  const card = el('div', { class: 'card steam-friends-suggest', id: 'steam-friends-suggest' },
+    el('div', { class: 'steam-friends-head' },
+      el('div', null,
+        el('div', { class: 'card-eyebrow' }, 'Steam-друзья на SOKOLENOK'),
+        el('div', { class: 'steam-friends-sub' }, 'Эти люди уже есть на сайте, но ещё не в друзьях здесь.')
+      )
+    )
+  );
+  for (const f of arr.slice(0, 8)) {
+    const actions = el('div', { class: 'friend-row-actions' },
+      el('button', { class: 'btn btn-sm', type: 'button',
+        onclick: async (e) => {
+          const btn = e.currentTarget; btn.disabled = true;
+          const res = await api.friendRequest(f.steam_id).catch(() => ({ ok: false }));
+          if (res.ok) {
+            toast.ok('Заявка отправлена');
+            btn.textContent = 'Заявка отправлена';
+            btn.classList.add('btn-ghost');
+            refresh?.();
+          } else {
+            toast.err('Не удалось');
+            btn.disabled = false;
+          }
+        } }, 'Добавить'),
+      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(f.steam_id)}` }, 'Профиль')
+    );
+    card.appendChild(buildFriendRow(f, actions, 'Ваш Steam-друг'));
+  }
+  anchor.parentElement?.insertBefore(card, anchor);
+  decorateFriendPresence(card);
+}
+
+function paintFriendsList(root, arr, tab, refresh) {
   root.innerHTML = '';
   if (!arr.length) {
     const empties = {
@@ -7065,26 +7869,29 @@ function paintFriendsList(root, arr, tab) {
       outgoing: ['Отправленных заявок нет', 'Заявки, которые вы отправили, появятся тут.']
     };
     const [t, s] = empties[tab] || ['Пусто', ''];
-    root.appendChild(emptyCard(t, s, '👥'));
+    const action = tab === 'friends'
+      ? { label: 'Найти игрока', onclick: () => document.querySelector('.friends-search-input')?.focus() }
+      : null;
+    root.appendChild(emptyCard(t, s, '👥', action));
     return;
   }
   const card = el('div', { class: 'card' });
   for (const f of arr) {
     const actions = el('div', { class: 'friend-row-actions' });
     if (tab === 'friends') {
-      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${f.steam_id}` }, 'Написать'));
+      actions.appendChild(el('a', { class: 'btn btn-sm', href: `/messages?to=${encId(f.steam_id)}` }, 'Написать'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); pageFriends(); } } }, 'Удалить'));
+        onclick: async () => { if (confirm(`Удалить ${f.name || 'игрока'} из друзей?`)) { await api.friendRemove(f.steam_id); toast.ok('Удалён'); refresh?.(); } } }, 'Удалить'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button', style: { color: 'var(--red)' },
-        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); pageFriends(); } } }, 'В ЧС'));
+        onclick: async () => { if (confirm(`Заблокировать ${f.name || 'игрока'}? Дружба будет разорвана.`)) { await api.block(f.steam_id); toast.ok('Заблокирован'); refresh?.(); } } }, 'В чёрный список'));
     } else if (tab === 'incoming') {
       actions.appendChild(el('button', { class: 'btn btn-sm', type: 'button',
-        onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); pageFriends(); } }, 'Принять'));
+        onclick: async () => { await api.friendAccept(f.steam_id); toast.ok('Заявка принята'); refresh?.(); } }, 'Принять'));
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отклонить'));
+        onclick: async () => { await api.friendRemove(f.steam_id); refresh?.(); } }, 'Отклонить'));
     } else {
       actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-        onclick: async () => { await api.friendRemove(f.steam_id); pageFriends(); } }, 'Отменить'));
+        onclick: async () => { await api.friendRemove(f.steam_id); refresh?.(); } }, 'Отменить'));
     }
     card.appendChild(buildFriendRow(f, actions));
   }
@@ -7095,12 +7902,13 @@ function paintFriendsList(root, arr, tab) {
 function paintRecommendations(root, arr) {
   root.innerHTML = '';
   if (!arr.length) {
-    root.appendChild(emptyCard('Пока нет рекомендаций',
-      'Когда у вас появятся друзья — здесь будут их друзья, которых вы ещё не добавили.', '✨'));
+    root.appendChild(emptyCard('Пока нет подсказок по друзьям',
+      'Когда у вас появятся друзья, SOKOLENOK покажет знакомых людей из их круга.', '✨',
+      { label: 'Найти игрока', onclick: () => document.querySelector('.friends-search-input')?.focus() }));
     return;
   }
   const card = el('div', { class: 'card' });
-  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Друзья ваших друзей'));
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Знакомые через друзей'));
   for (const f of arr) {
     const actions = el('div', { class: 'friend-row-actions' },
       el('button', { class: 'btn btn-sm', type: 'button',
@@ -7110,14 +7918,14 @@ function paintRecommendations(root, arr) {
           if (r.ok) { toast.ok('Заявка отправлена'); btn.textContent = 'Заявка отправлена'; btn.classList.add('btn-ghost'); }
           else { toast.err('Ошибка'); btn.disabled = false; }
         } }, 'Добавить в друзья'),
-      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${f.steam_id}` }, 'Профиль')
+      el('a', { class: 'btn btn-sm btn-ghost', href: `/lookup?steamid=${encId(f.steam_id)}` }, 'Профиль')
     );
     card.appendChild(buildFriendRow(f, actions, `${f.mutuals} общ. ${f.mutuals === 1 ? 'друг' : 'друзей'}`));
   }
   root.appendChild(card);
 }
 
-function paintFriendsBlocks(root, arr) {
+function paintFriendsBlocks(root, arr, refresh) {
   root.innerHTML = '';
   if (!arr.length) {
     root.appendChild(emptyCard('Чёрный список пуст', 'Заблокированные не смогут писать и добавляться к вам.', '🚫'));
@@ -7128,7 +7936,7 @@ function paintFriendsBlocks(root, arr) {
     card.appendChild(buildFriendRow(f,
       el('div', { class: 'friend-row-actions' },
         el('button', { class: 'btn btn-sm btn-ghost', type: 'button',
-          onclick: async () => { await api.unblock(f.steam_id); toast.ok('Разблокирован'); pageFriends(); } }, 'Разблокировать')
+          onclick: async () => { await api.unblock(f.steam_id); toast.ok('Разблокирован'); refresh?.(); } }, 'Разблокировать')
       )
     ));
   }
@@ -7145,7 +7953,7 @@ function buildFriendRow(f, actionsNode, subText) {
   return el('div', { class: 'friend-row' },
     ava,
     el('div', { class: 'friend-row-info' },
-      el('a', { class: 'friend-row-name', href: `/lookup?steamid=${f.steam_id}` }, f.name || f.steam_id),
+      el('a', { class: 'friend-row-name', href: `/lookup?steamid=${encId(f.steam_id)}` }, f.name || f.steam_id),
       subText ? el('div', { class: 'friend-row-sub' }, subText) : null
     ),
     actionsNode
@@ -7183,14 +7991,24 @@ async function pageNotifications() {
   const r = await api.request('/api/notifications').catch(() => null);
   body.innerHTML = '';
   if (!r?.ok) {
-    body.appendChild(el('div', { class: 'card' }, 'Не удалось загрузить'));
+    body.appendChild(emptyCard('Не удалось загрузить уведомления',
+      'Похоже на временную сетевую ошибку. Обновите страницу или вернитесь к ленте.',
+      '🔔',
+      [
+        { label: 'Обновить', onclick: () => location.reload() },
+        { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+      ]));
     return;
   }
   if (!r.notifications?.length) {
     body.appendChild(el('div', { class: 'card feed-empty' },
       el('div', { class: 'feed-empty-icon' }, '🔔'),
       el('div', { class: 'feed-empty-title' }, 'Уведомлений пока нет'),
-      el('div', { class: 'feed-empty-desc' }, 'Здесь появятся реакции на ваши посты, новые подписчики и заявки в друзья.')
+      el('div', { class: 'feed-empty-desc' }, 'Здесь появятся заявки в друзья, ответы, реакции и важные события по вашему профилю.'),
+      el('div', { class: 'feed-empty-actions' },
+        el('a', { class: 'btn btn-sm', href: '/friends' }, 'Найти друзей'),
+        el('a', { class: 'btn btn-sm btn-ghost', href: '/feed' }, 'Открыть ленту')
+      )
     ));
     return;
   }
@@ -7204,6 +8022,7 @@ async function pageNotifications() {
 function buildNotificationRow(n) {
   const actor = n.actor || {};
   const data = n.data || {};
+  const actorName = publicUserName(actor, 'Telegram-пользователь');
   let icon = '🔔', text = '', href = '#';
   if (n.kind === 'post_like') {
     icon = '❤️';
@@ -7225,7 +8044,7 @@ function buildNotificationRow(n) {
   } else if (n.kind === 'friend_accept') {
     icon = '✓';
     text = 'принял(а) вашу заявку в друзья';
-    href = `/lookup?steamid=${actor.steam_id || ''}`;
+    href = `/lookup?steamid=${encId(actor.steam_id || '')}`;
   } else {
     text = 'выполнил(а) действие';
   }
@@ -7235,14 +8054,14 @@ function buildNotificationRow(n) {
   const ava = el('div', { class: 'notif-ava' });
   if (actor.avatar) {
     const img = el('img', { src: actor.avatar, alt: '' });
-    img.onerror = function() { this.remove(); ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase(); };
+    img.onerror = function() { this.remove(); ava.textContent = actorName.slice(0, 1).toUpperCase(); };
     ava.appendChild(img);
-  } else ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase();
+  } else ava.textContent = actorName.slice(0, 1).toUpperCase();
   row.appendChild(ava);
 
   const body = el('div', { class: 'notif-body' });
   const head = el('div', { class: 'notif-head' },
-    el('strong', { class: 'notif-actor' }, actor.name || actor.steam_id || 'Кто-то'),
+    el('strong', { class: 'notif-actor' }, actorName),
     actor.role ? roleBadge(actor.role) : null,
     el('span', { class: 'notif-icon' }, ' ' + icon),
     el('span', { class: 'notif-text' }, ' ' + text)
@@ -7285,7 +8104,16 @@ async function pageCommunities() {
         mine: ['У вас пока нет сообществ', 'Нажмите «Создать» сверху.']
       };
       const [t, s] = empties[state.tab];
-      body.appendChild(emptyCard(t, s, '👥'));
+      const actions = state.tab === 'subs'
+        ? [
+            { label: 'Показать все', onclick: () => { state.tab = 'all'; render(); } },
+            { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+          ]
+        : [
+            { label: 'Создать', onclick: () => openCreatePublicModal() },
+            { label: 'Открыть ленту', class: 'btn btn-sm btn-ghost', href: '/feed' }
+          ];
+      body.appendChild(emptyCard(t, s, '👥', actions));
     } else {
       const grid = el('div', { class: 'cm-grid' });
       for (const p of list) grid.appendChild(buildCommunityCard(p));
@@ -7432,13 +8260,13 @@ async function pageMe() {
         el('div', { class: 'me-prof-id' }, 'ID: ' + (me.steamid || '').slice(-12))
       )
     ),
-    el('a', { class: 'btn btn-full', href: `/lookup?steamid=${me.steamid}`, style: { marginTop: '14px' } }, 'Открыть мой профиль')
+    el('a', { class: 'btn btn-full', href: `/lookup?steamid=${encId(me.steamid)}`, style: { marginTop: '14px' } }, 'Открыть мой профиль')
   );
   root.appendChild(profCard);
 
   // Menu items
   const items = [
-    { href: '/friends', label: 'Друзья', icon: 'users', desc: 'Список, заявки, рекомендации, ЧС' },
+    { href: '/friends', label: 'Друзья', icon: 'users', desc: 'Список, заявки, подсказки и чёрный список' },
     { href: '/communities', label: 'Сообщества', icon: 'grid', desc: 'Ваши и подписки' },
     { action: openSearchModal, label: 'Найти игрока', icon: 'help', desc: 'По никнейму, ссылке или SteamID' },
     { action: openSupportModal, label: 'Связь с поддержкой', icon: 'help', desc: 'Написать администратору' },
@@ -7878,6 +8706,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Restore accessibility preferences early (before paint)
   try { if (localStorage.getItem('sok:large-font') === '1') document.body.classList.add('large-font'); } catch (_) {}
   initCookieBanner();
+  setTimeout(() => track('page_view'), 1200);
   const page = document.body.dataset.page;
   const router = { index: pageIndex, dashboard: pageDashboard, feed: pageFeed, messages: pageMessages, inventory: pageInventory, lookup: pageLookup, settings: pageSettings, admin: pageAdmin, me: pageMe, friends: pageFriends, communities: pageCommunities, notifications: pageNotifications };
   const fn = router[page];
@@ -7902,3 +8731,5 @@ function initCookieBanner() {
 // Expose for debugging
 window.SOK = { api, toast, $, $$, el, steamLogin };
 })();
+
+

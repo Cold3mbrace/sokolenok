@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   faceit_nickname TEXT,
   consent_at TEXT,
   show_activity INTEGER NOT NULL DEFAULT 1,
+  onboarding_done INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 
@@ -361,6 +362,9 @@ function openSqlite() {
     }
     if (!colNames.has('cover_url')) {
       db.exec('ALTER TABLE user_settings ADD COLUMN cover_url TEXT');
+    }
+    if (!colNames.has('onboarding_done')) {
+      db.exec('ALTER TABLE user_settings ADD COLUMN onboarding_done INTEGER DEFAULT 0');
     }
   } catch (_) { /* best-effort */ }
   try {
@@ -781,6 +785,49 @@ function getPriceHistory(market_name, currency, source = 'steam', days = 30) {
     .sort((a,b) => a.recorded_at.localeCompare(b.recorded_at));
 }
 
+function getPriceMovers(names, currency, source = 'steam', days = 30) {
+  const unique = Array.from(new Set((names || []).map(String).map(s => s.trim()).filter(Boolean))).slice(0, 120);
+  if (!unique.length) return [];
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+  let rows;
+  if (useSqlite()) {
+    const ph = unique.map(() => '?').join(',');
+    rows = openSqlite().prepare(`SELECT market_name, recorded_at, price_value FROM price_history
+      WHERE currency = ? AND source = ? AND recorded_at >= ? AND market_name IN (${ph})
+      ORDER BY market_name ASC, recorded_at ASC`).all(currency, source, cutoff, ...unique);
+  } else {
+    rows = readFallback().price_history
+      .filter(r => unique.includes(r.market_name) && r.currency === currency && r.source === source && r.recorded_at >= cutoff)
+      .sort((a,b) => (a.market_name || '').localeCompare(b.market_name || '') || (a.recorded_at || '').localeCompare(b.recorded_at || ''));
+  }
+  const byName = new Map();
+  for (const r of rows) {
+    const v = Number(r.price_value);
+    if (!Number.isFinite(v) || v <= 0) continue;
+    if (!byName.has(r.market_name)) byName.set(r.market_name, []);
+    byName.get(r.market_name).push({ at: r.recorded_at, value: v });
+  }
+  const out = [];
+  for (const [name, arr] of byName) {
+    if (arr.length < 2) continue;
+    const first = arr[0], last = arr[arr.length - 1];
+    if (!first || !last || first.value <= 0 || last.value <= 0) continue;
+    const diff = last.value - first.value;
+    if (Math.abs(diff) < 0.01) continue;
+    out.push({
+      name,
+      first_value: first.value,
+      last_value: last.value,
+      diff,
+      pct: diff / first.value * 100,
+      first_at: first.at,
+      last_at: last.at,
+      points: arr.length
+    });
+  }
+  return out;
+}
+
 // ----- watchlist -----
 function listWatchlist(steamId) {
   if (!steamId) return [];
@@ -833,7 +880,7 @@ function removeWatch(steamId, marketName) {
 function getSettings(steamId) {
   if (!steamId) return null;
   const empty = { steam_id: steamId, currency: 'RUB', language: 'ru',
-    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, updated_at: null };
+    telegram_id: null, faceit_nickname: null, consent_at: null, show_activity: 1, cover_url: null, onboarding_done: 0, updated_at: null };
   let row;
   if (useSqlite()) {
     row = openSqlite().prepare(`SELECT * FROM user_settings WHERE steam_id = ?`).get(steamId) || empty;
@@ -842,6 +889,7 @@ function getSettings(steamId) {
   }
   // Treat NULL/undefined as default ON for show_activity
   if (row.show_activity == null) row.show_activity = 1;
+  if (row.onboarding_done == null) row.onboarding_done = 0;
   return row;
 }
 
@@ -856,11 +904,12 @@ function setSettings(steamId, patch = {}) {
     consent_at: patch.consent_at !== undefined ? patch.consent_at : cur.consent_at,
     show_activity: patch.show_activity !== undefined ? (patch.show_activity ? 1 : 0) : (cur.show_activity ?? 1),
     cover_url: patch.cover_url !== undefined ? patch.cover_url : cur.cover_url,
+    onboarding_done: patch.onboarding_done !== undefined ? (patch.onboarding_done ? 1 : 0) : (cur.onboarding_done ?? 0),
     updated_at: nowIso()
   };
   if (useSqlite()) {
-    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?)
+    openSqlite().prepare(`INSERT INTO user_settings (steam_id, currency, language, telegram_id, faceit_nickname, consent_at, show_activity, cover_url, onboarding_done, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(steam_id) DO UPDATE SET
         currency = excluded.currency,
         language = excluded.language,
@@ -869,8 +918,9 @@ function setSettings(steamId, patch = {}) {
         consent_at = excluded.consent_at,
         show_activity = excluded.show_activity,
         cover_url = excluded.cover_url,
+        onboarding_done = excluded.onboarding_done,
         updated_at = excluded.updated_at`)
-      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.updated_at);
+      .run(next.steam_id, next.currency, next.language, next.telegram_id, next.faceit_nickname, next.consent_at, next.show_activity, next.cover_url, next.onboarding_done, next.updated_at);
   } else {
     const state = readFallback();
     state.user_settings[steamId] = next;
@@ -1032,7 +1082,7 @@ function countRecentVotes(voterSteamId, sinceMs) {
 function aggregateReputation(targetSteamId) {
   const rows = getReputationFor(targetSteamId).filter(r => (r.weight ?? 1) > 0);
   const byCat = {};
-  let praise = 0, reports = 0;     // direct sums of positive / negative category marks
+  let praise = 0, reports = 0;     // unique voter counts by direction
   let posVoters = 0, negVoters = 0; // voter-level lean (used only for the verdict label)
   const comments = [];
   for (const r of rows) {
@@ -1040,9 +1090,11 @@ function aggregateReputation(targetSteamId) {
     let good = 0, bad = 0;
     for (const c of cats) {
       byCat[c] = (byCat[c] || 0) + 1;
-      if (REP_CATEGORIES[c] > 0) { good += 1; praise += 1; }
-      else { bad += 1; reports += 1; }
+      if (REP_CATEGORIES[c] > 0) good += 1;
+      else bad += 1;
     }
+    if (good > 0) praise += 1;
+    if (bad > 0) reports += 1;
     if (good > bad) posVoters += 1;
     else if (bad > good) negVoters += 1;
     if (r.comment) {
@@ -1674,10 +1726,12 @@ function insertMessage(sender, recipient, bodyEnc, attachmentEnc) {
 // Conversation between two users, oldest→newest
 function listMessages(a, b, limit = 100) {
   if (useSqlite()) {
-    return openSqlite().prepare(`SELECT * FROM messages
-      WHERE (sender_steam_id=? AND recipient_steam_id=?)
-         OR (sender_steam_id=? AND recipient_steam_id=?)
-      ORDER BY created_at ASC LIMIT ?`).all(a, b, b, a, limit);
+    return openSqlite().prepare(`SELECT * FROM (
+      SELECT * FROM messages
+        WHERE (sender_steam_id=? AND recipient_steam_id=?)
+           OR (sender_steam_id=? AND recipient_steam_id=?)
+        ORDER BY created_at DESC, id DESC LIMIT ?
+      ) ORDER BY created_at ASC, id ASC`).all(a, b, b, a, limit);
   }
   return (readFallback().messages || [])
     .filter(m => (m.sender_steam_id === a && m.recipient_steam_id === b) || (m.sender_steam_id === b && m.recipient_steam_id === a))
@@ -1696,17 +1750,22 @@ function getMessage(id) {
 // Mark messages from `other` to `me` as read
 function markRead(me, other) {
   const now = nowIso();
+  let changed = 0;
   if (useSqlite()) {
-    openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
+    const info = openSqlite().prepare(`UPDATE messages SET read_at=? WHERE recipient_steam_id=? AND sender_steam_id=? AND read_at IS NULL`)
       .run(now, me, other);
+    changed = Number(info?.changes || 0);
   } else {
     const state = readFallback();
     for (const m of state.messages || []) {
-      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) m.read_at = now;
+      if (m.recipient_steam_id === me && m.sender_steam_id === other && !m.read_at) {
+        m.read_at = now;
+        changed++;
+      }
     }
-    writeFallback(state);
+    if (changed) writeFallback(state);
   }
-  return { ok: true };
+  return { ok: true, changed };
 }
 
 // Build the list of conversations for a user, with last message + unread count
@@ -2358,6 +2417,36 @@ function logEvent(kind, steamId = null, data = null) {
   }
 }
 
+function analyticsReport(days = 30) {
+  const safeDays = Math.min(365, Math.max(1, Number(days) || 30));
+  const since = new Date(Date.now() - safeDays * 86400000).toISOString();
+  let rows;
+  if (useSqlite()) {
+    rows = openSqlite().prepare(`SELECT ts, kind, steam_id, data_json FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT 20000`).all(since);
+  } else {
+    rows = (readFallback().events || []).filter(e => e.ts >= since).slice(-20000).reverse();
+  }
+  const tracked = ['page_view','lookup_started','lookup_success','inventory_value_shown','steam_login_clicked','steam_login_success','profile_shared','watchlist_added','onboarding_complete','register'];
+  const totals = Object.fromEntries(tracked.map(k => [k, 0]));
+  const sources = {};
+  const daily = {};
+  for (const row of rows) {
+    let data = {}; try { data = JSON.parse(row.data_json || '{}') || {}; } catch (_) {}
+    if (totals[row.kind] != null) totals[row.kind]++;
+    const day = String(row.ts || '').slice(0, 10);
+    if (!daily[day]) daily[day] = { page_view: 0, lookup_success: 0, steam_login_success: 0, profile_shared: 0 };
+    if (daily[day][row.kind] != null) daily[day][row.kind]++;
+    const utm = data.utm || {};
+    const source = String(utm.source || data.referrer || 'direct').slice(0, 60) || 'direct';
+    if (!sources[source]) sources[source] = { source, visits: 0, lookups: 0, logins: 0, shares: 0 };
+    if (row.kind === 'page_view') sources[source].visits++;
+    if (row.kind === 'lookup_success') sources[source].lookups++;
+    if (row.kind === 'steam_login_success' || row.kind === 'register') sources[source].logins++;
+    if (row.kind === 'profile_shared') sources[source].shares++;
+  }
+  return { days: safeDays, since, totals, sources: Object.values(sources).sort((a,b) => b.lookups - a.lookups || b.visits - a.visits).slice(0, 30), daily: Object.entries(daily).sort((a,b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, ...value })) };
+}
+
 function storageHealth() {
   const backend = useSqlite() ? 'sqlite' : 'json-fallback';
   let counts = {};
@@ -2538,7 +2627,7 @@ module.exports = {
   saveInventorySnapshot, listInventorySnapshots, latestInventorySnapshot,
   getInventoryCache, setInventoryCache,
   // prices
-  setPrice, getPrice, getPriceHistory,
+  setPrice, getPrice, getPriceHistory, getPriceMovers,
   // watchlist
   listWatchlist, addWatch, removeWatch,
   // settings
@@ -2574,5 +2663,5 @@ module.exports = {
   createNotification, listNotifications, countUnreadNotifications, markNotificationsRead,
   // push subscriptions
   savePushSubscription, deletePushSubscription, listPushSubscriptions, touchPushSubscription,
-  logEvent, storageHealth
+  logEvent, analyticsReport, storageHealth
 };

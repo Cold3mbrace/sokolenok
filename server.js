@@ -1,4 +1,4 @@
-// server.js
+﻿// server.js
 // SOKOLENOK v4.4 — clean rewrite.
 // Только Node.js stdlib. Никаких npm зависимостей.
 //
@@ -34,8 +34,13 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const db = require('./storage/db');
 const wsHub = require('./lib/ws-hub');
+let Canvas = null;
+try { Canvas = require('@napi-rs/canvas'); } catch (_) {
+  console.warn('[og] @napi-rs/canvas not installed — profile previews use the logo fallback. Run: npm install');
+}
 
 // Transparently push every new notification through WebSocket to its recipient.
 // We monkey-patch instead of editing each call-site (there are 5+ of them)
@@ -142,11 +147,6 @@ try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
 
 // Web Push (no npm deps, self-contained crypto)
 const webPush = require('./lib/web-push');
-// OG card generator (profile/inventory/post preview images for social sharing)
-let ogCard = null;
-try { ogCard = require('./lib/og-card'); } catch (_) {
-  console.warn('[og] @napi-rs/canvas not available — OG image endpoints disabled');
-}
 
 // VAPID keys: prefer env vars, otherwise auto-generate on first boot and
 // persist them in DATA_DIR/vapid.json so the same keys survive restarts.
@@ -183,13 +183,12 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v48.6.0';
+const APP_VERSION = 'v50.17.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(ROOT, '.data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const OG_CACHE_DIR = path.join(DATA_DIR, 'og-cache');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
@@ -217,6 +216,50 @@ function isSuperAdmin(steamid) {
 // canModerate = superadmin OR a site moderator (bans, deletions, reports).
 function canModerate(steamid) {
   return isSuperAdmin(steamid) || db.isModerator(steamid);
+}
+
+function isSteamId(id) {
+  return /^\d{17}$/.test(String(id || ''));
+}
+
+function isTelegramUserId(id) {
+  return /^tg:\d+$/.test(String(id || ''));
+}
+
+function isSiteUserId(id) {
+  return isSteamId(id) || isTelegramUserId(id);
+}
+
+function localProfileFromUser(id) {
+  const u = db.getUser(id);
+  if (!u) return null;
+  let stored = {};
+  try { stored = u.profile_json ? JSON.parse(u.profile_json) : {}; } catch (_) {}
+  return {
+    steamid: u.steam_id,
+    personaname: u.persona_name || stored.personaname || u.steam_id,
+    avatar: u.avatar || stored.avatar || stored.avatarfull || null,
+    avatarfull: stored.avatarfull || u.avatar || stored.avatar || null,
+    profileurl: stored.profileurl || u.steam_url || null,
+    communityvisibilitystate: stored.communityvisibilitystate || u.visibility || 3,
+    timecreated: stored.timecreated || null,
+    source: stored.source || (isTelegramUserId(u.steam_id) ? 'telegram' : 'steam')
+  };
+}
+
+async function profileForSiteUser(id, { refreshSteam = true } = {}) {
+  if (!isSiteUserId(id)) return null;
+  if (isTelegramUserId(id)) return localProfileFromUser(id);
+  if (refreshSteam) {
+    try {
+      const prof = await fetchProfile(id);
+      if (prof) {
+        db.upsertUser(prof);
+        return prof;
+      }
+    } catch (_) {}
+  }
+  return localProfileFromUser(id);
 }
 
 // ---------- message encryption at rest ----------
@@ -313,6 +356,14 @@ function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
   res.end(text);
 }
 
+function acceptsGzip(req) {
+  return /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+}
+
+function isCompressibleStatic(ext) {
+  return ['.html', '.css', '.js', '.json', '.svg', '.txt'].includes(ext);
+}
+
 function redirect(res, location, status = 302) {
   res.writeHead(status, { Location: location });
   res.end();
@@ -374,7 +425,7 @@ function escapeHtml(s) {
 }
 
 // Validate + normalize attachment from client.
-// Allowed types: 'post', 'reply', 'forward'. Anything else → null.
+// Allowed types: 'post', 'profile', 'reply', 'forward'. Anything else → null.
 function sanitizeAttachment(att) {
   if (!att || typeof att !== 'object') return null;
   const t = String(att.type || '');
@@ -382,6 +433,11 @@ function sanitizeAttachment(att) {
     const pid = parseInt(att.post_id, 10);
     if (!Number.isFinite(pid)) return null;
     return { type: 'post', post_id: pid };
+  }
+  if (t === 'profile') {
+    const sid = String(att.steam_id || att.profile_id || '').trim();
+    if (!isSiteUserId(sid)) return null;
+    return { type: 'profile', steam_id: sid };
   }
   if (t === 'reply') {
     const mid = parseInt(att.message_id, 10);
@@ -396,9 +452,33 @@ function sanitizeAttachment(att) {
   return null;
 }
 
+function messageIncludesUser(message, userId) {
+  return !!message && (message.sender_steam_id === userId || message.recipient_steam_id === userId);
+}
+
+function messageIsInConversation(message, a, b) {
+  if (!message) return false;
+  return (message.sender_steam_id === a && message.recipient_steam_id === b)
+    || (message.sender_steam_id === b && message.recipient_steam_id === a);
+}
+
+function validateMessageAttachment(att, sender, recipient) {
+  if (!att || att.type === 'post' || att.type === 'profile') return { ok: true };
+  if (att.type !== 'reply' && att.type !== 'forward') return { ok: false, error: 'bad-attachment' };
+  const original = db.getMessage(att.message_id);
+  if (!original || original.deleted_at) return { ok: false, error: 'bad-attachment' };
+  if (att.type === 'reply' && !messageIsInConversation(original, sender, recipient)) {
+    return { ok: false, error: 'bad-attachment' };
+  }
+  if (att.type === 'forward' && !messageIncludesUser(original, sender)) {
+    return { ok: false, error: 'bad-attachment' };
+  }
+  return { ok: true };
+}
+
 // Enrich attachment with display data fetched fresh from the DB.
 // We store only IDs in the encrypted blob; the rest is hydrated on read.
-async function hydrateAttachment(att) {
+async function hydrateAttachment(att, context = {}) {
   if (!att) return null;
   if (att.type === 'post') {
     try {
@@ -413,10 +493,35 @@ async function hydrateAttachment(att) {
       };
     } catch (_) { return { type: 'post', missing: true }; }
   }
+  if (att.type === 'profile') {
+    try {
+      const sid = String(att.steam_id || '');
+      if (!isSiteUserId(sid)) return { type: 'profile', missing: true };
+      const p = await profileForSiteUser(sid, { refreshSteam: isSteamId(sid) }).catch(() => null);
+      if (!p) return { type: 'profile', missing: true };
+      const base = context.baseUrl || '';
+      return {
+        type: 'profile',
+        steam_id: sid,
+        name: p.personaname || sid,
+        avatar: p.avatarfull || p.avatar || null,
+        source: p.source || (isTelegramUserId(sid) ? 'telegram' : 'steam'),
+        image: isSteamId(sid) && base ? `${base}/og/profile/${sid}.png` : null,
+        url: isSteamId(sid) ? `${base}/u/${sid}` : `${base}/lookup?steamid=${encodeURIComponent(sid)}`
+      };
+    } catch (_) { return { type: 'profile', missing: true }; }
+  }
   if (att.type === 'reply' || att.type === 'forward') {
     try {
       const m = db.getMessage(att.message_id);
       if (!m) return { type: att.type, missing: true };
+      if (m.deleted_at) return { type: att.type, missing: true };
+      if (att.type === 'reply' && context.conversation && !messageIsInConversation(m, context.conversation[0], context.conversation[1])) {
+        return { type: att.type, missing: true };
+      }
+      if (att.type === 'forward' && context.sharedBy && !messageIncludesUser(m, context.sharedBy)) {
+        return { type: att.type, missing: true };
+      }
       const text = decryptMessage(m.body_enc);
       let author = null;
       try { author = await fetchProfile(m.sender_steam_id); } catch (_) {}
@@ -1447,9 +1552,27 @@ async function fetchPlayerBans(steamid) {
   }
 }
 
+async function fetchSteamFriendIds(steamid) {
+  if (!STEAM_API_KEY) return { ok: false, reason: 'no-api-key', ids: [] };
+  if (!isSteamId(steamid)) return { ok: false, reason: 'steam-required', ids: [] };
+  try {
+    const url = `https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${STEAM_API_KEY}&steamid=${steamid}&relationship=friend`;
+    const r = await fetchWithTimeout(url);
+    if (r.status === 401 || r.status === 403) return { ok: false, reason: 'private', ids: [] };
+    if (!r.ok) return { ok: false, reason: `http-${r.status}`, ids: [] };
+    const j = await r.json();
+    const ids = (j?.friendslist?.friends || [])
+      .map(f => String(f.steamid || '').trim())
+      .filter(isSteamId);
+    return { ok: true, ids };
+  } catch (e) {
+    return { ok: false, reason: 'network', error: String(e?.message || e), ids: [] };
+  }
+}
+
 // ---------- request handler ----------
 const _lastSeenCache = new Map(); // steam_id -> ms timestamp of last DB write
-const LAST_SEEN_THROTTLE_MS = 60 * 1000;
+const LAST_SEEN_THROTTLE_MS = 45 * 1000;
 
 function getRequestSteamId(req) {
   const cookies = parseCookies(req);
@@ -1457,15 +1580,16 @@ function getRequestSteamId(req) {
   if (!token) return null;
   const s = db.getSession(token);
   const sid = s?.steam_id || null;
-  if (sid) {
-    const now = Date.now();
-    const last = _lastSeenCache.get(sid) || 0;
-    if (now - last > LAST_SEEN_THROTTLE_MS) {
-      _lastSeenCache.set(sid, now);
-      try { db.touchLastSeen(sid); } catch (_) {}
-    }
-  }
   return sid;
+}
+
+function touchActivePresence(steamId) {
+  if (!steamId) return;
+  const now = Date.now();
+  const last = _lastSeenCache.get(steamId) || 0;
+  if (now - last <= LAST_SEEN_THROTTLE_MS) return;
+  _lastSeenCache.set(steamId, now);
+  try { db.touchLastSeen(steamId); } catch (_) {}
 }
 
 async function handleSteamOpenId(req, res, parsedUrl) {
@@ -1656,108 +1780,6 @@ async function handleSteamOpenId(req, res, parsedUrl) {
 }
 
 async function handleApi(req, res, pathname, query) {
-  // ---- OG image generation (/og/profile/:steamid.png, /og/inventory/:steamid.png) ----
-  // These are called by Telegram/Discord/VK when a user shares a link.
-  // We generate a 1200×630 PNG on the fly (or from cache) with the player's
-  // stats, avatar and brand. Cache is busted after 24h.
-  if (ogCard && pathname.startsWith('/og/') && pathname.endsWith('.png')) {
-    const parts = pathname.slice(4, -4).split('/'); // ['profile', '765...'] or ['inventory', '765...'] or ['post', '8']
-    const kind = parts[0];
-    const id = parts[1];
-    if (!id) { res.writeHead(400); res.end(); return true; }
-
-    try {
-      fs.mkdirSync(OG_CACHE_DIR, { recursive: true });
-    } catch (_) {}
-
-    const cacheKey = `${kind}-${id}.png`;
-    const cachePath = path.join(OG_CACHE_DIR, cacheKey);
-    const maxAge = 86400; // seconds — 24h
-
-    // Serve from cache if fresh
-    try {
-      const st = fs.statSync(cachePath);
-      if (Date.now() - st.mtimeMs < maxAge * 1000) {
-        const buf = fs.readFileSync(cachePath);
-        res.writeHead(200, {
-          'Content-Type': 'image/png',
-          'Content-Length': buf.length,
-          'Cache-Control': `public, max-age=${maxAge}`,
-          'X-Cache': 'HIT'
-        });
-        res.end(buf);
-        return true;
-      }
-    } catch (_) { /* no cache */ }
-
-    let buf = null;
-    try {
-      if (kind === 'profile') {
-        const steamid = id;
-        let profile = db.getUser(steamid);
-        if (!profile) {
-          try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {}
-        }
-        const inv = db.latestInventorySnapshot(steamid, 'RUB');
-        const statsJson = profile?.profile_json ? (() => { try { return JSON.parse(profile.profile_json); } catch (_) { return {}; } })() : {};
-        const kd = statsJson.kd ?? null;
-        const hs = statsJson.hs_percent ?? statsJson.hs ?? null;
-        const hours = statsJson.hours_cs2 ?? statsJson.hours ?? null;
-        buf = await ogCard.renderProfileCard({
-          name: profile?.persona_name || profile?.personaname || 'Игрок CS2',
-          steamId: steamid,
-          avatar: profile?.avatar || profile?.avatarfull || null,
-          vacBanned: profile?.vac_banned || profile?.vacBanned || false,
-          kd, hsPercent: hs, hoursCs2: hours,
-          inventoryValueText: inv?.total_value_text || null
-        });
-      } else if (kind === 'inventory') {
-        const steamid = id;
-        let profile = db.getUser(steamid);
-        if (!profile) { try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {} }
-        const inv = db.latestInventorySnapshot(steamid, 'RUB');
-        buf = await ogCard.renderInventoryCard({
-          name: profile?.persona_name || profile?.personaname || 'Игрок',
-          avatar: profile?.avatar || profile?.avatarfull || null,
-          totalValueText: inv?.total_value_text || null,
-          itemCount: inv?.total_items || 0,
-          currency: 'RUB'
-        });
-      } else if (kind === 'post') {
-        const postId = parseInt(id, 10);
-        const post = isNaN(postId) ? null : db.getPost?.(postId) || null;
-        const pubName = post?.public_name || 'SOKOLENOK';
-        buf = await ogCard.renderPostCard({
-          publicName: pubName,
-          publicAvatar: post?.public_avatar || null,
-          title: post?.title || '',
-          body: post?.body || ''
-        });
-      }
-    } catch (e) {
-      console.warn('[og] render error:', e?.message);
-    }
-
-    if (!buf) {
-      // Return a tiny 1×1 transparent PNG placeholder so Telegram doesn't retry forever
-      const fallback = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': fallback.length });
-      res.end(fallback);
-      return true;
-    }
-
-    // Cache and serve
-    try { fs.writeFileSync(cachePath, buf); } catch (_) {}
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': buf.length,
-      'Cache-Control': `public, max-age=${maxAge}`,
-      'X-Cache': 'MISS'
-    });
-    res.end(buf);
-    return true;
-  }
-
   if (pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: true,
@@ -1766,6 +1788,35 @@ async function handleApi(req, res, pathname, query) {
       has_steam_api_key: Boolean(STEAM_API_KEY),
       storage: db.storageHealth()
     });
+  }
+
+  // First-party conversion analytics. Stores only action names, page and UTM labels.
+  if (pathname === '/api/track' && req.method === 'POST') {
+    const body = await readJsonBody(req).catch(() => ({}));
+    const allowed = new Set(['page_view','lookup_started','lookup_success','inventory_value_shown','steam_login_clicked','profile_shared','watchlist_added','onboarding_complete']);
+    const kind = String(body.kind || '');
+    if (!allowed.has(kind)) return sendJson(res, 400, { ok: false, error: 'unsupported-event' });
+    const cleanText = (v, n = 120) => typeof v === 'string' ? v.slice(0, n) : null;
+    const utmRaw = body.utm && typeof body.utm === 'object' ? body.utm : {};
+    const data = {
+      page: cleanText(body.page, 160),
+      target: cleanText(body.target, 80),
+      referrer: cleanText(body.referrer, 120),
+      utm: {
+        source: cleanText(utmRaw.source, 60), medium: cleanText(utmRaw.medium, 60),
+        campaign: cleanText(utmRaw.campaign, 100), content: cleanText(utmRaw.content, 100), term: cleanText(utmRaw.term, 100)
+      }
+    };
+    db.logEvent(kind, getRequestSteamId(req), data);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/onboarding/complete' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    db.setSettings(me, { onboarding_done: true });
+    db.logEvent('onboarding_complete', me, {});
+    return sendJson(res, 200, { ok: true });
   }
 
   // Public auth config — tells the frontend which login methods are
@@ -1846,7 +1897,7 @@ async function handleApi(req, res, pathname, query) {
     for (const n of rows) {
       let actor = null;
       if (n.actor_steam_id) {
-        try { actor = await fetchProfile(n.actor_steam_id); } catch (_) {}
+        actor = await profileForSiteUser(n.actor_steam_id, { refreshSteam: isSteamId(n.actor_steam_id) }).catch(() => null);
       }
       let data = null;
       if (n.data_json) { try { data = JSON.parse(n.data_json); } catch (_) {} }
@@ -1855,9 +1906,9 @@ async function handleApi(req, res, pathname, query) {
         actor: actor ? {
           steam_id: n.actor_steam_id,
           name: actor.personaname || n.actor_steam_id,
-          avatar: actor.avatar || null,
+          avatar: actor.avatar || actor.avatarfull || null,
           role: db.getUserRole(n.actor_steam_id)
-        } : (n.actor_steam_id ? { steam_id: n.actor_steam_id, name: n.actor_steam_id } : null),
+        } : (n.actor_steam_id ? { steam_id: n.actor_steam_id, name: isTelegramUserId(n.actor_steam_id) ? 'Telegram-пользователь' : n.actor_steam_id } : null),
         created_at: n.created_at,
         read: !!n.read_at
       });
@@ -2055,6 +2106,9 @@ async function handleApi(req, res, pathname, query) {
     if (sub === 'stats' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, stats: db.adminStats() });
     }
+    if (sub === 'analytics' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, report: db.analyticsReport(query.get('days') || 30) });
+    }
     if (sub === 'reports' && req.method === 'GET') {
       const status = query.get('status') || 'open';
       const reports = db.listReports(status);
@@ -2163,6 +2217,13 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, out);
   }
 
+  if (pathname === '/api/presence/ping' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    touchActivePresence(me);
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (pathname === '/api/resolve') {
     const raw = query.get('target') || '';
     const target = extractSteamTarget(raw);
@@ -2176,7 +2237,7 @@ async function handleApi(req, res, pathname, query) {
   // POST /api/presence  { ids: ["7656...", ...] }
   if (pathname === '/api/presence' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    const ids = Array.isArray(body.ids) ? body.ids.filter(x => /^\d{17}$/.test(x)).slice(0, 100) : [];
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isSiteUserId).slice(0, 100) : [];
     const out = {};
     const now = Date.now();
     const FRESH_MS = 3 * 60 * 1000; // 3 min: how stale profile is allowed
@@ -2192,7 +2253,7 @@ async function handleApi(req, res, pathname, query) {
       // Active = seen on the site in the last 2 min
       const lastSeen = db.getLastSeen(id);
       const isActive = lastSeen && (now - Date.parse(lastSeen)) < 2 * 60 * 1000;
-      if (isActive && (now - updatedAtMs) > FRESH_MS) {
+      if (isSteamId(id) && isActive && (now - updatedAtMs) > FRESH_MS) {
         refreshable.push(id);
       }
       out[id] = buildPresence(id, p);
@@ -2206,8 +2267,9 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { ok: true, presence: out });
   }
 
-  if (pathname.match(/^\/api\/profile\/\d{17}\/activity$/)) {
-    const steamid = pathname.split('/')[3];
+  if (pathname.startsWith('/api/profile/') && pathname.endsWith('/activity')) {
+    const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length, -'/activity'.length).split('/')[0] || '').trim();
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const posts = db.listPostsByAuthor(steamid, 30);
     const comments = db.listCommentsByAuthor(steamid, 30);
     const items = [];
@@ -2240,9 +2302,9 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/profile/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/profile/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
-    const profile = await fetchProfile(steamid);
-    db.upsertUser(profile);
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    const profile = await profileForSiteUser(steamid);
+    if (!profile) return sendJson(res, 404, { ok: false, error: 'not-found' });
     const presence = buildPresence(steamid, profile);
     // Attach cover_url from user_settings (per-user banner image, optional)
     const userSettings = db.getSettings(steamid);
@@ -2252,14 +2314,28 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/inventory/history')) {
     const steamid = query.get('steamid') || getRequestSteamId(req);
-    if (!steamid || !/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!steamid || !isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, status: 'steam-required', snapshots: [] });
     const snapshots = db.listInventorySnapshots(steamid, 30);
     return sendJson(res, 200, { ok: true, steamid, snapshots });
   }
 
   if (pathname.startsWith('/api/inventory/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/inventory/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) {
+      const currency = normalizeCurrency(query.get('currency') || 'RUB');
+      return sendJson(res, 200, {
+        ok: false,
+        steamid,
+        status: 'steam-required',
+        error: 'steam-login-required',
+        items: [],
+        total_items: 0,
+        pricing: null,
+        currency: currency.code
+      });
+    }
 
     const sessionSteamId = getRequestSteamId(req);
     const settings = sessionSteamId ? db.getSettings(sessionSteamId) : null;
@@ -2705,7 +2781,7 @@ async function handleApi(req, res, pathname, query) {
         const rows = db.listComments(postId, 200);
         const enriched = [];
         for (const c of rows) {
-          let p = null; try { p = await fetchProfile(c.author_steam_id); } catch (_) {}
+          const p = await profileForSiteUser(c.author_steam_id, { refreshSteam: isSteamId(c.author_steam_id) }).catch(() => null);
           enriched.push({ id: c.id, author_steam_id: c.author_steam_id, body: c.body, created_at: c.created_at,
             author_name: p?.personaname || c.author_steam_id, author_avatar: p?.avatar || null,
             author_role: db.getUserRole(c.author_steam_id) });
@@ -2720,7 +2796,7 @@ async function handleApi(req, res, pathname, query) {
         if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
         if (text.length > 1000) return sendJson(res, 400, { ok: false, error: 'too-long' });
         const c = db.addComment(postId, me, text);
-        let p = null; try { p = await fetchProfile(me); } catch (_) {}
+        const p = await profileForSiteUser(me, { refreshSteam: isSteamId(me) }).catch(() => null);
         db.logEvent('comment', me, { post_id: post.id });
         db.createNotification({ recipient: post.author_steam_id, actor: me, kind: 'post_comment',
           data: { post_id: post.id, public_id: post.public_id, post_title: post.title, snippet: text.slice(0, 80) } });
@@ -2806,7 +2882,7 @@ async function handleApi(req, res, pathname, query) {
     const recs = db.recommendFriends(me, 24);
     const enriched = [];
     for (const r of recs) {
-      let prof = null; try { prof = await fetchProfile(r.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(r.steam_id, { refreshSteam: isSteamId(r.steam_id) }).catch(() => null);
       enriched.push({ steam_id: r.steam_id, mutuals: r.mutuals,
         name: prof?.personaname || r.steam_id, avatar: prof?.avatar || null });
     }
@@ -2815,21 +2891,24 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/stats/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/stats/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required', summary: null, items: [] });
     const s = await fetchCs2Stats(steamid);
     return sendJson(res, 200, { ...s, steamid });
   }
 
   if (pathname.startsWith('/api/playerbans/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/playerbans/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required', data: null });
     const r = await fetchPlayerBans(steamid);
     return sendJson(res, 200, r);
   }
 
   if (pathname.startsWith('/api/leetify/')) {
     const steamid = decodeURIComponent(pathname.slice('/api/leetify/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(steamid)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    if (!isSteamId(steamid)) return sendJson(res, 200, { ok: false, steamid, reason: 'steam-required' });
     const r = await fetchLeetifyProfile(steamid);
     return sendJson(res, 200, r);
   }
@@ -2842,7 +2921,13 @@ async function handleApi(req, res, pathname, query) {
     if (!idPart && !nickname) {
       return sendJson(res, 400, { ok: false, error: 'no-identifier' });
     }
-    const steamid = /^\d{17}$/.test(idPart) ? idPart : null;
+    if (idPart && !isSiteUserId(idPart) && !nickname) {
+      return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
+    }
+    if (isTelegramUserId(idPart) && !nickname) {
+      return sendJson(res, 200, { ok: false, steamid: idPart, reason: 'steam-required' });
+    }
+    const steamid = isSteamId(idPart) ? idPart : null;
     if (!steamid && !nickname) {
       return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
     }
@@ -2868,6 +2953,16 @@ async function handleApi(req, res, pathname, query) {
     if (!name) return sendJson(res, 400, { ok: false, error: 'no-name' });
     const history = db.getPriceHistory(name, currency.code, 'steam', days);
     return sendJson(res, 200, { ok: true, name, currency: currency.code, days, history });
+  }
+
+  if (pathname === '/api/price-movers' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const names = Array.isArray(body.names) ? body.names.map(String).map(s => s.trim()).filter(Boolean) : [];
+    if (!names.length) return sendJson(res, 400, { ok: false, error: 'no-names' });
+    const currency = normalizeCurrency(body.currency || 'RUB');
+    const days = Math.min(90, Math.max(1, Number(body.days || 30)));
+    const movers = db.getPriceMovers(names, currency.code, 'steam', days);
+    return sendJson(res, 200, { ok: true, currency: currency.code, days, movers });
   }
 
   if (pathname === '/api/watchlist') {
@@ -2898,7 +2993,7 @@ async function handleApi(req, res, pathname, query) {
         threshold_above: body.threshold_above != null ? Number(body.threshold_above) : null,
         threshold_below: body.threshold_below != null ? Number(body.threshold_below) : null
       });
-      db.logEvent('watchlist-add', steamid, { market_name: name });
+      db.logEvent('watchlist_added', steamid, { market_name: name });
       return sendJson(res, 200, { ok: true, item: row });
     }
     if (req.method === 'DELETE') {
@@ -2914,7 +3009,7 @@ async function handleApi(req, res, pathname, query) {
 
   if (pathname.startsWith('/api/reputation/')) {
     const target = decodeURIComponent(pathname.slice('/api/reputation/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(target)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(target)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const voter = getRequestSteamId(req);
 
     if (req.method === 'GET') {
@@ -2948,6 +3043,7 @@ async function handleApi(req, res, pathname, query) {
       // Anti-bot weighting: account younger than 30 days has weight 0 (counted but not shown)
       let weight = 1;
       try {
+        if (!isSteamId(voter)) throw new Error('not-steam');
         const prof = await fetchProfile(voter);
         const tc = Number(prof?.timecreated || 0);
         if (tc > 0) {
@@ -2980,13 +3076,30 @@ async function handleApi(req, res, pathname, query) {
   async function enrichSteamList(arr) {
     const out = [];
     for (const e of arr) {
-      let prof = null;
-      try { prof = await fetchProfile(e.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(e.steam_id, { refreshSteam: isSteamId(e.steam_id) }).catch(() => null);
       out.push({ ...e,
         name: prof?.personaname || e.steam_id,
-        avatar: prof?.avatar || prof?.avatarfull || null });
+        avatar: prof?.avatar || prof?.avatarfull || null,
+        source: prof?.source || (isTelegramUserId(e.steam_id) ? 'telegram' : 'steam') });
     }
     return out;
+  }
+
+  if (pathname === '/api/friends/steam' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    if (!isSteamId(me)) return sendJson(res, 200, { ok: false, reason: 'steam-required', friends: [] });
+    const fetched = await fetchSteamFriendIds(me);
+    if (!fetched.ok) return sendJson(res, 200, { ok: false, reason: fetched.reason, friends: [] });
+    const known = [];
+    for (const sid of fetched.ids.slice(0, 500)) {
+      const u = db.getUser(sid);
+      if (!u || sid === me || db.areFriends(me, sid)) continue;
+      known.push({ steam_id: sid });
+      if (known.length >= 30) break;
+    }
+    const friends = await enrichSteamList(known);
+    return sendJson(res, 200, { ok: true, count: friends.length, friends });
   }
 
   if (pathname === '/api/friends') {
@@ -3002,8 +3115,9 @@ async function handleApi(req, res, pathname, query) {
   }
 
   // Public: list of confirmed friends-on-site for any steamid (used on profile pages)
-  if (/^\/api\/friends\/\d{17}\/list$/.test(pathname) && req.method === 'GET') {
-    const target = pathname.slice('/api/friends/'.length, -'/list'.length);
+  if (pathname.startsWith('/api/friends/') && pathname.endsWith('/list') && req.method === 'GET') {
+    const target = decodeURIComponent(pathname.slice('/api/friends/'.length, -'/list'.length).split('/')[0] || '').trim();
+    if (!isSiteUserId(target)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     const lists = db.listFriends(target);
     const friends = await enrichSteamList(lists.friends);
     return sendJson(res, 200, { ok: true, friends, count: friends.length });
@@ -3015,9 +3129,10 @@ async function handleApi(req, res, pathname, query) {
     const parts = pathname.slice('/api/friends/'.length).split('/');
     const other = decodeURIComponent(parts[0] || '').trim();
     const action = parts[1] || '';
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
 
     if (req.method === 'POST' && action === 'request') {
+      if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
       const r = db.sendFriendRequest(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       db.logEvent('friend-request', me, { other });
@@ -3054,7 +3169,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const other = decodeURIComponent(pathname.slice('/api/blocks/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
     if (req.method === 'POST') {
       const r = db.blockUser(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
@@ -3075,8 +3190,7 @@ async function handleApi(req, res, pathname, query) {
     const convos = db.listConversations(me);
     const enriched = [];
     for (const c of convos) {
-      let prof = null;
-      try { prof = await fetchProfile(c.steam_id); } catch (_) {}
+      const prof = await profileForSiteUser(c.steam_id, { refreshSteam: isSteamId(c.steam_id) }).catch(() => null);
       let preview = '';
       if (c.last) {
         if (c.last.deleted_at) {
@@ -3151,7 +3265,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const other = decodeURIComponent(pathname.slice('/api/messages/'.length).split('/')[0] || '').trim();
-    if (!/^\d{17}$/.test(other)) return sendJson(res, 400, { ok: false, error: 'invalid-steamid' });
+    if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
 
     if (req.method === 'GET') {
       const rows = db.listMessages(me, other, 200);
@@ -3161,7 +3275,11 @@ async function handleApi(req, res, pathname, query) {
         let attachment = null;
         if (!isDeleted && m.attachment_enc) {
           try { attachment = JSON.parse(decryptMessage(m.attachment_enc)); } catch (_) {}
-          if (attachment) attachment = await hydrateAttachment(attachment);
+          if (attachment) attachment = await hydrateAttachment(attachment, {
+            sharedBy: m.sender_steam_id,
+            conversation: [me, other],
+            baseUrl: getBaseUrl(req)
+          });
         }
         messages.push({
           id: m.id, from_me: m.sender_steam_id === me,
@@ -3173,11 +3291,12 @@ async function handleApi(req, res, pathname, query) {
           read: !!m.read_at
         });
       }
-      db.markRead(me, other);
-      // Tell the other party their messages were seen — UI can flip the "✓" to "✓✓".
-      wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
-      let prof = null;
-      try { prof = await fetchProfile(other); } catch (_) {}
+      const readResult = db.markRead(me, other);
+      // Tell the other party only when unread messages actually became read.
+      if (readResult.changed > 0) {
+        wsHub.sendTo(other, { type: 'message:read', by: me, ts: Date.now() });
+      }
+      const prof = await profileForSiteUser(other, { refreshSteam: isSteamId(other) }).catch(() => null);
       return sendJson(res, 200, { ok: true, other: {
         steam_id: other, name: prof?.personaname || other,
         avatar: prof?.avatar || prof?.avatarfull || null
@@ -3198,11 +3317,17 @@ async function handleApi(req, res, pathname, query) {
       const attachment = body.attachment && typeof body.attachment === 'object' ? sanitizeAttachment(body.attachment) : null;
       if (!text && !attachment) return sendJson(res, 400, { ok: false, error: 'empty' });
       if (text.length > 2000) return sendJson(res, 400, { ok: false, error: 'too-long' });
+      const attCheck = validateMessageAttachment(attachment, me, other);
+      if (!attCheck.ok) return sendJson(res, 400, { ok: false, error: attCheck.error });
       const enc = encryptMessage(text);
       const attEnc = attachment ? encryptMessage(JSON.stringify(attachment)) : null;
       const saved = db.insertMessage(me, other, enc, attEnc);
       db.logEvent('message-send', me, { to: other, attachment_type: attachment?.type });
-      const hydratedAtt = attachment ? await hydrateAttachment(attachment) : null;
+      const hydratedAtt = attachment ? await hydrateAttachment(attachment, {
+        sharedBy: me,
+        conversation: [me, other],
+        baseUrl: getBaseUrl(req)
+      }) : null;
 
       // Realtime push. Recipient sees the message instantly; sender's other
       // tabs/devices also get it so they stay in sync.
@@ -3229,7 +3354,7 @@ async function handleApi(req, res, pathname, query) {
       pushToUser(other, {
         title: senderName,
         body: preview,
-        url: `/messages?to=${me}`,
+        url: `/messages?to=${encodeURIComponent(me)}`,
         kind: 'message',
         peer: me,
         avatar: senderAvatar
@@ -3281,6 +3406,61 @@ async function handleApi(req, res, pathname, query) {
   }
 
   return sendJson(res, 404, { ok: false, error: 'not-found', path: pathname });
+}
+
+// ---------- dynamic PNG previews for social sharing ----------
+async function serveProfileOgPng(req, res, steamid) {
+  if (!/^\d{17}$/.test(steamid)) return sendText(res, 404, 'Not found');
+  if (!Canvas) {
+    res.writeHead(302, { Location: '/assets/logo-full-dark.png', 'Cache-Control': 'public, max-age=300' });
+    return res.end();
+  }
+  try {
+    const { createCanvas, loadImage } = Canvas;
+    const c = createCanvas(1200, 630);
+    const x = c.getContext('2d');
+    const profile = await fetchProfile(steamid).catch(() => null);
+    const name = String(profile?.personaname || 'Игрок CS2').slice(0, 30);
+    const role = db.getUserRole(steamid);
+    const cached = db.getInventoryCache(steamid, 'RUB');
+    const total = cached?.payload?.total_value_text || null;
+    x.fillStyle = '#080d0d'; x.fillRect(0, 0, 1200, 630);
+    const grad = x.createLinearGradient(0, 0, 1200, 630);
+    grad.addColorStop(0, '#132821'); grad.addColorStop(0.6, '#091110'); grad.addColorStop(1, '#081b17');
+    x.fillStyle = grad; x.fillRect(22, 22, 1156, 586);
+    x.strokeStyle = '#1f5042'; x.lineWidth = 2; x.strokeRect(22, 22, 1156, 586);
+    x.fillStyle = '#4bf2a6'; x.font = 'bold 27px Arial'; x.fillText('SOKOLENOK', 62, 82);
+    x.fillStyle = '#8da79e'; x.font = '22px Arial'; x.fillText('ПРОФИЛЬ ИГРОКА COUNTER-STRIKE 2', 62, 122);
+    x.fillStyle = '#142621'; x.beginPath(); x.roundRect(62, 178, 170, 170, 26); x.fill();
+    if (profile?.avatarfull || profile?.avatar) {
+      try {
+        const imgResp = await fetch(profile.avatarfull || profile.avatar);
+        if (imgResp.ok) { const avatar = await loadImage(Buffer.from(await imgResp.arrayBuffer())); x.drawImage(avatar, 62, 178, 170, 170); }
+      } catch (_) {}
+    }
+    x.fillStyle = '#eef7f4'; x.font = 'bold 54px Arial'; x.fillText(name, 270, 240);
+    x.fillStyle = '#8da79e'; x.font = '24px Arial'; x.fillText(`SteamID: ${steamid}`, 270, 288);
+    if (role?.name) { x.fillStyle = '#4bf2a6'; x.font = 'bold 22px Arial'; x.fillText(`✓ ${String(role.name).slice(0, 25)}`, 270, 332); }
+    const boxes = [
+      ['ИНВЕНТАРЬ', total || 'Открой профиль'],
+      ['ДАННЫЕ', 'Steam • Faceit'],
+      ['ПРОВЕРКА', 'Публичный профиль']
+    ];
+    boxes.forEach((b, i) => {
+      const bx = 62 + i * 360; const by = 430;
+      x.fillStyle = '#0c1715'; x.beginPath(); x.roundRect(bx, by, 330, 105, 18); x.fill();
+      x.fillStyle = '#6f8b82'; x.font = '17px Arial'; x.fillText(b[0], bx + 22, by + 34);
+      x.fillStyle = '#eef7f4'; x.font = 'bold 25px Arial'; x.fillText(String(b[1]).slice(0, 20), bx + 22, by + 72);
+    });
+    x.fillStyle = '#7e968e'; x.font = '18px Arial'; x.fillText('Проверь свой профиль на sokolenok.pro', 62, 575);
+    const png = c.toBuffer('image/png');
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': png.length, 'Cache-Control': 'public, max-age=900' });
+    res.end(png);
+  } catch (e) {
+    console.warn('[og] render failed:', e?.message);
+    res.writeHead(302, { Location: '/assets/logo-full-dark.png', 'Cache-Control': 'public, max-age=120' });
+    res.end();
+  }
 }
 
 // ---------- static ----------
@@ -3352,14 +3532,10 @@ function serveStatic(req, res, pathname) {
           const sid = query.get('steamid');
           const p = await fetchProfile(sid).catch(() => null);
           const name = escapeHtml(p?.personaname || 'Игрок');
+          const avatar = `${base}/og/profile/${sid}.png`;
           const title = `${name} — профиль CS2 на SOKOLENOK`;
           const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-          // Use the generated OG card as the preview image — it shows stats and
-          // branding instead of just a plain Steam avatar.
-          const ogImage = ogCard
-            ? `${base}/og/profile/${sid}.png`
-            : (p?.avatarfull || p?.avatar || defaultImage);
-          og = renderOgTags({ title, desc, image: ogImage, url: `${base}/lookup?steamid=${sid}` });
+          og = renderOgTags({ title, desc, image: avatar, url: `${base}/lookup?steamid=${sid}` });
         } else if (pathname === '/feed' && query.get('public')) {
           const pid = query.get('public');
           const pub = db.getPublic(pid);
@@ -3403,10 +3579,10 @@ function serveStatic(req, res, pathname) {
         const defaultImage = `${base}/assets/logo-full-dark.png`;
         const p = await fetchProfile(sid).catch(() => null);
         const name = escapeHtml(p?.personaname || 'Игрок');
+        const avatar = `${base}/og/profile/${sid}.png`;
         const title = `${name} — профиль CS2 на SOKOLENOK`;
         const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-        const ogImage = ogCard ? `${base}/og/profile/${sid}.png` : (p?.avatarfull || p?.avatar || defaultImage);
-        const og = renderOgTags({ title, desc, image: ogImage, url: `${base}/u/${sid}` });
+        const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
         // Inject a tiny script that rewrites the URL to the canonical ?steamid= form,
         // so existing frontend logic (which reads URLSearchParams) keeps working.
         const rewrite = `<script>try{history.replaceState({},'','/lookup?steamid=${sid}');}catch(_){}</script>`;
@@ -3444,11 +3620,10 @@ function serveStatic(req, res, pathname) {
   if (!file) { sendText(res, 403, 'Forbidden'); return; }
   fs.stat(file, (err, stat) => {
     if (err || !stat.isFile()) {
-      // SPA fallback to index.html for unknown HTML routes
       if (req.headers.accept && req.headers.accept.includes('text/html')) {
-        return fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e, d) => {
+        return fs.readFile(path.join(PUBLIC_DIR, '404.html'), (e, d) => {
           if (e) return sendText(res, 404, 'Not found');
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
           res.end(d);
         });
       }
@@ -3456,9 +3631,19 @@ function serveStatic(req, res, pathname) {
     }
     const ext = path.extname(file).toLowerCase();
     const ctype = MIME[ext] || 'application/octet-stream';
-    const cache = (ext === '.html') ? 'no-store' : 'public, max-age=3600';
-    res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': cache });
-    fs.createReadStream(file).pipe(res);
+    let cache = (ext === '.html') ? 'no-store' : 'public, max-age=3600';
+    if (pathname === '/sw.js') cache = 'no-store, no-cache, must-revalidate';
+    else if (pathname === '/app.js' || pathname === '/styles.css' || pathname === '/manifest.json') cache = 'no-cache, must-revalidate';
+    const headers = { 'Content-Type': ctype, 'Cache-Control': cache };
+    const shouldGzip = stat.size > 1024 && acceptsGzip(req) && isCompressibleStatic(ext);
+    if (shouldGzip) {
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+    }
+    res.writeHead(200, headers);
+    const stream = fs.createReadStream(file);
+    if (shouldGzip) stream.pipe(zlib.createGzip({ level: 6 })).pipe(res);
+    else stream.pipe(res);
   });
 }
 
@@ -3482,7 +3667,10 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
-    if (pathname.startsWith('/og/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
+    if (pathname.startsWith('/og/profile/') && pathname.endsWith('.png')) {
+      const sid = pathname.slice('/og/profile/'.length, -4);
+      return await serveProfileOgPng(req, res, sid);
+    }
     if (pathname.startsWith('/auth/')) {
       const handled = await handleSteamOpenId(req, res, parsedUrl);
       if (handled !== false) return;
@@ -3556,3 +3744,6 @@ server.listen(PORT, () => {
   console.log(`Telegram bot:    ${TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_BOT_USERNAME || 'username NOT SET'})` : 'NOT SET (Telegram login disabled)'}`);
   console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
+
+
+
