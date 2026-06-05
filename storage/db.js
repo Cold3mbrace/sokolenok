@@ -38,6 +38,26 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
+-- auth_methods: maps external auth identities (Steam, Telegram, …) to our
+-- internal user id (stored in users.steam_id). A single user can have many
+-- methods bound — e.g. Steam + Telegram for redundancy / mom-without-Steam.
+-- The "provider" + "external_id" pair is unique: same Telegram can't bind
+-- to two different users.
+CREATE TABLE IF NOT EXISTS auth_methods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  steam_id TEXT NOT NULL,            -- internal user id (FK to users.steam_id)
+  provider TEXT NOT NULL,            -- 'steam' | 'telegram'
+  external_id TEXT NOT NULL,         -- e.g. Steam ID, Telegram user id
+  external_username TEXT,            -- Telegram @username if any
+  external_name TEXT,                -- Display name from provider
+  external_avatar TEXT,              -- Avatar URL from provider
+  verified INTEGER NOT NULL DEFAULT 1, -- 1 if provider verified identity (OpenID, HMAC)
+  created_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_provider_extid ON auth_methods(provider, external_id);
+CREATE INDEX IF NOT EXISTS idx_auth_user ON auth_methods(steam_id);
+
 CREATE TABLE IF NOT EXISTS inventory_snapshots (
   id TEXT PRIMARY KEY,
   steam_id TEXT NOT NULL,
@@ -386,6 +406,30 @@ function openSqlite() {
       db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT');
     }
   } catch (_) { /* best-effort */ }
+  // One-time backfill: every existing Steam user gets a corresponding
+  // auth_methods row, so the new multi-provider login UI works for them
+  // immediately and they can bind Telegram without re-logging-in.
+  try {
+    const existing = db.prepare("SELECT COUNT(*) AS n FROM auth_methods WHERE provider = 'steam'").get();
+    const userCount = db.prepare("SELECT COUNT(*) AS n FROM users WHERE steam_id NOT LIKE 'tg:%'").get();
+    if ((existing?.n || 0) < (userCount?.n || 0)) {
+      const now = new Date().toISOString();
+      db.exec('BEGIN');
+      const stmt = db.prepare(
+        `INSERT OR IGNORE INTO auth_methods (steam_id, provider, external_id, external_name, external_avatar, verified, created_at, last_login_at)
+         VALUES (?, 'steam', ?, ?, ?, 1, ?, ?)`
+      );
+      const users = db.prepare("SELECT steam_id, persona_name, avatar FROM users WHERE steam_id NOT LIKE 'tg:%'").all();
+      for (const u of users) {
+        stmt.run(u.steam_id, u.steam_id, u.persona_name || null, u.avatar || null, now, now);
+      }
+      db.exec('COMMIT');
+      console.log(`[migrate] backfilled auth_methods for ${users.length} existing Steam user(s)`);
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (_) {}
+    console.warn('[migrate] auth_methods backfill failed:', e?.message);
+  }
   return db;
 }
 
@@ -2396,6 +2440,91 @@ function touchPushSubscription(endpoint) {
   }
 }
 
+// ----- auth_methods (external login identities) -----
+// Find which internal user is bound to a given (provider, external_id).
+// Returns the matching auth_methods row or null.
+function findAuthMethod(provider, externalId) {
+  if (!provider || !externalId) return null;
+  if (useSqlite()) {
+    return openSqlite().prepare(
+      'SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?'
+    ).get(String(provider), String(externalId)) || null;
+  }
+  const state = readFallback();
+  return (Object.values(state.auth_methods || {})).find(a =>
+    a.provider === provider && a.external_id === String(externalId)) || null;
+}
+
+// Insert a new auth method, or refresh the cached profile info if it already
+// exists. Returns the row (always present after the call).
+function upsertAuthMethod({ steam_id, provider, external_id, external_username, external_name, external_avatar, verified }) {
+  if (!steam_id || !provider || !external_id) return null;
+  const now = nowIso();
+  if (useSqlite()) {
+    const db = openSqlite();
+    const existing = db.prepare(
+      'SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?'
+    ).get(String(provider), String(external_id));
+    if (existing) {
+      db.prepare(
+        `UPDATE auth_methods SET external_username = ?, external_name = ?, external_avatar = ?, last_login_at = ? WHERE id = ?`
+      ).run(external_username || null, external_name || null, external_avatar || null, now, existing.id);
+      return db.prepare('SELECT * FROM auth_methods WHERE id = ?').get(existing.id);
+    }
+    db.prepare(
+      `INSERT INTO auth_methods (steam_id, provider, external_id, external_username, external_name, external_avatar, verified, created_at, last_login_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(steam_id, String(provider), String(external_id), external_username || null, external_name || null,
+          external_avatar || null, verified ? 1 : 0, now, now);
+    return db.prepare('SELECT * FROM auth_methods WHERE provider = ? AND external_id = ?')
+      .get(String(provider), String(external_id));
+  }
+  const state = readFallback();
+  if (!state.auth_methods) state.auth_methods = {};
+  const key = `${provider}:${external_id}`;
+  const row = state.auth_methods[key] || { id: Object.keys(state.auth_methods).length + 1, created_at: now };
+  Object.assign(row, { steam_id, provider, external_id: String(external_id), external_username, external_name, external_avatar, verified: verified ? 1 : 0, last_login_at: now });
+  state.auth_methods[key] = row;
+  writeFallback(state);
+  return row;
+}
+
+// List all auth methods bound to a user — used in /settings to show "Steam + Telegram".
+function listAuthMethods(steamId) {
+  if (!steamId) return [];
+  if (useSqlite()) {
+    return openSqlite().prepare('SELECT * FROM auth_methods WHERE steam_id = ? ORDER BY created_at').all(steamId);
+  }
+  const state = readFallback();
+  return Object.values(state.auth_methods || {}).filter(a => a.steam_id === steamId);
+}
+
+// Unbind a specific provider from a user (e.g. user removes Telegram).
+// Refuses to remove the last method to avoid orphan accounts.
+function removeAuthMethod(steamId, provider) {
+  if (!steamId || !provider) return false;
+  const all = listAuthMethods(steamId);
+  const remaining = all.filter(a => a.provider !== provider);
+  if (remaining.length === 0) return false; // would lock user out
+  if (useSqlite()) {
+    const r = openSqlite().prepare('DELETE FROM auth_methods WHERE steam_id = ? AND provider = ?')
+      .run(steamId, String(provider));
+    return r.changes > 0;
+  }
+  const state = readFallback();
+  if (!state.auth_methods) return false;
+  let changed = false;
+  for (const key of Object.keys(state.auth_methods)) {
+    const r = state.auth_methods[key];
+    if (r.steam_id === steamId && r.provider === provider) {
+      delete state.auth_methods[key];
+      changed = true;
+    }
+  }
+  if (changed) writeFallback(state);
+  return changed;
+}
+
 module.exports = {
   // common
   nowIso, uuid,
@@ -2403,6 +2532,8 @@ module.exports = {
   upsertUser, getUser, searchUsers, searchPosts, searchPublics, touchLastSeen, getLastSeen,
   // sessions
   createSession, getSession, deleteSession,
+  // auth methods (multi-provider login)
+  findAuthMethod, upsertAuthMethod, listAuthMethods, removeAuthMethod,
   // inventory
   saveInventorySnapshot, listInventorySnapshots, latestInventorySnapshot,
   getInventoryCache, setInventoryCache,

@@ -43,6 +43,30 @@ body {
   background: var(--bg);
   min-height: 100vh;
 }
+/* PWA mode (site added to iPhone home screen). The iOS status bar overlaps
+   our content otherwise, and the notch area looks empty/awkward. We push
+   everything down by the safe-area inset and fill that space with a green
+   SOKOLENOK branding strip — turns a problem into a feature. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  body {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 26px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  body::after {
+    content: 'SOKOLENOK';
+    position: fixed; top: 0; left: 0; right: 0;
+    height: calc(env(safe-area-inset-top, 0px) + 26px);
+    padding-top: env(safe-area-inset-top, 0px);
+    background: var(--g, #4ade80);
+    color: #fff;
+    font-size: 12px; font-weight: 800; letter-spacing: 0.12em;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+    text-align: center;
+    pointer-events: none;
+  }
+}
 body::before {
   content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background:
@@ -2269,14 +2293,15 @@ body[data-page="settings"]      .main { margin-left: auto; margin-right: auto; }
 .msgr-empty-sub { font-size: 13px; max-width: 320px; line-height: 1.5; }
 
 .msgr-thread-h {
-  display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
   border-bottom: 1px solid var(--line); background: var(--card);
+  min-height: 56px;
 }
-.msgr-thread-h .msgr-avatar { width: 40px; height: 40px; font-size: 14px; }
-.msgr-thread-h-info { flex: 1; min-width: 0; }
-.msgr-thread-name { font-size: 15px; font-weight: 700; color: var(--text); text-decoration: none; }
+.msgr-thread-h .msgr-avatar { width: 36px; height: 36px; font-size: 13px; flex-shrink: 0; }
+.msgr-thread-h-info { flex: 1; min-width: 0; line-height: 1.25; }
+.msgr-thread-name { font-size: 15px; font-weight: 600; color: var(--text); text-decoration: none; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msgr-thread-name:hover { color: var(--g); }
-.msgr-thread-actions { display: flex; gap: 6px; }
+.msgr-thread-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
 .msgr-thread-scroll {
   flex: 1; overflow-y: auto; min-height: 0; padding: 18px;
@@ -3167,14 +3192,20 @@ button.nav-link {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
-  /* Account for iOS status bar / notch — push the thread header below it */
+  /* Mobile thread header — the SOKOLENOK banner above handles the iOS notch
+     safe-area now (see body::after in PWA mode), so the header just needs to
+     stick to the top of the messenger column. */
   body.msgr-thread-open .msgr-thread-h {
-    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    padding-top: 10px;
+    padding-bottom: 10px;
     position: sticky; top: 0; z-index: 5;
   }
-  /* Composer respects the bottom safe-area (home indicator on iPhones) */
+  /* Composer respects the bottom safe-area (home indicator on iPhones).
+     Extra padding to ensure the send button isn't pinned right at the
+     home-indicator line where iOS gestures can interfere with taps. */
   body.msgr-thread-open .msgr-composer {
-    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    padding-top: 10px;
   }
 }
 
@@ -3665,4 +3696,169 @@ body.large-font .post-act svg { transform: scale(1.1); }
 @media (max-width: 880px) {
   .dash-profile-link { width: 28px; height: 28px; margin-left: 8px; }
   .dash-profile-link svg { width: 14px; height: 14px; }
+}
+
+/* Telegram login widget mount. Shows an instant placeholder that looks like
+   Telegram's blue button, then telegram.org's script injects an iframe next
+   to it — at which point we hide the placeholder via :has(). */
+.tg-login-mount {
+  margin-top: 12px;
+  min-height: 48px;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+}
+.tg-login-mount iframe { border: 0 !important; }
+.tg-login-placeholder {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #54a9eb; color: #fff;
+  height: 40px; padding: 0 18px;
+  border-radius: 8px;
+  font-size: 14px; font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  letter-spacing: 0.01em;
+  user-select: none; cursor: default;
+  transition: opacity 0.2s ease;
+}
+.tg-login-placeholder-icon { display: inline-flex; }
+/* When the real Telegram iframe lands in the same container, hide the placeholder */
+.tg-login-mount:has(iframe) .tg-login-placeholder { display: none; }
+/* Fallback for very old browsers without :has() — fade after 4s */
+@supports not selector(:has(*)) {
+  .tg-login-mount .tg-login-placeholder {
+    animation: tg-placeholder-fade 4s forwards;
+  }
+  @keyframes tg-placeholder-fade {
+    0%, 90% { opacity: 1; }
+    100% { opacity: 0; pointer-events: none; }
+  }
+}
+
+/* Auth methods block in /settings: list of bound login providers + actions. */
+.auth-methods-list { display: flex; flex-direction: column; gap: 8px; }
+.auth-method-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--card-2, rgba(255,255,255,0.02));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.auth-method-ico {
+  width: 36px; height: 36px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.auth-method-ico.steam { background: rgba(102, 192, 244, 0.12); color: #66c0f4; }
+.auth-method-ico.telegram { background: rgba(84, 169, 235, 0.12); color: #54a9eb; }
+.auth-method-info { flex: 1; min-width: 0; }
+.auth-method-name { font-size: 14px; font-weight: 600; }
+.auth-method-sub { font-weight: 400; color: var(--mute); }
+.auth-method-meta { font-size: 11.5px; color: var(--mute); margin-top: 2px; }
+.auth-method-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.auth-method-adds { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+/* === Landing redesign (v48.5) === */
+/* Tagline under h1 — smaller, accent green */
+.hero-tagline {
+  font-size: 26px; font-weight: 700; letter-spacing: -0.01em;
+  margin: 6px 0 14px; color: var(--text);
+}
+.hero-tagline .green { color: var(--g); }
+.hero-lookup { margin-top: 18px; }
+/* Compact login row — Steam + Telegram side by side */
+.hero-login-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+.steam-btn.compact {
+  height: 40px; padding: 0 16px;
+  font-size: 14px; font-weight: 600;
+  gap: 8px;
+}
+.steam-btn.compact svg.arrow { display: none; }
+.hero-login-row .tg-login-mount { margin: 0; min-height: 40px; }
+.or-divider {
+  margin: 18px 0 10px;
+  font-size: 12px; color: var(--mute);
+  letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 10px;
+}
+.or-divider::before, .or-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+
+/* Live feed preview section — shows guests there's activity */
+.lp-feed-section { padding-top: 12px; }
+.lp-feed-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.lp-feed-head .lp-h2 { margin-top: 4px; }
+.dot.pulse {
+  animation: pulse-green 2s ease-in-out infinite;
+}
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(74, 222, 128, 0); }
+}
+.lp-feed-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.lp-feed-skel {
+  background: var(--card, #14181a); border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 180px;
+  animation: skel-pulse 1.4s ease-in-out infinite;
+}
+@keyframes skel-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.8; }
+}
+.lp-feed-card {
+  display: block; color: inherit; text-decoration: none;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px;
+  transition: transform 0.15s, border-color 0.15s;
+}
+.lp-feed-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--g);
+}
+.lp-feed-card-h { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.lp-feed-pub-avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--card-2, rgba(255,255,255,0.04));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; color: var(--mute);
+  flex-shrink: 0; overflow: hidden;
+}
+.lp-feed-pub-avatar.official {
+  background: rgba(74, 222, 128, 0.15); color: var(--g);
+}
+.lp-feed-pub-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.lp-feed-pub-name { font-size: 13px; font-weight: 600; line-height: 1.2; }
+.lp-feed-pub-date { font-size: 11px; color: var(--mute); margin-top: 2px; }
+.lp-feed-card-title {
+  font-size: 14.5px; font-weight: 700; margin-bottom: 6px;
+  line-height: 1.3;
+}
+.lp-feed-card-img {
+  display: block; width: 100%; max-height: 160px; object-fit: cover;
+  border-radius: 6px; margin: 8px 0;
+}
+.lp-feed-card-body {
+  font-size: 12.5px; line-height: 1.45; color: var(--dim);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lp-feed-card-stats {
+  display: flex; gap: 14px; margin-top: 10px;
+  font-size: 11.5px; color: var(--mute);
+}
+
+@media (max-width: 880px) {
+  .hero-tagline { font-size: 22px; }
+  .lp-feed-head { flex-direction: column; align-items: stretch; }
+  .lp-feed-head .btn { align-self: flex-start; }
 }

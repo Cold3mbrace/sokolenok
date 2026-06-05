@@ -132,6 +132,9 @@ const api = {
   publicStats(id) { return this.request(`/api/publics/${encodeURIComponent(id)}/stats`); },
   deleteMessage(id) { return this.request(`/api/messages/msg/${id}`, { method: 'DELETE' }); },
   reactToMessage(msgId, emoji) { return this.request(`/api/messages/reactions/${msgId}`, { method: 'POST', body: JSON.stringify({ emoji }) }); },
+  authConfig() { return this.request('/api/auth/config'); },
+  authMethods() { return this.request('/api/auth/methods'); },
+  authUnbind(provider) { return this.request('/api/auth/unbind', { method: 'POST', body: JSON.stringify({ provider }) }); },
   likePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'POST' }); },
   unlikePost(id) { return this.request(`/api/posts/${id}/like`, { method: 'DELETE' }); },
   viewPost(id) { return this.request(`/api/posts/${id}/view`, { method: 'POST' }); },
@@ -1274,14 +1277,113 @@ async function pageIndex() {
 
   // Show auth=failed banner if redirected here from failed login
   const params = new URLSearchParams(location.search);
-  if (params.get('auth') === 'failed' || params.get('auth') === 'invalid') {
+  const authErr = params.get('auth');
+  if (authErr) {
+    const msgMap = {
+      'failed': 'Steam не подтвердил OpenID. Попробуй ещё раз.',
+      'invalid': 'Steam отверг подпись. Попробуй ещё раз.',
+      'tg-not-configured': 'Telegram-вход временно недоступен.',
+      'tg-bad-callback': 'Telegram прислал некорректные данные. Попробуй ещё раз.',
+      'tg-bad-signature': 'Не удалось проверить подпись Telegram. Попробуй ещё раз.',
+      'tg-stale': 'Истёк срок действия ссылки от Telegram. Войди заново.'
+    };
+    const msg = msgMap[authErr] || 'Не удалось войти. Попробуй ещё раз.';
     const banner = el('div', { class: 'alert alert-error' },
       el('div', null,
         el('strong', null, 'Вход не удался'),
-        el('div', { class: 'text-sm mt-1' }, 'Steam не подтвердил OpenID. Попробуй ещё раз.')
+        el('div', { class: 'text-sm mt-1' }, msg)
       ));
     const target = $('.hero');
     if (target) target.parentNode.insertBefore(banner, target);
+  }
+
+  // Telegram login button — mounted next to the Steam login on the landing.
+  // The widget is loaded lazily because it pulls a script from telegram.org;
+  // we don't want to slow down the page when the user has no intent to log in.
+  mountTelegramLoginButton();
+
+  // Live feed preview — shows guests there's actually activity in the community.
+  // Loads top 6 recent items from /api/feed?scope=all (works without auth).
+  // If feed is empty (fresh install / network issue), the section hides itself.
+  mountRecentFeedPreview();
+}
+
+async function mountRecentFeedPreview() {
+  const root = document.getElementById('recent-feed-list');
+  const section = document.getElementById('recent-feed');
+  if (!root || !section) return;
+  try {
+    const r = await fetch('/api/feed?scope=all').then(r => r.json());
+    const items = (r?.items || []).filter(i => i.kind === 'post').slice(0, 6);
+    if (!items.length) {
+      section.style.display = 'none';
+      return;
+    }
+    root.innerHTML = '';
+    for (const it of items) {
+      const card = el('a', { class: 'lp-feed-card', href: '/feed' });
+      // Header: public name + date
+      card.appendChild(el('div', { class: 'lp-feed-card-h' },
+        el('div', { class: 'lp-feed-pub-avatar' + (it.public_id === 'official' ? ' official' : '') },
+          it.public_avatar
+            ? el('img', { src: it.public_avatar, alt: '' })
+            : (it.public_name || '?').slice(0, 1).toUpperCase()
+        ),
+        el('div', { class: 'lp-feed-pub-meta' },
+          el('div', { class: 'lp-feed-pub-name' }, it.public_name || ''),
+          el('div', { class: 'lp-feed-pub-date' }, it.created_at ? relDate(it.created_at) : '')
+        )
+      ));
+      if (it.title) card.appendChild(el('div', { class: 'lp-feed-card-title' }, it.title));
+      if (it.image) card.appendChild(el('img', { class: 'lp-feed-card-img', src: it.image, alt: '', loading: 'lazy' }));
+      if (it.body) {
+        const txt = String(it.body).replace(/<[^>]+>/g, '').slice(0, 180);
+        card.appendChild(el('div', { class: 'lp-feed-card-body' }, txt + (it.body.length > 180 ? '…' : '')));
+      }
+      const stats = el('div', { class: 'lp-feed-card-stats' });
+      if (it.likes != null) stats.appendChild(el('span', null, `❤ ${it.likes}`));
+      if (it.comments != null) stats.appendChild(el('span', null, `💬 ${it.comments}`));
+      if (stats.children.length) card.appendChild(stats);
+      root.appendChild(card);
+    }
+  } catch (_) {
+    section.style.display = 'none';
+  }
+}
+
+// Inserts the Telegram Login Widget into a container with id #tg-login-mount
+// on the landing page. The widget renders Telegram's own blue button; on
+// success it redirects to /auth/telegram/callback?... with the signed payload.
+async function mountTelegramLoginButton() {
+  const mount = document.getElementById('tg-login-mount');
+  if (!mount) return;
+  // Show a placeholder button immediately so the user sees "Войти через Telegram"
+  // before telegram.org's widget script loads (usually 0.5-1.5s). When the real
+  // widget renders its iframe, the placeholder is hidden by CSS (it has a sibling).
+  mount.appendChild(el('div', { class: 'tg-login-placeholder' },
+    el('span', {
+      class: 'tg-login-placeholder-icon',
+      html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>'
+    }),
+    el('span', null, 'Войти через Telegram')
+  ));
+  try {
+    const cfg = await fetch('/api/auth/config').then(r => r.json()).catch(() => null);
+    if (!cfg?.ok || !cfg.telegram || !cfg.telegram_bot) {
+      mount.remove();
+      return;
+    }
+    const s = document.createElement('script');
+    s.async = true;
+    s.src = 'https://telegram.org/js/telegram-widget.js?22';
+    s.setAttribute('data-telegram-login', cfg.telegram_bot);
+    s.setAttribute('data-size', 'large');
+    s.setAttribute('data-radius', '8');
+    s.setAttribute('data-auth-url', `${location.origin}/auth/telegram/callback`);
+    s.setAttribute('data-request-access', 'write');
+    mount.appendChild(s);
+  } catch (_) {
+    mount.remove();
   }
 }
 
@@ -5003,7 +5105,14 @@ function buildPostFooter(item, me) {
     preview.style.display = '';
   };
   // Defer load to avoid spamming /api/posts/N/comments for every post at once
-  requestIdleCallback ? requestIdleCallback(loadPreview, { timeout: 1500 }) : setTimeout(loadPreview, 300);
+  // Defer load to avoid spamming /api/posts/N/comments for every post at once.
+  // Safari iOS doesn't have requestIdleCallback — accessing it as a bare name
+  // throws ReferenceError, so we must check via window.
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(loadPreview, { timeout: 1500 });
+  } else {
+    setTimeout(loadPreview, 300);
+  }
 
   commentBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -6504,6 +6613,14 @@ async function pageMessages() {
           if (r.ok) renderMessages(r.messages || []);
         }).catch(() => {});
       }
+    } else if (m.type === 'message:reaction') {
+      // Reaction toggled by other party — update just that one bubble's
+      // chips in place. No full thread re-render: avoids scroll jitter
+      // and keeps reactions snappy.
+      if (m.msg_id != null) {
+        const row = document.querySelector(`.msgr-bubble-row[data-mid="${m.msg_id}"]`);
+        if (row) window.__updateBubbleReactions?.(row, m.reactions || {});
+      }
     } else if (m.type === 'message:new') {
       // Inbox refresh — left rail conversation list shows latest message preview
       renderLeft().catch(() => {});
@@ -7363,6 +7480,96 @@ async function pageMe() {
 }
 
 // ============ page: settings ============
+async function renderAuthMethodsBlock(root, me) {
+  const card = el('div', { class: 'card', style: { marginTop: '16px' } });
+  card.appendChild(el('div', { class: 'card-eyebrow' }, 'Способы входа'));
+  card.appendChild(el('div', { style: { fontSize: '12px', color: 'var(--mute)', marginBottom: '14px' } },
+    'Привяжите несколько способов чтобы иметь запасной вариант входа. Steam также включает CS2-статистику и инвентарь.'));
+
+  // Placeholder while loading
+  const list = el('div', { class: 'auth-methods-list' }, el('div', { style: { color: 'var(--mute)', fontSize: '12.5px' } }, 'Загрузка…'));
+  card.appendChild(list);
+  root.appendChild(card);
+
+  const [methods, cfg] = await Promise.all([
+    api.authMethods().catch(() => ({ ok: false, methods: [] })),
+    api.authConfig().catch(() => ({ ok: false }))
+  ]);
+  list.innerHTML = '';
+  const bound = new Set((methods.methods || []).map(m => m.provider));
+  const canRemove = bound.size > 1; // need at least 1 method to keep account accessible
+
+  // Render each bound method as a row
+  for (const m of (methods.methods || [])) {
+    const row = el('div', { class: 'auth-method-row' });
+    const ico = el('div', { class: 'auth-method-ico ' + m.provider });
+    if (m.provider === 'steam') {
+      ico.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Z"/></svg>';
+    } else if (m.provider === 'telegram') {
+      ico.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>';
+    }
+    const info = el('div', { class: 'auth-method-info' },
+      el('div', { class: 'auth-method-name' },
+        m.provider === 'steam' ? 'Steam' : 'Telegram',
+        m.external_name ? el('span', { class: 'auth-method-sub' }, ' · ' + m.external_name) : null,
+        m.external_username ? el('span', { class: 'auth-method-sub' }, ' @' + m.external_username) : null
+      ),
+      el('div', { class: 'auth-method-meta' },
+        'Привязан ' + (m.created_at ? new Date(m.created_at).toLocaleDateString('ru-RU') : '—')
+      )
+    );
+    const actions = el('div', { class: 'auth-method-actions' });
+    if (canRemove) {
+      actions.appendChild(el('button', { class: 'btn btn-ghost btn-sm', type: 'button',
+        onclick: async () => {
+          if (!confirm(`Отвязать ${m.provider === 'steam' ? 'Steam' : 'Telegram'} от аккаунта?`)) return;
+          const r = await api.authUnbind(m.provider).catch(() => ({ ok: false }));
+          if (r.ok) { toast.ok('Отвязано'); renderAuthMethodsBlock(root, me); card.remove(); }
+          else if (r.error === 'last-method') toast.err('Это единственный способ входа — нельзя отвязать');
+          else toast.err('Не удалось отвязать');
+        }
+      }, 'Отвязать'));
+    } else {
+      actions.appendChild(el('span', { class: 'auth-method-meta', style: { fontSize: '11px' } }, 'Единственный'));
+    }
+    row.appendChild(ico);
+    row.appendChild(info);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+
+  // "Add" buttons for unbound providers
+  const adds = el('div', { class: 'auth-method-adds' });
+  if (!bound.has('steam')) {
+    adds.appendChild(el('a', { class: 'btn btn-primary', href: '/auth/steam',
+      style: { marginRight: '8px' }
+    },
+      el('span', { html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:6px"><path d="M12 0a12 12 0 0 0-11.93 11.06l6.43 2.66a3.4 3.4 0 0 1 1.92-.6h.17l2.85-4.13v-.06a4.55 4.55 0 1 1 4.55 4.55h-.1l-4.07 2.9v.13a3.41 3.41 0 0 1-6.79.5L.16 14.7A12 12 0 1 0 12 0Z"/></svg>' }),
+      'Привязать Steam'
+    ));
+  }
+  if (!bound.has('telegram') && cfg.telegram && cfg.telegram_bot) {
+    // Telegram widget for binding. Mounts a real Telegram button — clicking
+    // sends the signed payload to /auth/telegram/callback, which detects the
+    // existing session and binds instead of creating a new user.
+    const tgMount = el('div', { id: 'tg-bind-mount', style: { display: 'inline-block', verticalAlign: 'middle', marginLeft: bound.has('steam') ? '0' : '8px' } });
+    adds.appendChild(tgMount);
+    // Inject the widget script
+    const s = document.createElement('script');
+    s.async = true;
+    s.src = 'https://telegram.org/js/telegram-widget.js?22';
+    s.setAttribute('data-telegram-login', cfg.telegram_bot);
+    s.setAttribute('data-size', 'medium');
+    s.setAttribute('data-radius', '6');
+    s.setAttribute('data-auth-url', `${location.origin}/auth/telegram/callback`);
+    s.setAttribute('data-request-access', 'write');
+    tgMount.appendChild(s);
+  }
+  if (adds.children.length) {
+    list.appendChild(el('div', { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--line)' } }, adds));
+  }
+}
+
 async function pageSettings() {
   const me = await renderTopbar('settings');
   const root = $('#settings-root');
@@ -7413,6 +7620,26 @@ async function pageSettings() {
   }
   acc.appendChild(accRow);
   root.appendChild(acc);
+
+  // ---- Auth methods block: Steam / Telegram bindings ----
+  // Surface which login providers are bound to this account and let the user
+  // attach more or remove existing ones. The user needs at least one to keep
+  // their account accessible — the server enforces this on /api/auth/unbind.
+  renderAuthMethodsBlock(root, me).catch(e => console.warn('[auth-methods]', e));
+
+  // Show one-time banners for binding success/failures returned by callback redirects.
+  const authParams = new URLSearchParams(location.search);
+  const authMsg = {
+    'steam-bound': { kind: 'ok', text: 'Steam-аккаунт привязан' },
+    'tg-bound': { kind: 'ok', text: 'Telegram привязан' },
+    'steam-already-bound': { kind: 'err', text: 'Этот Steam уже привязан к другому пользователю' },
+    'tg-already-bound': { kind: 'err', text: 'Этот Telegram уже привязан к другому пользователю' }
+  }[authParams.get('auth')];
+  if (authMsg) {
+    if (authMsg.kind === 'ok') toast.ok(authMsg.text); else toast.err(authMsg.text);
+    // Clean the query string so refresh doesn't repeat the toast
+    history.replaceState({}, '', location.pathname);
+  }
 
   // ---- Preferences block ----
   const prefs = el('div', { class: 'card', style: { marginTop: '16px' } });

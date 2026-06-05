@@ -142,6 +142,11 @@ try { WebSocketServer = require('ws').WebSocketServer; } catch (_) {
 
 // Web Push (no npm deps, self-contained crypto)
 const webPush = require('./lib/web-push');
+// OG card generator (profile/inventory/post preview images for social sharing)
+let ogCard = null;
+try { ogCard = require('./lib/og-card'); } catch (_) {
+  console.warn('[og] @napi-rs/canvas not available — OG image endpoints disabled');
+}
 
 // VAPID keys: prefer env vars, otherwise auto-generate on first boot and
 // persist them in DATA_DIR/vapid.json so the same keys survive restarts.
@@ -178,15 +183,18 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v47.0.0';
+const APP_VERSION = 'v48.6.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.SOKOLENOK_DATA_DIR ? path.resolve(process.env.SOKOLENOK_DATA_DIR) : path.join(ROOT, '.data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const OG_CACHE_DIR = path.join(DATA_DIR, 'og-cache');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB per image
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY || '';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || ''; // e.g. "sokolenok_login_bot" — used by frontend widget
 // Mark session cookie Secure over HTTPS. Explicit COOKIE_SECURE=1/0 wins; otherwise
 // inferred from an https:// BASE_URL.
 const COOKIE_SECURE = process.env.COOKIE_SECURE != null
@@ -1500,10 +1508,141 @@ async function handleSteamOpenId(req, res, parsedUrl) {
     } catch (_) { /* fail open */ }
 
     const profile = await fetchProfile(steamid);
+
+    // BINDING MODE: if the user is already logged in (e.g. as a Telegram-only
+    // user) and now passes Steam OpenID — they're attaching Steam to their
+    // existing account, not creating a new one. Refuse if this SteamID is
+    // already bound to a DIFFERENT user (would silently steal someone's stats).
+    const currentUserId = getRequestSteamId(req);
+    if (currentUserId && currentUserId !== steamid) {
+      const existing = db.findAuthMethod('steam', steamid);
+      if (existing && existing.steam_id !== currentUserId) {
+        return redirect(res, '/settings?auth=steam-already-bound');
+      }
+      // Bind Steam to the existing account
+      db.upsertAuthMethod({
+        steam_id: currentUserId, provider: 'steam', external_id: steamid,
+        external_name: profile.personaname || null,
+        external_avatar: profile.avatar || profile.avatarfull || null,
+        verified: true
+      });
+      // Cache the Steam profile under the user's existing internal ID so that
+      // /lookup and dashboard show Steam stats. We DON'T rename the user row
+      // (their persona stays the Telegram-derived one unless they choose to
+      // sync). Instead we cache the Steam profile in a side table.
+      // Simplest: upsert under the SteamID too so fetchProfile works.
+      db.upsertUser(profile);
+      db.logEvent('bind-steam', currentUserId, { steamid });
+      return redirect(res, '/settings?auth=steam-bound');
+    }
+
     db.upsertUser(profile);
+    // Record the Steam login as an auth method too, so this user can later
+    // bind extra providers (Telegram) and we have a uniform view of identities.
+    db.upsertAuthMethod({
+      steam_id: steamid,
+      provider: 'steam',
+      external_id: steamid,
+      external_name: profile.personaname || null,
+      external_avatar: profile.avatar || profile.avatarfull || null,
+      verified: true
+    });
     const { token } = db.createSession(steamid);
     setSessionCookie(res, token);
-    db.logEvent('login', steamid, { source: profile.source });
+    db.logEvent('login', steamid, { source: profile.source, provider: 'steam' });
+    return redirect(res, '/dashboard');
+  }
+  if (parsedUrl.pathname === '/auth/telegram/callback') {
+    // Telegram Login Widget posts hash + user fields here via GET. We must
+    // verify the HMAC-SHA256 signature against our bot token — without this
+    // anyone could forge a Telegram identity by faking query params.
+    // https://core.telegram.org/widgets/login#checking-authorization
+    if (!TELEGRAM_BOT_TOKEN) {
+      return redirect(res, '/?auth=tg-not-configured');
+    }
+    const q = parsedUrl.searchParams;
+    const got = {};
+    for (const [k, v] of q) got[k] = v;
+    const hash = got.hash;
+    delete got.hash;
+    if (!hash || !got.id) return redirect(res, '/?auth=tg-bad-callback');
+
+    // Build data-check-string: keys alphabetically sorted, joined as "k=v\n…"
+    const dataCheckString = Object.keys(got).sort().map(k => `${k}=${got[k]}`).join('\n');
+    const secretKey = crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
+    const expectedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    if (expectedHash !== hash) {
+      return redirect(res, '/?auth=tg-bad-signature');
+    }
+    // Reject stale auth_date (> 1 day): the Telegram widget result is
+    // single-use, no replays of week-old signed bundles.
+    const authDate = parseInt(got.auth_date || '0', 10);
+    if (!Number.isFinite(authDate) || (Date.now() / 1000 - authDate) > 86400) {
+      return redirect(res, '/?auth=tg-stale');
+    }
+
+    const tgId = String(got.id);
+    const tgUsername = got.username || null;
+    const tgFirstName = got.first_name || null;
+    const tgLastName = got.last_name || null;
+    const tgPhoto = got.photo_url || null;
+    const displayName = [tgFirstName, tgLastName].filter(Boolean).join(' ') || tgUsername || `tg:${tgId}`;
+
+    // BINDING MODE: if the user is already logged in, this Telegram identity
+    // is being attached to their existing account (not creating a new one).
+    const currentUserId = getRequestSteamId(req);
+    if (currentUserId) {
+      const existing = db.findAuthMethod('telegram', tgId);
+      if (existing && existing.steam_id !== currentUserId) {
+        return redirect(res, '/settings?auth=tg-already-bound');
+      }
+      db.upsertAuthMethod({
+        steam_id: currentUserId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+      db.logEvent('bind-telegram', currentUserId, { tg_id: tgId, tg_username: tgUsername });
+      return redirect(res, '/settings?auth=tg-bound');
+    }
+
+    // Is this Telegram already bound to a user?
+    let userId;
+    const existing = db.findAuthMethod('telegram', tgId);
+    if (existing) {
+      // Returning user — log them in to their existing account
+      userId = existing.steam_id;
+      db.upsertAuthMethod({
+        steam_id: userId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+    } else {
+      // Brand new — create a synthetic user record. Note we still write into
+      // the `users` table because every other table (posts, friends, …)
+      // references users.steam_id; using a "tg:<id>" prefix lets us tell
+      // synthetic IDs from real SteamIDs cleanly.
+      userId = `tg:${tgId}`;
+      const now = db.nowIso();
+      const syntheticProfile = {
+        steam_id: userId,
+        personaname: displayName,
+        avatar: tgPhoto,
+        avatarfull: tgPhoto,
+        steam_url: null,
+        visibility: 'public',
+        source: 'telegram'
+      };
+      db.upsertUser(syntheticProfile);
+      db.upsertAuthMethod({
+        steam_id: userId, provider: 'telegram', external_id: tgId,
+        external_username: tgUsername, external_name: displayName, external_avatar: tgPhoto,
+        verified: true
+      });
+      db.logEvent('register', userId, { provider: 'telegram', tg_username: tgUsername });
+    }
+    const { token } = db.createSession(userId);
+    setSessionCookie(res, token);
+    db.logEvent('login', userId, { provider: 'telegram' });
     return redirect(res, '/dashboard');
   }
   if (parsedUrl.pathname === '/auth/logout') {
@@ -1517,6 +1656,108 @@ async function handleSteamOpenId(req, res, parsedUrl) {
 }
 
 async function handleApi(req, res, pathname, query) {
+  // ---- OG image generation (/og/profile/:steamid.png, /og/inventory/:steamid.png) ----
+  // These are called by Telegram/Discord/VK when a user shares a link.
+  // We generate a 1200×630 PNG on the fly (or from cache) with the player's
+  // stats, avatar and brand. Cache is busted after 24h.
+  if (ogCard && pathname.startsWith('/og/') && pathname.endsWith('.png')) {
+    const parts = pathname.slice(4, -4).split('/'); // ['profile', '765...'] or ['inventory', '765...'] or ['post', '8']
+    const kind = parts[0];
+    const id = parts[1];
+    if (!id) { res.writeHead(400); res.end(); return true; }
+
+    try {
+      fs.mkdirSync(OG_CACHE_DIR, { recursive: true });
+    } catch (_) {}
+
+    const cacheKey = `${kind}-${id}.png`;
+    const cachePath = path.join(OG_CACHE_DIR, cacheKey);
+    const maxAge = 86400; // seconds — 24h
+
+    // Serve from cache if fresh
+    try {
+      const st = fs.statSync(cachePath);
+      if (Date.now() - st.mtimeMs < maxAge * 1000) {
+        const buf = fs.readFileSync(cachePath);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': buf.length,
+          'Cache-Control': `public, max-age=${maxAge}`,
+          'X-Cache': 'HIT'
+        });
+        res.end(buf);
+        return true;
+      }
+    } catch (_) { /* no cache */ }
+
+    let buf = null;
+    try {
+      if (kind === 'profile') {
+        const steamid = id;
+        let profile = db.getUser(steamid);
+        if (!profile) {
+          try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {}
+        }
+        const inv = db.latestInventorySnapshot(steamid, 'RUB');
+        const statsJson = profile?.profile_json ? (() => { try { return JSON.parse(profile.profile_json); } catch (_) { return {}; } })() : {};
+        const kd = statsJson.kd ?? null;
+        const hs = statsJson.hs_percent ?? statsJson.hs ?? null;
+        const hours = statsJson.hours_cs2 ?? statsJson.hours ?? null;
+        buf = await ogCard.renderProfileCard({
+          name: profile?.persona_name || profile?.personaname || 'Игрок CS2',
+          steamId: steamid,
+          avatar: profile?.avatar || profile?.avatarfull || null,
+          vacBanned: profile?.vac_banned || profile?.vacBanned || false,
+          kd, hsPercent: hs, hoursCs2: hours,
+          inventoryValueText: inv?.total_value_text || null
+        });
+      } else if (kind === 'inventory') {
+        const steamid = id;
+        let profile = db.getUser(steamid);
+        if (!profile) { try { profile = await fetchProfile(steamid); db.upsertUser(profile); } catch (_) {} }
+        const inv = db.latestInventorySnapshot(steamid, 'RUB');
+        buf = await ogCard.renderInventoryCard({
+          name: profile?.persona_name || profile?.personaname || 'Игрок',
+          avatar: profile?.avatar || profile?.avatarfull || null,
+          totalValueText: inv?.total_value_text || null,
+          itemCount: inv?.total_items || 0,
+          currency: 'RUB'
+        });
+      } else if (kind === 'post') {
+        const postId = parseInt(id, 10);
+        const post = isNaN(postId) ? null : db.getPost?.(postId) || null;
+        const pubName = post?.public_name || 'SOKOLENOK';
+        buf = await ogCard.renderPostCard({
+          publicName: pubName,
+          publicAvatar: post?.public_avatar || null,
+          title: post?.title || '',
+          body: post?.body || ''
+        });
+      }
+    } catch (e) {
+      console.warn('[og] render error:', e?.message);
+    }
+
+    if (!buf) {
+      // Return a tiny 1×1 transparent PNG placeholder so Telegram doesn't retry forever
+      const fallback = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': fallback.length });
+      res.end(fallback);
+      return true;
+    }
+
+    // Cache and serve
+    try { fs.writeFileSync(cachePath, buf); } catch (_) {}
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': buf.length,
+      'Cache-Control': `public, max-age=${maxAge}`,
+      'X-Cache': 'MISS'
+    });
+    res.end(buf);
+    return true;
+  }
+
   if (pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: true,
@@ -1525,6 +1766,48 @@ async function handleApi(req, res, pathname, query) {
       has_steam_api_key: Boolean(STEAM_API_KEY),
       storage: db.storageHealth()
     });
+  }
+
+  // Public auth config — tells the frontend which login methods are
+  // available and what params they need (e.g. Telegram bot username for the widget).
+  if (pathname === '/api/auth/config') {
+    return sendJson(res, 200, {
+      ok: true,
+      steam: true,
+      telegram: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME),
+      telegram_bot: TELEGRAM_BOT_USERNAME || null
+    });
+  }
+
+  // List auth methods bound to the current user (for /settings UI).
+  if (pathname === '/api/auth/methods' && req.method === 'GET') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const rows = db.listAuthMethods(me).map(r => ({
+      provider: r.provider,
+      external_id: r.external_id,
+      external_username: r.external_username,
+      external_name: r.external_name,
+      external_avatar: r.external_avatar,
+      created_at: r.created_at
+    }));
+    return sendJson(res, 200, { ok: true, methods: rows });
+  }
+
+  // Unbind a provider (Telegram or Steam). Refuses if it's the last method —
+  // would orphan the account.
+  if (pathname === '/api/auth/unbind' && req.method === 'POST') {
+    const me = getRequestSteamId(req);
+    if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
+    const body = await readJsonBody(req);
+    const provider = String(body?.provider || '');
+    if (provider !== 'steam' && provider !== 'telegram') {
+      return sendJson(res, 400, { ok: false, error: 'bad-provider' });
+    }
+    const ok = db.removeAuthMethod(me, provider);
+    if (!ok) return sendJson(res, 400, { ok: false, error: 'last-method' });
+    db.logEvent('unbind', me, { provider });
+    return sendJson(res, 200, { ok: true });
   }
 
   // ---------- file upload (images) ----------
@@ -2190,7 +2473,7 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     const mySubs = new Set(db.listSubscriptions(me));
-    const friends = db.listFriends(me).map(f => f.steam_id);
+    const friends = (db.listFriends(me).friends || []).map(f => f.steam_id);
     // Tally: { public_id: friend_count }
     const tally = new Map();
     for (const fid of friends) {
@@ -2856,6 +3139,11 @@ async function handleApi(req, res, pathname, query) {
     const emoji = String(body.emoji || '');
     if (!allowed.includes(emoji)) return sendJson(res, 400, { ok: false, error: 'bad-emoji' });
     const r = db.toggleMessageReaction(msgId, me, emoji);
+    // Real-time push: tell the other party (and my other tabs/devices) so
+    // their UI updates the reaction chips without needing a page reload.
+    const otherSteamId = m.sender_steam_id === me ? m.recipient_steam_id : m.sender_steam_id;
+    wsHub.sendTo(otherSteamId, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });
+    wsHub.sendTo(me, { type: 'message:reaction', msg_id: msgId, reactions: r.reactions });
     return sendJson(res, 200, { ok: true, reactions: r.reactions });
   }
 
@@ -3064,10 +3352,14 @@ function serveStatic(req, res, pathname) {
           const sid = query.get('steamid');
           const p = await fetchProfile(sid).catch(() => null);
           const name = escapeHtml(p?.personaname || 'Игрок');
-          const avatar = p?.avatarfull || p?.avatar || defaultImage;
           const title = `${name} — профиль CS2 на SOKOLENOK`;
           const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-          og = renderOgTags({ title, desc, image: avatar, url: `${base}/lookup?steamid=${sid}` });
+          // Use the generated OG card as the preview image — it shows stats and
+          // branding instead of just a plain Steam avatar.
+          const ogImage = ogCard
+            ? `${base}/og/profile/${sid}.png`
+            : (p?.avatarfull || p?.avatar || defaultImage);
+          og = renderOgTags({ title, desc, image: ogImage, url: `${base}/lookup?steamid=${sid}` });
         } else if (pathname === '/feed' && query.get('public')) {
           const pid = query.get('public');
           const pub = db.getPublic(pid);
@@ -3111,10 +3403,10 @@ function serveStatic(req, res, pathname) {
         const defaultImage = `${base}/assets/logo-full-dark.png`;
         const p = await fetchProfile(sid).catch(() => null);
         const name = escapeHtml(p?.personaname || 'Игрок');
-        const avatar = p?.avatarfull || p?.avatar || defaultImage;
         const title = `${name} — профиль CS2 на SOKOLENOK`;
         const desc = `Проверьте статистику, репутацию и инвентарь игрока ${p?.personaname || ''} на SOKOLENOK.`.trim();
-        const og = renderOgTags({ title, desc, image: avatar, url: `${base}/u/${sid}` });
+        const ogImage = ogCard ? `${base}/og/profile/${sid}.png` : (p?.avatarfull || p?.avatar || defaultImage);
+        const og = renderOgTags({ title, desc, image: ogImage, url: `${base}/u/${sid}` });
         // Inject a tiny script that rewrites the URL to the canonical ?steamid= form,
         // so existing frontend logic (which reads URLSearchParams) keeps working.
         const rewrite = `<script>try{history.replaceState({},'','/lookup?steamid=${sid}');}catch(_){}</script>`;
@@ -3190,6 +3482,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
+    if (pathname.startsWith('/og/')) return await handleApi(req, res, pathname, parsedUrl.searchParams);
     if (pathname.startsWith('/auth/')) {
       const handled = await handleSteamOpenId(req, res, parsedUrl);
       if (handled !== false) return;
@@ -3260,5 +3553,6 @@ server.listen(PORT, () => {
   console.log(`Storage backend: ${db.storageHealth().backend}`);
   console.log(`Steam API key:   ${STEAM_API_KEY ? 'configured' : 'NOT SET (XML fallback only, public endpoints will still work)'}`);
   console.log(`Faceit API key:  ${FACEIT_API_KEY ? 'configured' : 'NOT SET (Faceit endpoints will return ok:false)'}`);
+  console.log(`Telegram bot:    ${TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_BOT_USERNAME || 'username NOT SET'})` : 'NOT SET (Telegram login disabled)'}`);
   console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
