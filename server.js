@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.5.0';
+const APP_VERSION = 'v50.6.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -438,9 +438,33 @@ function sanitizeAttachment(att) {
   return null;
 }
 
+function messageIncludesUser(message, userId) {
+  return !!message && (message.sender_steam_id === userId || message.recipient_steam_id === userId);
+}
+
+function messageIsInConversation(message, a, b) {
+  if (!message) return false;
+  return (message.sender_steam_id === a && message.recipient_steam_id === b)
+    || (message.sender_steam_id === b && message.recipient_steam_id === a);
+}
+
+function validateMessageAttachment(att, sender, recipient) {
+  if (!att || att.type === 'post') return { ok: true };
+  if (att.type !== 'reply' && att.type !== 'forward') return { ok: false, error: 'bad-attachment' };
+  const original = db.getMessage(att.message_id);
+  if (!original || original.deleted_at) return { ok: false, error: 'bad-attachment' };
+  if (att.type === 'reply' && !messageIsInConversation(original, sender, recipient)) {
+    return { ok: false, error: 'bad-attachment' };
+  }
+  if (att.type === 'forward' && !messageIncludesUser(original, sender)) {
+    return { ok: false, error: 'bad-attachment' };
+  }
+  return { ok: true };
+}
+
 // Enrich attachment with display data fetched fresh from the DB.
 // We store only IDs in the encrypted blob; the rest is hydrated on read.
-async function hydrateAttachment(att) {
+async function hydrateAttachment(att, context = {}) {
   if (!att) return null;
   if (att.type === 'post') {
     try {
@@ -459,6 +483,13 @@ async function hydrateAttachment(att) {
     try {
       const m = db.getMessage(att.message_id);
       if (!m) return { type: att.type, missing: true };
+      if (m.deleted_at) return { type: att.type, missing: true };
+      if (att.type === 'reply' && context.conversation && !messageIsInConversation(m, context.conversation[0], context.conversation[1])) {
+        return { type: att.type, missing: true };
+      }
+      if (att.type === 'forward' && context.sharedBy && !messageIncludesUser(m, context.sharedBy)) {
+        return { type: att.type, missing: true };
+      }
       const text = decryptMessage(m.body_enc);
       let author = null;
       try { author = await fetchProfile(m.sender_steam_id); } catch (_) {}
@@ -3069,6 +3100,7 @@ async function handleApi(req, res, pathname, query) {
     if (!isSiteUserId(other)) return sendJson(res, 400, { ok: false, error: 'invalid-user-id' });
 
     if (req.method === 'POST' && action === 'request') {
+      if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
       const r = db.sendFriendRequest(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       db.logEvent('friend-request', me, { other });
@@ -3211,7 +3243,7 @@ async function handleApi(req, res, pathname, query) {
         let attachment = null;
         if (!isDeleted && m.attachment_enc) {
           try { attachment = JSON.parse(decryptMessage(m.attachment_enc)); } catch (_) {}
-          if (attachment) attachment = await hydrateAttachment(attachment);
+          if (attachment) attachment = await hydrateAttachment(attachment, { sharedBy: m.sender_steam_id, conversation: [me, other] });
         }
         messages.push({
           id: m.id, from_me: m.sender_steam_id === me,
@@ -3249,11 +3281,13 @@ async function handleApi(req, res, pathname, query) {
       const attachment = body.attachment && typeof body.attachment === 'object' ? sanitizeAttachment(body.attachment) : null;
       if (!text && !attachment) return sendJson(res, 400, { ok: false, error: 'empty' });
       if (text.length > 2000) return sendJson(res, 400, { ok: false, error: 'too-long' });
+      const attCheck = validateMessageAttachment(attachment, me, other);
+      if (!attCheck.ok) return sendJson(res, 400, { ok: false, error: attCheck.error });
       const enc = encryptMessage(text);
       const attEnc = attachment ? encryptMessage(JSON.stringify(attachment)) : null;
       const saved = db.insertMessage(me, other, enc, attEnc);
       db.logEvent('message-send', me, { to: other, attachment_type: attachment?.type });
-      const hydratedAtt = attachment ? await hydrateAttachment(attachment) : null;
+      const hydratedAtt = attachment ? await hydrateAttachment(attachment, { sharedBy: me, conversation: [me, other] }) : null;
 
       // Realtime push. Recipient sees the message instantly; sender's other
       // tabs/devices also get it so they stay in sync.
