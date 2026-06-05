@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.13.0';
+const APP_VERSION = 'v50.14.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -1888,7 +1888,7 @@ async function handleApi(req, res, pathname, query) {
     for (const n of rows) {
       let actor = null;
       if (n.actor_steam_id) {
-        try { actor = await fetchProfile(n.actor_steam_id); } catch (_) {}
+        actor = await profileForSiteUser(n.actor_steam_id, { refreshSteam: isSteamId(n.actor_steam_id) }).catch(() => null);
       }
       let data = null;
       if (n.data_json) { try { data = JSON.parse(n.data_json); } catch (_) {} }
@@ -1897,9 +1897,9 @@ async function handleApi(req, res, pathname, query) {
         actor: actor ? {
           steam_id: n.actor_steam_id,
           name: actor.personaname || n.actor_steam_id,
-          avatar: actor.avatar || null,
+          avatar: actor.avatar || actor.avatarfull || null,
           role: db.getUserRole(n.actor_steam_id)
-        } : (n.actor_steam_id ? { steam_id: n.actor_steam_id, name: n.actor_steam_id } : null),
+        } : (n.actor_steam_id ? { steam_id: n.actor_steam_id, name: isTelegramUserId(n.actor_steam_id) ? 'Telegram-пользователь' : n.actor_steam_id } : null),
         created_at: n.created_at,
         read: !!n.read_at
       });

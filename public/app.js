@@ -1,4 +1,4 @@
-// public/app.js
+﻿// public/app.js
 // SOKOLENOK shared frontend logic.
 // All API calls go through `api`, all DOM helpers through `$/$$`, toasts via `toast.*`.
 // Page-specific code lives in DOMContentLoaded handlers gated by page id.
@@ -75,6 +75,12 @@ function isSteamId(id) {
 
 function isSiteUserId(id) {
   return isSteamId(id) || /^tg:\d+$/.test(String(id || ''));
+}
+
+function publicUserName(user, fallback = 'Telegram-пользователь') {
+  const raw = String(user?.name || user?.personaname || user?.persona_name || user?.steam_id || user?.steamid || '').trim();
+  if (!raw || /^tg:\d+$/.test(raw)) return fallback;
+  return raw;
 }
 
 // ============ first-party conversion tracking ============
@@ -8017,6 +8023,7 @@ async function pageNotifications() {
 function buildNotificationRow(n) {
   const actor = n.actor || {};
   const data = n.data || {};
+  const actorName = publicUserName(actor, 'Telegram-пользователь');
   let icon = '🔔', text = '', href = '#';
   if (n.kind === 'post_like') {
     icon = '❤️';
@@ -8048,14 +8055,14 @@ function buildNotificationRow(n) {
   const ava = el('div', { class: 'notif-ava' });
   if (actor.avatar) {
     const img = el('img', { src: actor.avatar, alt: '' });
-    img.onerror = function() { this.remove(); ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase(); };
+    img.onerror = function() { this.remove(); ava.textContent = actorName.slice(0, 1).toUpperCase(); };
     ava.appendChild(img);
-  } else ava.textContent = (actor.name || '?').slice(0, 1).toUpperCase();
+  } else ava.textContent = actorName.slice(0, 1).toUpperCase();
   row.appendChild(ava);
 
   const body = el('div', { class: 'notif-body' });
   const head = el('div', { class: 'notif-head' },
-    el('strong', { class: 'notif-actor' }, actor.name || actor.steam_id || 'Кто-то'),
+    el('strong', { class: 'notif-actor' }, actorName),
     actor.role ? roleBadge(actor.role) : null,
     el('span', { class: 'notif-icon' }, ' ' + icon),
     el('span', { class: 'notif-text' }, ' ' + text)
@@ -8725,3 +8732,4 @@ function initCookieBanner() {
 // Expose for debugging
 window.SOK = { api, toast, $, $$, el, steamLogin };
 })();
+

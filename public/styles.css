@@ -4235,6 +4235,9 @@ body.large-font .post-act svg { transform: scale(1.1); }
   border-bottom: 0;
   margin-bottom: 4px;
 }
+.notif-popover .notif-head {
+  overflow-wrap: anywhere;
+}
 .notif-popover-loading,
 .notif-popover-empty,
 .friends-search-empty {
@@ -4469,6 +4472,32 @@ body.large-font .post-act svg { transform: scale(1.1); }
   .top-avatar {
     width: 40px;
     height: 40px;
+  }
+
+  .top-notif-wrap {
+    position: static;
+  }
+
+  .notif-popover {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: calc(72px + env(safe-area-inset-top, 0px));
+    width: auto;
+    max-width: none;
+    max-height: min(70vh, calc(100svh - 160px));
+    padding: 8px;
+    border-radius: 14px;
+  }
+
+  .notif-popover .notif-row {
+    padding: 11px 12px;
+    gap: 10px;
+  }
+
+  .notif-popover .notif-ava {
+    width: 36px;
+    height: 36px;
   }
 
   .friends-search-form {
