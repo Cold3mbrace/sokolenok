@@ -12,7 +12,7 @@
   <title>Профиль игрока · SOKOLENOK</title>
   <!--OG-->
   <link rel="icon" href="/assets/logo-icon-dark.png" type="image/png">
-  <link rel="stylesheet" href="/styles.css?v=1780237108">
+  <link rel="stylesheet" href="/styles.css?v=50.11">
   <style>
     .lk-grid {
       display: grid;
@@ -41,51 +41,40 @@
     <div class="eyebrow"><span class="dot"></span>Просмотр публичного профиля</div>
 
     <h1 class="page-title" id="lk-title">Профиль игрока</h1>
-    <p class="page-sub">Публичные данные Steam + Faceit. Что нужно для быстрой проверки в катке.</p>
+    <p class="page-sub">Публичные данные Steam + Faceit. Всё нужное для быстрой проверки в катке.</p>
 
-    <!-- Trust banner — JS fills with red/yellow/green summary -->
     <div id="lk-trust"></div>
 
     <div class="lk-grid">
-      <!-- LEFT: profile card + reputation -->
       <div class="lk-left">
         <div id="lk-profile">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем профиль…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем профиль...</div></div>
         </div>
-        <!-- Social actions (friend / message / block) -->
         <div id="lk-social" style="margin-top:16px"></div>
-        <!-- Reputation block (under profile) -->
         <div id="lk-reputation" style="margin-top:16px"></div>
         <div id="lk-friends" style="margin-top:16px"></div>
       </div>
 
-      <!-- RIGHT: stats + inventory KPIs + tables -->
       <div class="lk-right">
         <div id="lk-stats-kpis">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем статистику Steam…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем статистику Steam...</div></div>
         </div>
         <div id="lk-inv-kpis">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем инвентарь…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем инвентарь...</div></div>
         </div>
         <div class="lk-three" id="lk-tables">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Карты…</div></div>
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Оружие…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Карты...</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Оружие...</div></div>
         </div>
         <div id="lk-top">
-          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Топ-предметы…</div></div>
+          <div class="card"><div class="loading-inline"><div class="spinner sm"></div>Топ-предметы...</div></div>
         </div>
+        <div id="lk-faceit"></div>
       </div>
     </div>
 
-    <!-- Full-width Faceit section below the grid -->
-    <div id="lk-faceit" style="margin-top:16px"></div>
-
-    <!-- Full-width Leetify section (only renders if data available) -->
     <div id="lk-leetify" style="margin-top:16px"></div>
-
-    <!-- Activity feed (posts + comments authored by this user) -->
     <div id="lk-activity" style="margin-top:16px"></div>
-
   </main>
 </div>
 
