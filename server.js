@@ -182,7 +182,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.15.0';
+const APP_VERSION = 'v50.16.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -3727,4 +3727,5 @@ server.listen(PORT, () => {
   console.log(`Telegram bot:    ${TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_BOT_USERNAME || 'username NOT SET'})` : 'NOT SET (Telegram login disabled)'}`);
   console.log(`WebSocket:       ${WebSocketServer ? 'enabled at /ws' : 'DISABLED (ws module not installed) — clients will use polling'}`);
 });
+
 

@@ -371,6 +371,8 @@ function showOnboardingTour() {
 //   - user has dismissed within the last 7 days
 //   - on iOS Safari outside PWA mode (push impossible there)
 async function maybeShowPushOptIn() {
+  // v50.16: PWA/Web Push is temporarily disabled while we isolate the iOS launch issue.
+  return;
   try {
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
     if (Notification.permission !== 'default') return; // granted → no need; denied → won't help
@@ -445,11 +447,15 @@ async function ensureServiceWorker() {
   if (!('serviceWorker' in navigator)) return null;
   if (_swRegistration) return _swRegistration;
   try {
-    _swRegistration = await navigator.serviceWorker.register('/sw.js?v=50.15', { scope: '/', updateViaCache: 'none' });
-    _swRegistration.update?.().catch(() => null);
-    return _swRegistration;
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map(r => r.unregister().catch(() => null)));
+    if (window.caches?.keys) {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter(k => /^sok-/.test(k)).map(k => caches.delete(k).catch(() => null)));
+    }
+    return null;
   } catch (e) {
-    console.warn('[sw] registration failed:', e?.message);
+    console.warn('[sw] reset failed:', e?.message);
     return null;
   }
 }
