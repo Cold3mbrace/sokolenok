@@ -37,6 +37,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const db = require('./storage/db');
 const wsHub = require('./lib/ws-hub');
+const { checkRate, clientIp } = require('./lib/rate-limit');
 let Canvas = null;
 try { Canvas = require('@napi-rs/canvas'); } catch (_) {
   console.warn('[og] @napi-rs/canvas not installed — profile previews use the logo fallback. Run: npm install');
@@ -183,7 +184,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v50.17.0';
+const APP_VERSION = 'v51.1.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -1681,6 +1682,20 @@ async function handleSteamOpenId(req, res, parsedUrl) {
     // verify the HMAC-SHA256 signature against our bot token — without this
     // anyone could forge a Telegram identity by faking query params.
     // https://core.telegram.org/widgets/login#checking-authorization
+
+    // Anti-abuse: cap callback attempts to 5 per IP per 5 minutes. Each
+    // SUCCESSFUL callback could create a new user, and a bot-farm using
+    // many TG numbers would otherwise burn through this endpoint freely.
+    // Legitimate users normally hit this once or twice — 5 is plenty.
+    {
+      const ip = clientIp(req);
+      const rl = checkRate('tg-callback-ip', ip, { windowMs: 5 * 60 * 1000, max: 5 });
+      if (!rl.ok) {
+        res.setHeader('Retry-After', String(rl.retryAfter));
+        return redirect(res, '/?auth=tg-too-many');
+      }
+    }
+
     if (!TELEGRAM_BOT_TOKEN) {
       return redirect(res, '/?auth=tg-not-configured');
     }
@@ -1866,6 +1881,16 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+    // Cap uploads: 20/hour/user. Each upload is up to 5MB, so worst case is
+    // 100MB/h disk burn per user — still painful but bounded. Reasonable
+    // uploaders (posting 6-image threads) need maybe 6-12 per session.
+    {
+      const rl = checkRate('upload', me, { windowMs: 60 * 60 * 1000, max: 20 });
+      if (!rl.ok) {
+        res.setHeader('Retry-After', String(rl.retryAfter));
+        return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+      }
+    }
     let buf;
     try { buf = await readBodyBuffer(req, MAX_UPLOAD_BYTES + 64 * 1024); }
     catch (e) { return sendJson(res, 413, { ok: false, error: 'too-large' }); }
@@ -2176,6 +2201,17 @@ async function handleApi(req, res, pathname, query) {
 
   // Search players by persona name (among users who logged in here at least once)
   if (pathname === '/api/search') {
+    // Per-IP throttle. Live-suggest sends queries on every keystroke after
+    // a debounce, so 60/min covers ~1/s of typing comfortably. Scrapers
+    // walking the user/posts index will hit this cap quickly.
+    {
+      const ip = clientIp(req);
+      const rl = checkRate('search-ip', ip, { windowMs: 60 * 1000, max: 60 });
+      if (!rl.ok) {
+        res.setHeader('Retry-After', String(rl.retryAfter));
+        return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+      }
+    }
     const q = (query.get('q') || '').trim();
     const kind = query.get('kind') || 'all';
     if (q.length < 2) return sendJson(res, 200, { ok: true, users: [], posts: [], publics: [], results: [] });
@@ -2453,6 +2489,17 @@ async function handleApi(req, res, pathname, query) {
   // Unified feed: official CS2 news (virtual public "official") + posts from publics
   // the user is subscribed to. Anonymous users see official news only.
   if (pathname === '/api/feed') {
+    // Per-IP throttle. The feed is one of our heaviest endpoints (joins,
+    // attached stats, news cache). 120/min covers comfortable polling +
+    // human refreshing, blocks scrapers walking the timeline.
+    {
+      const ip = clientIp(req);
+      const rl = checkRate('feed-ip', ip, { windowMs: 60 * 1000, max: 120 });
+      if (!rl.ok) {
+        res.setHeader('Retry-After', String(rl.retryAfter));
+        return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+      }
+    }
     const me = getRequestSteamId(req);
     const scope = query.get('scope') || 'all'; // 'all' | 'subs' | 'official' | 'hot'
     const items = [];
@@ -2722,6 +2769,17 @@ async function handleApi(req, res, pathname, query) {
     const me = getRequestSteamId(req);
     if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
     if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+    // Anti-spam: cap at 10 posts/hour per user (covers legitimate burst for
+    // community admins posting a thread, blocks bots). Mods/admins aren't
+    // exempt: if someone wants to spam SOKOLENOK OFFICIAL with 50 posts/h,
+    // that's bad UX even for legitimate users.
+    {
+      const rl = checkRate('post-create', me, { windowMs: 60 * 60 * 1000, max: 10 });
+      if (!rl.ok) {
+        res.setHeader('Retry-After', String(rl.retryAfter));
+        return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+      }
+    }
     const body = await readJsonBody(req);
     const public_id = String(body.public_id || '').trim();
     const pub = db.getPublic(public_id);
@@ -2791,6 +2849,16 @@ async function handleApi(req, res, pathname, query) {
       if (req.method === 'POST') {
         if (!me) return sendJson(res, 401, { ok: false, error: 'not-authenticated' });
         if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+        // Anti-spam: 30 comments/hour/user. Heated discussions can hit 10-15
+        // legitimately, 30 is plenty. Each comment also notifies the post
+        // author — without this cap bots could nuke notification feeds.
+        {
+          const rl = checkRate('comment-create', me, { windowMs: 60 * 60 * 1000, max: 30 });
+          if (!rl.ok) {
+            res.setHeader('Retry-After', String(rl.retryAfter));
+            return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+          }
+        }
         const body = await readJsonBody(req);
         const text = String(body.body || '').trim();
         if (!text) return sendJson(res, 400, { ok: false, error: 'empty' });
@@ -3133,6 +3201,17 @@ async function handleApi(req, res, pathname, query) {
 
     if (req.method === 'POST' && action === 'request') {
       if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
+      // Anti-spam: cap outgoing friend requests at 30/hour. A real user
+      // adding friends rarely sends more than 5-10/h. Friend-request spam
+      // is annoying because each one creates a notification on the
+      // recipient side — the bot net could DDoS notification panels.
+      {
+        const rl = checkRate('friend-request', me, { windowMs: 60 * 60 * 1000, max: 30 });
+        if (!rl.ok) {
+          res.setHeader('Retry-After', String(rl.retryAfter));
+          return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+        }
+      }
       const r = db.sendFriendRequest(me, other);
       if (r.error) return sendJson(res, 400, { ok: false, error: r.error });
       db.logEvent('friend-request', me, { other });
@@ -3306,6 +3385,22 @@ async function handleApi(req, res, pathname, query) {
     if (req.method === 'POST') {
       if (db.isUserBanned(me)) return sendJson(res, 403, { ok: false, error: 'banned' });
       if (db.eitherBlocked(me, other)) return sendJson(res, 403, { ok: false, error: 'blocked' });
+      // Anti-spam: cap message sending per minute. 30/min = 1 every 2 seconds,
+      // which is faster than any real typist. Bots blasting friend lists
+      // will hit this immediately. Per-pair limit catches a single bad actor
+      // hammering one victim even within budget.
+      {
+        const rl = checkRate('msg-send', me, { windowMs: 60 * 1000, max: 30 });
+        if (!rl.ok) {
+          res.setHeader('Retry-After', String(rl.retryAfter));
+          return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rl.retryAfter });
+        }
+        const rlPair = checkRate('msg-send-pair', `${me}->${other}`, { windowMs: 60 * 1000, max: 15 });
+        if (!rlPair.ok) {
+          res.setHeader('Retry-After', String(rlPair.retryAfter));
+          return sendJson(res, 429, { ok: false, error: 'rate-limited', retry_after: rlPair.retryAfter });
+        }
+      }
       // Friends-only rule applies to regular users. Moderators and the
       // superadmin can DM anyone — they're handling support, abuse reports,
       // and ban appeals where there's no pre-existing friendship.

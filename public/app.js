@@ -103,6 +103,16 @@ const api = {
     const res = await fetch(path, { credentials: 'same-origin', ...opts });
     let body = null;
     try { body = await res.json(); } catch (_) {}
+    // Surface 429 as a friendly toast — otherwise users see actions silently
+    // fail and think the site is broken. The toast helper may not be loaded
+    // yet on landing, so guard with a typeof check.
+    if (res.status === 429 && typeof toast !== 'undefined' && toast?.err) {
+      const retry = body?.retry_after || 60;
+      const mins = Math.ceil(retry / 60);
+      toast.err(mins > 1
+        ? `Слишком быстро. Попробуй через ${mins} мин.`
+        : 'Слишком быстро. Подожди немного.');
+    }
     if (!res.ok && !body) throw new Error(`HTTP ${res.status}`);
     return body;
   },
@@ -1522,7 +1532,8 @@ async function pageIndex() {
       'tg-not-configured': 'Telegram-вход временно недоступен.',
       'tg-bad-callback': 'Telegram прислал некорректные данные. Попробуй ещё раз.',
       'tg-bad-signature': 'Не удалось проверить подпись Telegram. Попробуй ещё раз.',
-      'tg-stale': 'Истёк срок действия ссылки от Telegram. Войди заново.'
+      'tg-stale': 'Истёк срок действия ссылки от Telegram. Войди заново.',
+      'tg-too-many': 'Слишком много попыток входа. Подожди 5 минут и попробуй снова.'
     };
     const msg = msgMap[authErr] || 'Не удалось войти. Попробуй ещё раз.';
     const banner = el('div', { class: 'alert alert-error' },
