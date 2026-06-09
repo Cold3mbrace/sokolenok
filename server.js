@@ -184,7 +184,7 @@ function ensureVapidKeys() {
 ensureVapidKeys();
 
 // ---------- config ----------
-const APP_VERSION = 'v51.1.0';
+const APP_VERSION = 'v51.3.0';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -229,6 +229,36 @@ function isTelegramUserId(id) {
 
 function isSiteUserId(id) {
   return isSteamId(id) || isTelegramUserId(id);
+}
+
+// When someone registers, subscribe them to the official public(s) so their
+// feed isn't empty on first visit. Best-effort: if the public ID doesn't
+// exist (renamed/deleted), silently skip — registration must not fail.
+// Order: hard-coded OFFICIAL public first, then any verified publics
+// (capped at 3 total to avoid overwhelming new users).
+const DEFAULT_OFFICIAL_PUBLIC_ID = 'sokolenok-official-1br8q';
+
+function autoSubscribeNewUser(userId) {
+  if (!userId) return;
+  const subscribed = new Set();
+  try {
+    // 1. Try the canonical official public first.
+    if (db.getPublic && db.getPublic(DEFAULT_OFFICIAL_PUBLIC_ID)) {
+      db.subscribe(userId, DEFAULT_OFFICIAL_PUBLIC_ID);
+      subscribed.add(DEFAULT_OFFICIAL_PUBLIC_ID);
+    }
+    // 2. Top up with any other verified publics (skip ones already added).
+    if (db.listPublics) {
+      const publics = db.listPublics();
+      const verified = publics.filter(p => p.verified && !subscribed.has(p.id)).slice(0, 2);
+      for (const p of verified) {
+        db.subscribe(userId, p.id);
+        subscribed.add(p.id);
+      }
+    }
+  } catch (e) {
+    console.warn('[auto-sub] non-fatal error for', userId, e?.message);
+  }
 }
 
 function localProfileFromUser(id) {
@@ -1661,6 +1691,8 @@ async function handleSteamOpenId(req, res, parsedUrl) {
       return redirect(res, '/settings?auth=steam-bound');
     }
 
+    // Is this a brand-new Steam user (no prior auth_methods row)?
+    const wasExistingUser = !!db.findAuthMethod('steam', steamid);
     db.upsertUser(profile);
     // Record the Steam login as an auth method too, so this user can later
     // bind extra providers (Telegram) and we have a uniform view of identities.
@@ -1672,6 +1704,10 @@ async function handleSteamOpenId(req, res, parsedUrl) {
       external_avatar: profile.avatar || profile.avatarfull || null,
       verified: true
     });
+    if (!wasExistingUser) {
+      autoSubscribeNewUser(steamid);
+      db.logEvent('register', steamid, { provider: 'steam' });
+    }
     const { token } = db.createSession(steamid);
     setSessionCookie(res, token);
     db.logEvent('login', steamid, { source: profile.source, provider: 'steam' });
@@ -1778,6 +1814,7 @@ async function handleSteamOpenId(req, res, parsedUrl) {
         verified: true
       });
       db.logEvent('register', userId, { provider: 'telegram', tg_username: tgUsername });
+      autoSubscribeNewUser(userId);
     }
     const { token } = db.createSession(userId);
     setSessionCookie(res, token);

@@ -1554,6 +1554,20 @@ async function pageIndex() {
   // Loads top 6 recent items from /api/feed?scope=all (works without auth).
   // If feed is empty (fresh install / network issue), the section hides itself.
   mountRecentFeedPreview();
+
+  // "Back to top" floating button. Visible only after the user scrolls past
+  // the hero — replaces the old static down-chevron that confused everyone.
+  const topBtn = document.getElementById('scrollTopBtn');
+  if (topBtn) {
+    const onScroll = () => {
+      topBtn.classList.toggle('is-visible', window.scrollY > 600);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    topBtn.addEventListener('click', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    onScroll();
+  }
 }
 
 async function mountRecentFeedPreview() {
@@ -5233,7 +5247,34 @@ async function pageFeed() {
 
   const loadFeed = async () => {
     const list = $('#feed-list');
-    if (list) list.innerHTML = '<div class="card"><div class="loading-inline"><div class="spinner sm"></div>Загружаем ленту…</div></div>';
+    if (list) {
+      // Skeleton placeholder cards — gives a sense of layout and speed while
+      // the real feed loads. 3 cards approximate the first viewport.
+      list.innerHTML =
+        '<div class="feed-skel-card">' +
+          '<div class="skel-head"><div class="sok-skel skel-avatar"></div>' +
+            '<div class="skel-meta"><div class="sok-skel skel-meta-line"></div>' +
+              '<div class="sok-skel skel-meta-line short"></div></div></div>' +
+          '<div class="sok-skel skel-title"></div>' +
+          '<div class="sok-skel skel-body"></div>' +
+          '<div class="sok-skel skel-body last"></div>' +
+        '</div>' +
+        '<div class="feed-skel-card">' +
+          '<div class="skel-head"><div class="sok-skel skel-avatar"></div>' +
+            '<div class="skel-meta"><div class="sok-skel skel-meta-line"></div>' +
+              '<div class="sok-skel skel-meta-line short"></div></div></div>' +
+          '<div class="sok-skel skel-title"></div>' +
+          '<div class="sok-skel skel-body"></div>' +
+        '</div>' +
+        '<div class="feed-skel-card">' +
+          '<div class="skel-head"><div class="sok-skel skel-avatar"></div>' +
+            '<div class="skel-meta"><div class="sok-skel skel-meta-line"></div>' +
+              '<div class="sok-skel skel-meta-line short"></div></div></div>' +
+          '<div class="sok-skel skel-title"></div>' +
+          '<div class="sok-skel skel-body"></div>' +
+          '<div class="sok-skel skel-body last"></div>' +
+        '</div>';
+    }
     try {
       const r = await api.feed(state.scope);
       paintFeedList(r);
@@ -5495,6 +5536,19 @@ function buildPostFooter(item, me) {
     isLiked = !isLiked;
     likeCount += isLiked ? 1 : -1;
     renderHeart();
+    // Micro-animation: heart pulses + counter bumps when *adding* a like.
+    // No animation on unlike to avoid drawing attention to the negative action.
+    if (!wasLiked) {
+      heart.classList.remove('liked-pulse');
+      void heart.offsetWidth;
+      heart.classList.add('liked-pulse');
+      const nEl = heart.querySelector('.post-act-n');
+      if (nEl) {
+        nEl.classList.remove('bumped');
+        void nEl.offsetWidth;
+        nEl.classList.add('bumped');
+      }
+    }
     heart.disabled = true;
     const r = await (wasLiked ? api.unlikePost(item.post_id) : api.likePost(item.post_id)).catch(() => ({ ok: false }));
     if (r.ok) {
@@ -5782,13 +5836,70 @@ function buildFeedEmpty(scope) {
   card.appendChild(el('div', { class: 'feed-empty-title' }, title));
   card.appendChild(el('div', { class: 'feed-empty-desc' }, desc));
   if (cta) card.appendChild(cta);
+
+  // Recommended publics: append a horizontal list of 5 publics below the
+  // empty message so the user has somewhere to go. We always show this for
+  // `subs` (most useful: user has no subs); also for `all` because if the
+  // global feed is empty the user almost certainly isn't subscribed yet.
+  // Loaded async — empty card paints immediately, recommendations slot in.
+  if (scope === 'subs' || scope === 'all') {
+    const recoSlot = el('div', { class: 'feed-empty-reco' });
+    card.appendChild(recoSlot);
+    loadRecommendedPublicsInto(recoSlot).catch(() => recoSlot.remove());
+  }
   return card;
+}
+
+// Fetches recommended publics and renders chips with a Subscribe button each.
+// On subscribe click → button becomes "Подписан" and the next feed reload
+// will surface that public's posts.
+async function loadRecommendedPublicsInto(slot) {
+  let publics = [];
+  try {
+    const r = await api.publics().catch(() => null);
+    publics = (r?.publics || []).filter(p => p.verified || (p.subscriber_count || 0) > 0);
+  } catch (_) { return; }
+  if (!publics.length) { slot.remove(); return; }
+  publics = publics.slice(0, 5);
+
+  slot.appendChild(el('div', { class: 'feed-empty-reco-h' }, 'Попробуйте подписаться:'));
+  const row = el('div', { class: 'feed-empty-reco-row' });
+  for (const p of publics) {
+    const chip = el('div', { class: 'feed-empty-reco-chip' });
+    chip.appendChild(el('a', { href: `/communities/${encodeURIComponent(p.id)}`, class: 'feed-empty-reco-link' },
+      p.avatar ? el('img', { src: p.avatar, alt: '', class: 'feed-empty-reco-avatar' }) : el('div', { class: 'feed-empty-reco-avatar fallback' }, (p.name || '?')[0].toUpperCase()),
+      el('div', { class: 'feed-empty-reco-name' }, p.name)
+    ));
+    const subBtn = el('button', { class: 'btn btn-sm btn-primary', type: 'button' }, 'Подписаться');
+    subBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      subBtn.disabled = true; subBtn.textContent = '…';
+      const r = await api.subscribePublic(p.id).catch(() => ({ ok: false }));
+      if (r.ok) {
+        subBtn.textContent = '✓ Подписан';
+        subBtn.classList.remove('btn-primary');
+        subBtn.classList.add('btn-ghost');
+      } else {
+        subBtn.disabled = false; subBtn.textContent = 'Подписаться';
+        toast?.err?.('Не удалось подписаться');
+      }
+    });
+    chip.appendChild(subBtn);
+    row.appendChild(chip);
+  }
+  slot.appendChild(row);
 }
 
 function paintFeedList(r) {
   const root = $('#feed-list');
   if (!root) return;
   root.innerHTML = '';
+  // Re-trigger entrance animation by toggling the class.
+  // Pattern: remove first, force a reflow with offsetHeight, then add — without
+  // the reflow Chrome merges the changes and the animation doesn't restart.
+  root.classList.remove('anim-list');
+  void root.offsetHeight;
+  root.classList.add('anim-list');
 
   const items = r?.items || [];
   if (!items.length) {
@@ -8023,7 +8134,7 @@ async function pageNotifications() {
     ));
     return;
   }
-  const list = el('div', { class: 'notif-list' });
+  const list = el('div', { class: 'notif-list anim-list' });
   for (const n of r.notifications) list.appendChild(buildNotificationRow(n));
   body.appendChild(list);
   // Now that we've delivered them, server marked them read — refresh badges
